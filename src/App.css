@@ -2540,11 +2540,8 @@ body.is-resizing-sidebar .app-shell {
 }
 
 .onboarding-header {
+  justify-content: flex-end;
   border-bottom: 1px solid var(--line);
-}
-
-.onboarding-shell.has-overlay-titlebar .onboarding-header {
-  padding-left: max(var(--macos-titlebar-leading-inset), clamp(24px, 4vw, 58px));
 }
 
 .onboarding-header > span,
@@ -2576,6 +2573,7 @@ body.is-resizing-sidebar .app-shell {
 }
 
 .onboarding-main {
+  position: relative;
   display: grid;
   min-height: 0;
   place-items: center;
@@ -2583,11 +2581,35 @@ body.is-resizing-sidebar .app-shell {
   padding: 36px;
 }
 
+.onboarding-body {
+  width: min(880px, 100%);
+}
+
+.onboarding-body.auth-code-active {
+  width: min(960px, 100%);
+}
+
+.onboarding-brand {
+  position: absolute;
+  z-index: 1;
+  top: 36px;
+  left: 36px;
+  display: flex;
+  min-height: 23px;
+  align-items: center;
+}
+
+.onboarding-brand .brand-identity strong {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
 .setup-card {
   position: relative;
   display: grid;
   grid-template-columns: minmax(340px, 1.55fr) minmax(240px, 0.8fr);
-  width: min(880px, 100%);
+  width: 100%;
   min-height: 500px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--signal) 13%, var(--line-strong));
@@ -2600,7 +2622,6 @@ body.is-resizing-sidebar .app-shell {
 
 .setup-card.auth-code-active {
   grid-template-columns: minmax(400px, 1.5fr) minmax(300px, 0.95fr);
-  width: min(960px, 100%);
 }
 
 .setup-card::before {
@@ -5490,6 +5511,7 @@ body.is-resizing-sidebar .app-shell {
   }
 
   .onboarding-main { padding: 18px; }
+  .onboarding-brand { top: 18px; left: 18px; }
   .setup-card, .setup-card.auth-code-active { grid-template-columns: 1fr; min-height: auto; }
   .setup-copy { min-height: 430px; padding-inline: 38px; }
   .setup-side { margin-top: 0; border-top: 1px solid var(--line); border-left: 0; }
