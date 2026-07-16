@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -20,7 +21,6 @@ type IconName =
   | "arrow-right"
   | "arrow-down"
   | "arrow-up"
-  | "bolt"
   | "branch"
   | "check"
   | "chevron-down"
@@ -63,6 +63,35 @@ interface Connection {
   workingDirectory: string;
   cliVersion: string;
   approvalMode: ApprovalMode;
+  models: SessionModelState | null;
+}
+
+interface SessionModelState {
+  currentModelId: string;
+  availableModels: ModelInfo[];
+}
+
+interface ModelInfo {
+  modelId: string;
+  name: string;
+  description?: string | null;
+  _meta?: ModelMetadata | null;
+}
+
+interface ModelMetadata {
+  totalContextTokens?: number | null;
+  agentType?: string | null;
+  supportsReasoningEffort?: boolean | null;
+  reasoningEffort?: string | null;
+  reasoningEfforts?: ReasoningEffortInfo[] | null;
+}
+
+interface ReasoningEffortInfo {
+  id: string;
+  value: string;
+  label: string;
+  description?: string | null;
+  default?: boolean;
 }
 
 interface PromptResult {
@@ -127,11 +156,28 @@ interface ConversationMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
+  startedAt?: number;
+  elapsedMs?: number;
   thought?: string;
+  thoughtActive?: boolean;
+  thoughtStartedAt?: number;
+  thoughtElapsedMs?: number;
   tools?: ToolActivity[];
   plan?: PlanEntry[];
   state?: "streaming" | "complete" | "cancelled" | "error";
   error?: string;
+}
+
+interface SidebarSessionSummary {
+  sessionId: string;
+  title: string;
+  workspace: string | null;
+  running: boolean;
+}
+
+interface SidebarWorkspaceGroup {
+  path: string;
+  sessions: SidebarSessionSummary[];
 }
 
 interface AppUpdateInfo {
@@ -139,6 +185,49 @@ interface AppUpdateInfo {
   version: string;
   body: string | null;
   date: string | null;
+}
+
+function finishThought(message: ConversationMessage, endedAt: number) {
+  if (!message.thoughtActive || message.thoughtStartedAt === undefined) {
+    return { ...message, thoughtActive: false, thoughtStartedAt: undefined };
+  }
+
+  return {
+    ...message,
+    thoughtActive: false,
+    thoughtStartedAt: undefined,
+    thoughtElapsedMs: (message.thoughtElapsedMs ?? 0) + Math.max(0, endedAt - message.thoughtStartedAt),
+  };
+}
+
+function finishRun(message: ConversationMessage, endedAt: number) {
+  const finished = finishThought(message, endedAt);
+  return {
+    ...finished,
+    elapsedMs: message.startedAt === undefined ? undefined : Math.max(0, endedAt - message.startedAt),
+  };
+}
+
+function formatDuration(elapsedMs: number) {
+  const safeElapsedMs = Math.max(0, elapsedMs);
+  const totalSeconds = Math.floor(safeElapsedMs / 1000);
+  if (totalSeconds < 10) return `${(safeElapsedMs / 1000).toFixed(1)}s`;
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m${seconds}s`;
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60}m`;
+}
+
+function formatThoughtDuration(elapsedMs: number) {
+  const totalSeconds = Math.max(0, elapsedMs) / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}m${(totalSeconds - minutes * 60).toFixed(0)}s`;
 }
 
 interface AppUpdateProgress {
@@ -179,6 +268,18 @@ const APPROVAL_MODES: ApprovalModeOption[] = [
 
 const approvalModeOption = (mode: ApprovalMode) =>
   APPROVAL_MODES.find((option) => option.id === mode) ?? APPROVAL_MODES[0];
+
+function currentModel(models: SessionModelState | null) {
+  if (!models) return null;
+  return models.availableModels.find((model) => model.modelId === models.currentModelId) ?? null;
+}
+
+function compactTokenCount(tokens: number | null | undefined) {
+  if (!tokens) return null;
+  if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(1))}m`;
+  if (tokens >= 1_000) return `${Number((tokens / 1_000).toFixed(0))}k`;
+  return String(tokens);
+}
 
 function enablesAlwaysApprove(option: PermissionOption | undefined) {
   if (!option || option.kind !== "allow_always") return false;
@@ -227,7 +328,6 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     "arrow-right": <><path d="m9 18 6-6-6-6" /><path d="M5 12h10" /></>,
     "arrow-down": <><path d="m6 9 6 6 6-6" /><path d="M12 5v10" /></>,
     "arrow-up": <><path d="m18 15-6-6-6 6" /><path d="M12 9v10" /></>,
-    bolt: <path d="m13 2-8 12h7l-1 8 8-12h-7l1-8Z" />,
     branch: <><circle cx="6" cy="5" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="6" cy="19" r="2" /><path d="M6 7v10M8 7c3 0 3-1 3-1h5M11 6v7c0 3-3 3-3 3" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     "chevron-down": <path d="m8 10 4 4 4-4" />,
@@ -279,6 +379,30 @@ function workspaceName(path: string | null) {
   if (!path) return "No workspace";
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts[parts.length - 1] ?? path;
+}
+
+function groupSidebarSessions(sessions: SidebarSessionSummary[]) {
+  const groups = new Map<string, SidebarSessionSummary[]>();
+  const ungrouped: SidebarSessionSummary[] = [];
+
+  sessions.forEach((session) => {
+    if (!session.workspace) {
+      ungrouped.push(session);
+      return;
+    }
+
+    const group = groups.get(session.workspace) ?? [];
+    group.push(session);
+    groups.set(session.workspace, group);
+  });
+
+  return {
+    workspaceGroups: Array.from(groups, ([path, groupedSessions]) => ({
+      path,
+      sessions: groupedSessions,
+    })),
+    ungrouped,
+  };
 }
 
 function cleanVersion(version: string | null) {
@@ -662,6 +786,189 @@ function ApprovalModeSelector({
   );
 }
 
+function ModelSelector({
+  connected,
+  models,
+  busy,
+  onLoad,
+  onChange,
+  onReasoningChange,
+}: {
+  connected: boolean;
+  models: SessionModelState | null;
+  busy: boolean;
+  onLoad: () => Promise<boolean>;
+  onChange: (modelId: string) => Promise<SessionModelState | null>;
+  onReasoningChange: (reasoningEffort: string) => Promise<SessionModelState | null>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [changingModelId, setChangingModelId] = useState<string | null>(null);
+  const [changingReasoningEffort, setChangingReasoningEffort] = useState<string | null>(null);
+  const root = useRef<HTMLDivElement | null>(null);
+  const selected = currentModel(models);
+  const reasoningEffort = selected?._meta?.reasoningEffort;
+  const reasoningEfforts = selected?._meta?.supportsReasoningEffort === false
+    ? []
+    : selected?._meta?.reasoningEfforts ?? [];
+  const selectedReasoning = reasoningEfforts.find((effort) =>
+    effort.id === reasoningEffort || effort.value === reasoningEffort
+  );
+  const reasoningLabel = selectedReasoning?.label.replace(/\s+Effort$/i, "") ?? reasoningEffort;
+  const contextTokens = compactTokenCount(selected?._meta?.totalContextTokens);
+  const changing = changingModelId !== null || changingReasoningEffort !== null;
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (busy) setOpen(false);
+  }, [busy]);
+
+  async function toggleMenu() {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    if (!connected) {
+      setLoading(true);
+      const loaded = await onLoad();
+      setLoading(false);
+      if (!loaded) return;
+    }
+    setOpen(true);
+  }
+
+  async function selectModel(modelId: string) {
+    if (modelId === models?.currentModelId) {
+      setOpen(false);
+      return;
+    }
+    setChangingModelId(modelId);
+    const nextModels = await onChange(modelId);
+    setChangingModelId(null);
+    if (nextModels) setOpen(false);
+  }
+
+  async function selectReasoningEffort(effort: ReasoningEffortInfo) {
+    if (effort.value === reasoningEffort || effort.id === reasoningEffort) return;
+    setChangingReasoningEffort(effort.value);
+    const nextModels = await onReasoningChange(effort.value);
+    setChangingReasoningEffort(null);
+    if (nextModels) setOpen(false);
+  }
+
+  return (
+    <div className="model-control" ref={root}>
+      <button
+        className="model-button"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`Model: ${selected?.name ?? "Grok Build default"}${reasoningLabel ? `, reasoning: ${reasoningLabel}` : ""}`}
+        disabled={busy || loading || changing}
+        onClick={() => void toggleMenu()}
+      >
+        <span>{loading ? "Starting Grok Build…" : selected?.name ?? "Grok Build"}</span>
+        <span className="reasoning">· {reasoningLabel ?? (connected ? "ACP" : "default")}</span>
+        <Icon name="chevron-down" size={12} />
+      </button>
+
+      {open && (
+        <div className="approval-menu model-menu" role="dialog" aria-label="Grok Build model and reasoning settings">
+          <div className="approval-menu-heading">
+            <span>SESSION MODEL</span>
+            <small>Provided by Grok Build</small>
+          </div>
+          <div className="approval-menu-options" role="listbox" aria-label="Session model">
+            {models?.availableModels.map((model) => {
+              const isSelected = model.modelId === models.currentModelId;
+              const modelContext = compactTokenCount(model._meta?.totalContextTokens);
+              const modelEffort = model._meta?.reasoningEffort;
+              const metadata = [
+                modelEffort ? `${modelEffort} reasoning` : null,
+                modelContext ? `${modelContext} context` : null,
+              ].filter(Boolean).join(" · ");
+              return (
+                <button
+                  className="approval-option model-option"
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  disabled={changing}
+                  key={model.modelId}
+                  onClick={() => void selectModel(model.modelId)}
+                >
+                  <span className="approval-option-copy">
+                    <span><strong>{model.name}</strong>{isSelected && <em>Current</em>}</span>
+                    <small>{changingModelId === model.modelId ? "Switching model…" : model.description ?? model.modelId}</small>
+                    {metadata && <small className="model-metadata">{metadata}</small>}
+                  </span>
+                  {isSelected && <Icon name="check" size={15} />}
+                </button>
+              );
+            })}
+            {!models && (
+              <div className="model-unavailable">
+                <span><strong>Using Grok Build defaults</strong><small>This CLI session did not advertise model controls over ACP.</small></span>
+              </div>
+            )}
+          </div>
+          {reasoningEfforts.length > 0 && (
+            <>
+              <div className="model-section-heading">
+                <span>REASONING EFFORT</span>
+                <small>Quality and speed</small>
+              </div>
+              <div className="approval-menu-options reasoning-options" role="listbox" aria-label="Reasoning effort">
+                {reasoningEfforts.map((effort) => {
+                  const isSelected = effort.id === reasoningEffort || effort.value === reasoningEffort;
+                  return (
+                    <button
+                      className="approval-option reasoning-option"
+                      type="button"
+                      role="option"
+                      aria-selected={isSelected}
+                      disabled={changing}
+                      key={effort.id}
+                      onClick={() => void selectReasoningEffort(effort)}
+                    >
+                      <span className="approval-option-copy">
+                        <span><strong>{effort.label}</strong>{effort.default && <em>Default</em>}</span>
+                        <small>{changingReasoningEffort === effort.value ? "Changing reasoning effort…" : effort.description ?? effort.value}</small>
+                      </span>
+                      {isSelected && <Icon name="check" size={15} />}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+          <div className="approval-menu-note">
+            <span>{selected?.modelId ?? "Grok Build decides the model"}</span>
+            <small>{selected ? [reasoningLabel && `${reasoningLabel} reasoning`, contextTokens && `${contextTokens} token context`].filter(Boolean).join(" · ") : "Availability follows your Grok account and local configuration."}</small>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const overlayTitlebar = usesOverlayTitlebar();
   const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "" } : {};
@@ -689,6 +996,7 @@ function App() {
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
   const activeAssistantId = useRef<string | null>(null);
   const autoScrollEnabled = useRef(true);
@@ -698,6 +1006,17 @@ function App() {
 
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
   const appUpdating = updatePhase === "downloading";
+  const firstRequest = messages.find((message) => message.role === "user")?.text.trim();
+  const currentSidebarSession: SidebarSessionSummary | null = connection ? {
+    sessionId: connection.sessionId,
+    title: firstRequest || "New Grok task",
+    workspace: connection.workspace,
+    running,
+  } : null;
+  const groupedSidebarSessions = groupSidebarSessions(currentSidebarSession ? [currentSidebarSession] : []);
+  const workspaceGroups: SidebarWorkspaceGroup[] = workspace && !groupedSidebarSessions.workspaceGroups.some((group) => group.path === workspace)
+    ? [{ path: workspace, sessions: [] }, ...groupedSidebarSessions.workspaceGroups]
+    : groupedSidebarSessions.workspaceGroups;
 
   useEffect(() => {
     if (!overlayTitlebar) return;
@@ -761,6 +1080,15 @@ function App() {
   function toggleSidebar() {
     if (!sidebarCollapsed) setShowConnection(false);
     setSidebarCollapsed((current) => !current);
+  }
+
+  function toggleWorkspaceGroup(path: string) {
+    setCollapsedWorkspaces((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   }
 
   function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -879,13 +1207,18 @@ function App() {
         setMessages((current) => current.map((message) => {
           if (message.id !== messageId) return message;
           if (payload.kind === "agent_message_chunk") {
-            return { ...message, text: message.text + (payload.text ?? "") };
+            return { ...finishThought(message, Date.now()), text: message.text + (payload.text ?? "") };
           }
           if (payload.kind === "agent_thought_chunk") {
-            return { ...message, thought: (message.thought ?? "") + (payload.text ?? "") };
+            return {
+              ...message,
+              thought: (message.thought ?? "") + (payload.text ?? ""),
+              thoughtActive: true,
+              thoughtStartedAt: message.thoughtActive ? message.thoughtStartedAt ?? Date.now() : Date.now(),
+            };
           }
           if (payload.kind === "plan") {
-            return { ...message, plan: payload.entries ?? [] };
+            return { ...finishThought(message, Date.now()), plan: payload.entries ?? [] };
           }
           if (payload.kind === "tool_call" || payload.kind === "tool_call_update") {
             const id = payload.toolCallId ?? `tool-${message.tools?.length ?? 0}`;
@@ -899,12 +1232,19 @@ function App() {
             };
             if (index >= 0) tools[index] = nextTool;
             else tools.push(nextTool);
-            return { ...message, tools };
+            return { ...finishThought(message, Date.now()), tools };
           }
           return message;
         }));
       }),
       listen<PermissionRequest>("grok://permission-request", ({ payload }) => {
+        const messageId = activeAssistantId.current;
+        if (messageId) {
+          const endedAt = Date.now();
+          setMessages((current) => current.map((message) =>
+            message.id === messageId ? finishThought(message, endedAt) : message
+          ));
+        }
         setPermission(payload);
       }),
       listen<ConnectionEvent>("grok://connection", ({ payload }) => {
@@ -1113,6 +1453,35 @@ function App() {
     if (connection) await connect(workspace, false, nextMode);
   }
 
+  async function loadModels() {
+    const activeConnection = connection ?? await connect(workspace);
+    return activeConnection !== null;
+  }
+
+  async function changeModel(modelId: string) {
+    setConnectionNotice(null);
+    try {
+      const models = await invoke<SessionModelState>("grok_set_model", { modelId });
+      setConnection((active) => active ? { ...active, models } : active);
+      return models;
+    } catch (error) {
+      setConnectionNotice(String(error));
+      return null;
+    }
+  }
+
+  async function changeReasoningEffort(reasoningEffort: string) {
+    setConnectionNotice(null);
+    try {
+      const models = await invoke<SessionModelState>("grok_set_reasoning_effort", { reasoningEffort });
+      setConnection((active) => active ? { ...active, models } : active);
+      return models;
+    } catch (error) {
+      setConnectionNotice(String(error));
+      return null;
+    }
+  }
+
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = draft.trim();
@@ -1130,6 +1499,7 @@ function App() {
       id: makeMessageId("assistant"),
       role: "assistant",
       text: "",
+      startedAt: Date.now(),
       state: "streaming",
     };
     activeAssistantId.current = assistantMessage.id;
@@ -1140,10 +1510,11 @@ function App() {
 
     try {
       const result = await invoke<PromptResult>("grok_prompt", { prompt });
+      const endedAt = Date.now();
       setMessages((current) => current.map((message) =>
         message.id === assistantMessage.id
           ? {
-              ...message,
+              ...finishRun(message, endedAt),
               text: result.text || message.text,
               thought: result.thought || message.thought,
               state: "complete",
@@ -1151,9 +1522,10 @@ function App() {
           : message
       ));
     } catch (error) {
+      const endedAt = Date.now();
       setMessages((current) => current.map((message) =>
         message.id === assistantMessage.id
-          ? { ...message, state: "error", error: String(error) }
+          ? { ...finishRun(message, endedAt), state: "error", error: String(error) }
           : message
       ));
     } finally {
@@ -1176,8 +1548,9 @@ function App() {
     try {
       await invoke("grok_cancel");
       const messageId = activeAssistantId.current;
+      const endedAt = Date.now();
       setMessages((current) => current.map((message) =>
-        message.id === messageId ? { ...message, state: "cancelled" } : message
+        message.id === messageId ? { ...finishRun(message, endedAt), state: "cancelled" } : message
       ));
     } catch (error) {
       setConnectionNotice(String(error));
@@ -1286,23 +1659,50 @@ function App() {
             <Icon name="compose" /><span>New task</span>
           </button>
           <button type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"}>
-            <Icon name="folder-open" /><span>{workspace ? "Switch workspace" : "Add workspace"}</span>
+            <Icon name="folder-open" /><span>Open workspace</span>
           </button>
         </nav>
 
         <div className="project-scroll">
-          <p className="section-label">Workspace</p>
-          <div className="project-group">
-            <button className={`project-heading ${workspace ? "" : "empty-project"}`} type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"}>
-              <Icon name={workspace ? "folder" : "folder-open"} /><span>{workspace ? projectName : "Add a folder"}</span><Icon name={workspace ? "chevron-down" : "arrow-right"} size={14} />
-            </button>
-            {connection && <div className="task-list">
-              <button className="selected" type="button">
-                <span>{messages.find((message) => message.role === "user")?.text ?? "New Grok task"}</span>
-                {running && <span className="task-status" aria-label="Running" />}
-              </button>
-            </div>}
-          </div>
+          {workspaceGroups.length > 0 && <p className="section-label">Workspaces</p>}
+          {workspaceGroups.map((group) => {
+            const expanded = !collapsedWorkspaces.has(group.path);
+            return (
+              <section className="project-group" key={group.path}>
+                <button
+                  className="project-heading"
+                  type="button"
+                  aria-expanded={expanded}
+                  title={group.path}
+                  onClick={() => toggleWorkspaceGroup(group.path)}
+                >
+                  <Icon name="folder" />
+                  <span>{workspaceName(group.path)}</span>
+                  <Icon name="chevron-down" size={14} />
+                </button>
+                {expanded && group.sessions.length > 0 && (
+                  <div className="task-list">
+                    {group.sessions.map((session) => (
+                      <button className="selected" type="button" aria-current="page" key={session.sessionId}>
+                        <span>{session.title}</span>
+                        {session.running && <span className="task-status" aria-label="Running" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+            );
+          })}
+          {groupedSidebarSessions.ungrouped.length > 0 && (
+            <div className={`task-list ungrouped-task-list ${workspaceGroups.length > 0 ? "after-workspaces" : ""}`} aria-label="Sessions without a workspace">
+              {groupedSidebarSessions.ungrouped.map((session) => (
+                <button className="selected" type="button" aria-current="page" key={session.sessionId}>
+                  <span>{session.title}</span>
+                  {session.running && <span className="task-status" aria-label="Running" />}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <button className="profile-row" type="button" onClick={() => setShowConnection((current) => !current)}>
@@ -1319,6 +1719,7 @@ function App() {
               <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
               <div><dt>Account</dt><dd>Signed in</dd></div>
               {connection && <div><dt>Approvals</dt><dd>{approvalModeOption(connection.approvalMode).label}</dd></div>}
+              {connection && <div><dt>Model</dt><dd>{currentModel(connection.models)?.name ?? "Grok Build default"}</dd></div>}
               {connection && <div><dt>{connection.workspace ? "Workspace" : "Groky workspace"}</dt><dd title={connection.workingDirectory}>{connection.workingDirectory}</dd></div>}
               {connection && <div><dt>Transport</dt><dd>ACP stdio</dd></div>}
             </dl>
@@ -1363,8 +1764,8 @@ function App() {
             {sidebarCollapsed && (
               <button className="icon-button sidebar-restore" type="button" aria-label="Show sidebar" title={`Show sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
             )}
-            <button className="task-title workspace-switcher" type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"} aria-label="Choose workspace">
-              <Icon name={workspace ? "folder" : "folder-open"} /><strong>{workspace ? projectName : "Groky workspace"}</strong><Icon name="chevron-down" size={13} />
+            <button className="task-title workspace-switcher" type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"} aria-label="Open workspace">
+              <Icon name={workspace ? "folder" : "folder-open"} /><strong>{workspace ? projectName : "Open workspace"}</strong><Icon name="chevron-down" size={13} />
             </button>
           </div>
           <div className="task-actions">
@@ -1395,7 +1796,7 @@ function App() {
                 <span className="empty-orbit"><i /><i /></span>
                 <p className="message-kicker">GROK BUILD / READY</p>
                 <h1>What should we<br />make happen?</h1>
-                <p>{workspace ? "Ask about the codebase, request a change, or start with a review." : "Start in a private Groky workspace, or add a folder when you want Grok to work with an existing codebase."}</p>
+                <p>{workspace ? "Ask about the codebase, request a change, or start with a review." : "Start in a private Groky workspace, or open a workspace when you want Grok to work with an existing codebase."}</p>
                 <div className="suggestion-row">
                   {["Explain this codebase", "Find the next useful task", "Review the current changes"].map((suggestion) => (
                     <button key={suggestion} type="button" onClick={() => setDraft(suggestion)}>{suggestion}</button>
@@ -1447,7 +1848,14 @@ function App() {
             />
             <span className="local-chip"><span className="live-dot" />{workspace ? "workspace" : connection ? "Groky workspace" : "on send"}</span>
             <span className="toolbar-spacer" />
-            <span className="model-button"><Icon name="bolt" size={14} /><span>Grok Build</span><span className="reasoning">· agent</span></span>
+            <ModelSelector
+              connected={connection !== null}
+              models={connection?.models ?? null}
+              busy={running || appUpdating || stage === "connecting"}
+              onLoad={loadModels}
+              onChange={changeModel}
+              onReasoningChange={changeReasoningEffort}
+            />
             {running ? (
               <button className="send-button stop-button" type="button" aria-label="Stop" onClick={() => void cancelRun()}><Icon name="stop" size={15} /></button>
             ) : (
@@ -1462,24 +1870,65 @@ function App() {
   );
 }
 
+function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active: boolean; elapsedMs?: number }) {
+  const [open, setOpen] = useState(false);
+  const contentId = useId();
+  const label = active
+    ? "Thinking…"
+    : elapsedMs === undefined
+      ? "Thought"
+      : `Thought for ${formatThoughtDuration(elapsedMs)}`;
+
+  useEffect(() => {
+    setOpen(active);
+  }, [active]);
+
+  return (
+    <div className="thought-block" data-open={open}>
+      <button
+        className="thought-heading"
+        type="button"
+        aria-expanded={open}
+        aria-controls={contentId}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="thought-label"><Icon name="chevron-down" size={13} /><span>{label}</span></span>
+      </button>
+      <div className="thought-content" id={contentId} aria-hidden={!open}>
+        <div><p>{thought}</p></div>
+      </div>
+    </div>
+  );
+}
+
 function ConversationItem({ message }: { message: ConversationMessage }) {
   if (message.role === "user") {
     return <div className="user-message"><span className="message-kicker">REQUEST</span>{message.text}</div>;
   }
 
+  const duration = message.elapsedMs === undefined ? null : formatDuration(message.elapsedMs);
+  const runStatus = message.state === "streaming"
+    ? "Working…"
+    : message.state === "cancelled"
+      ? duration ? `Turn cancelled by user in ${duration}.` : "Turn cancelled by user."
+      : message.state === "error"
+        ? duration ? `Turn failed in ${duration}.` : "Turn failed."
+        : duration ? `Worked for ${duration}.` : "Turn completed.";
+
   return (
     <article className={`assistant-turn ${message.state ?? "complete"}`}>
       <div className="run-heading">
         <span className="run-diamond">◆</span>
-        <span>{message.state === "streaming" ? "Grok is working" : message.state === "cancelled" ? "Run stopped" : message.state === "error" ? "Run interrupted" : "Run complete"}</span>
+        <span>{runStatus}</span>
         <span className="run-line" />
       </div>
 
       {message.thought && (
-        <div className="thought-block">
-          <div className="thought-heading"><span><span className="thought-glyph">◆</span> Thought</span></div>
-          <p>{message.thought}</p>
-        </div>
+        <ThoughtBlock
+          thought={message.thought}
+          active={message.thoughtActive === true}
+          elapsedMs={message.thoughtElapsedMs}
+        />
       )}
 
       {message.plan && message.plan.length > 0 && (

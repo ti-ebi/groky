@@ -2,7 +2,7 @@ mod acp;
 
 use acp::{AcpTransport, ApprovalMode};
 use chrono::{DateTime, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     env,
@@ -38,6 +38,7 @@ struct GrokSession {
     workspace: Option<String>,
     working_directory: String,
     cli_version: String,
+    models: Option<SessionModelState>,
     prompt_active: Arc<AtomicBool>,
 }
 
@@ -69,6 +70,52 @@ struct ConnectResult {
     working_directory: String,
     cli_version: String,
     approval_mode: ApprovalMode,
+    models: Option<SessionModelState>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionModelState {
+    current_model_id: String,
+    available_models: Vec<ModelInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelInfo {
+    model_id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "_meta", default)]
+    metadata: Option<ModelMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelMetadata {
+    #[serde(default)]
+    total_context_tokens: Option<u64>,
+    #[serde(default)]
+    agent_type: Option<String>,
+    #[serde(default)]
+    supports_reasoning_effort: Option<bool>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    reasoning_efforts: Vec<ReasoningEffortInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReasoningEffortInfo {
+    id: String,
+    value: String,
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "default", default)]
+    is_default: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -517,11 +564,18 @@ async fn grok_connect(
             return Err(error);
         }
     };
-    let session_id = result
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Grok Build did not return a session ID.".to_string())?
-        .to_string();
+    let Some(session_id) = result.get("sessionId").and_then(Value::as_str) else {
+        transport.shutdown().await;
+        return Err("Grok Build did not return a session ID.".to_string());
+    };
+    let session_id = session_id.to_string();
+    let models = match parse_session_models(&result) {
+        Ok(models) => models,
+        Err(error) => {
+            transport.shutdown().await;
+            return Err(error);
+        }
+    };
 
     let session = GrokSession {
         transport,
@@ -529,6 +583,7 @@ async fn grok_connect(
         workspace: selected_workspace.clone(),
         working_directory: cwd.clone(),
         cli_version: cli.version.clone(),
+        models: models.clone(),
         prompt_active: Arc::new(AtomicBool::new(false)),
     };
     *state.session.lock().await = Some(session);
@@ -547,6 +602,7 @@ async fn grok_connect(
         working_directory: cwd,
         cli_version: cli.version,
         approval_mode,
+        models,
     })
 }
 
@@ -606,6 +662,112 @@ async fn grok_cancel(state: State<'_, GrokRuntime>) -> Result<(), String> {
         .clone()
         .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
     session.transport.cancel(&session.session_id).await
+}
+
+#[tauri::command]
+async fn grok_set_model(
+    state: State<'_, GrokRuntime>,
+    model_id: String,
+) -> Result<SessionModelState, String> {
+    let session = state
+        .session
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
+    let mut models = session.models.clone().ok_or_else(|| {
+        "Grok Build did not advertise model selection for this session.".to_string()
+    })?;
+
+    if !models
+        .available_models
+        .iter()
+        .any(|model| model.model_id == model_id)
+    {
+        return Err("Choose a model advertised by Grok Build.".to_string());
+    }
+    if session.prompt_active.load(Ordering::Acquire) {
+        return Err("Wait for the current request to finish before changing models.".to_string());
+    }
+    if models.current_model_id == model_id {
+        return Ok(models);
+    }
+
+    session
+        .transport
+        .set_model(&session.session_id, &model_id, None)
+        .await?;
+    models.current_model_id = model_id;
+
+    let mut active_session = state.session.lock().await;
+    let Some(active_session) = active_session
+        .as_mut()
+        .filter(|active| active.session_id == session.session_id)
+    else {
+        return Err("The Grok Build session changed while selecting a model.".to_string());
+    };
+    active_session.models = Some(models.clone());
+
+    Ok(models)
+}
+
+#[tauri::command]
+async fn grok_set_reasoning_effort(
+    state: State<'_, GrokRuntime>,
+    reasoning_effort: String,
+) -> Result<SessionModelState, String> {
+    let session = state
+        .session
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
+    let mut models = session.models.clone().ok_or_else(|| {
+        "Grok Build did not advertise reasoning controls for this session.".to_string()
+    })?;
+    let selected_effort = reasoning_effort_value(&models, &reasoning_effort)?;
+
+    if session.prompt_active.load(Ordering::Acquire) {
+        return Err(
+            "Wait for the current request to finish before changing reasoning effort.".to_string(),
+        );
+    }
+
+    let current_model = models.current_model_id.clone();
+    let current_effort = models
+        .available_models
+        .iter()
+        .find(|model| model.model_id == current_model)
+        .and_then(|model| model.metadata.as_ref())
+        .and_then(|metadata| metadata.reasoning_effort.as_deref());
+    if current_effort == Some(selected_effort.as_str()) {
+        return Ok(models);
+    }
+
+    session
+        .transport
+        .set_model(&session.session_id, &current_model, Some(&selected_effort))
+        .await?;
+
+    if let Some(metadata) = models
+        .available_models
+        .iter_mut()
+        .find(|model| model.model_id == current_model)
+        .and_then(|model| model.metadata.as_mut())
+    {
+        metadata.reasoning_effort = Some(selected_effort);
+    }
+
+    let mut active_session = state.session.lock().await;
+    let Some(active_session) = active_session
+        .as_mut()
+        .filter(|active| active.session_id == session.session_id)
+    else {
+        return Err("The Grok Build session changed while selecting reasoning effort.".to_string());
+    };
+    active_session.models = Some(models.clone());
+
+    Ok(models)
 }
 
 #[tauri::command]
@@ -672,6 +834,50 @@ async fn initialize_and_authenticate(transport: &AcpTransport) -> Result<(), Aut
         .await
         .map_err(|_| AuthError::NeedsLogin)?;
     Ok(())
+}
+
+fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, String> {
+    let Some(models) = result.get("models") else {
+        return Ok(None);
+    };
+    let models = serde_json::from_value::<SessionModelState>(models.clone())
+        .map_err(|_| "Grok Build returned invalid model information.".to_string())?;
+    let current_model_is_available = models
+        .available_models
+        .iter()
+        .any(|model| model.model_id == models.current_model_id);
+    if models.available_models.is_empty() || !current_model_is_available {
+        return Err("Grok Build returned invalid model information.".to_string());
+    }
+
+    Ok(Some(models))
+}
+
+fn reasoning_effort_value(
+    models: &SessionModelState,
+    requested_effort: &str,
+) -> Result<String, String> {
+    let metadata = models
+        .available_models
+        .iter()
+        .find(|model| model.model_id == models.current_model_id)
+        .and_then(|model| model.metadata.as_ref())
+        .ok_or_else(|| {
+            "Grok Build did not advertise reasoning controls for the current model.".to_string()
+        })?;
+
+    if metadata.supports_reasoning_effort == Some(false) || metadata.reasoning_efforts.is_empty() {
+        return Err(
+            "Grok Build did not advertise reasoning controls for the current model.".to_string(),
+        );
+    }
+
+    metadata
+        .reasoning_efforts
+        .iter()
+        .find(|effort| effort.id == requested_effort || effort.value == requested_effort)
+        .map(|effort| effort.value.clone())
+        .ok_or_else(|| "Choose a reasoning effort advertised by Grok Build.".to_string())
 }
 
 async fn disconnect_runtime(state: &GrokRuntime) {
@@ -881,6 +1087,8 @@ pub fn run() {
             grok_disconnect,
             grok_prompt,
             grok_cancel,
+            grok_set_model,
+            grok_set_reasoning_effort,
             grok_respond_permission,
         ])
         .run(tauri::generate_context!())
@@ -889,8 +1097,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_device_auth_code, managed_workspace_name};
+    use super::{
+        extract_device_auth_code, managed_workspace_name, parse_session_models,
+        reasoning_effort_value,
+    };
     use chrono::{Local, TimeZone};
+    use serde_json::json;
 
     #[test]
     fn extracts_the_device_code_from_the_official_xai_url() {
@@ -923,5 +1135,77 @@ mod tests {
 
         assert!(name.starts_with("task-090807-"));
         assert!(name.ends_with("-002a"));
+    }
+
+    #[test]
+    fn parses_models_advertised_by_the_grok_build_session() {
+        let models = parse_session_models(&json!({
+            "sessionId": "session-1",
+            "models": {
+                "currentModelId": "grok-4.5",
+                "availableModels": [{
+                    "modelId": "grok-4.5",
+                    "name": "Grok 4.5",
+                    "description": "Frontier model",
+                    "_meta": {
+                        "totalContextTokens": 500000,
+                        "agentType": "grok-build-plan",
+                        "supportsReasoningEffort": true,
+                        "reasoningEffort": "high",
+                        "reasoningEfforts": [
+                            {
+                                "id": "high",
+                                "value": "high",
+                                "label": "High Effort",
+                                "description": "Highest implementation quality",
+                                "default": true
+                            },
+                            {
+                                "id": "medium",
+                                "value": "medium",
+                                "label": "Medium Effort",
+                                "description": "Balanced effort",
+                                "default": false
+                            }
+                        ]
+                    }
+                }]
+            }
+        }))
+        .expect("valid model state")
+        .expect("model selection should be present");
+
+        assert_eq!(models.current_model_id, "grok-4.5");
+        assert_eq!(models.available_models[0].name, "Grok 4.5");
+        assert_eq!(
+            models.available_models[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.reasoning_effort.as_deref()),
+            Some("high")
+        );
+        assert_eq!(
+            models.available_models[0]
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.reasoning_efforts.len()),
+            Some(2)
+        );
+        assert_eq!(
+            reasoning_effort_value(&models, "medium").as_deref(),
+            Ok("medium")
+        );
+        assert!(reasoning_effort_value(&models, "unsupported").is_err());
+    }
+
+    #[test]
+    fn rejects_an_unavailable_current_model() {
+        assert!(parse_session_models(&json!({
+            "models": {
+                "currentModelId": "missing",
+                "availableModels": [{ "modelId": "grok-4.5", "name": "Grok 4.5" }]
+            }
+        }))
+        .is_err());
     }
 }

@@ -242,6 +242,21 @@ impl AcpTransport {
         Ok(())
     }
 
+    pub async fn set_model(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<(), String> {
+        let response = self
+            .request(
+                "session/set_model",
+                set_model_params(session_id, model_id, reasoning_effort),
+            )
+            .await?;
+        validate_set_model_response(&response, model_id)
+    }
+
     pub async fn respond_permission(
         &self,
         request_id: &str,
@@ -455,6 +470,31 @@ fn cancel_notification(session_id: &str) -> Value {
     })
 }
 
+fn set_model_params(session_id: &str, model_id: &str, reasoning_effort: Option<&str>) -> Value {
+    let mut params = json!({ "sessionId": session_id, "modelId": model_id });
+    if let Some(reasoning_effort) = reasoning_effort {
+        params["_meta"] = json!({ "reasoningEffort": reasoning_effort });
+    }
+    params
+}
+
+fn validate_set_model_response(response: &Value, requested_model_id: &str) -> Result<(), String> {
+    let model_result = response.pointer("/_meta/model");
+    if model_result.and_then(|result| result.get("Err")).is_some() {
+        return Err("Grok Build could not switch to that model.".to_string());
+    }
+    if let Some(selected_model_id) = model_result
+        .and_then(|result| result.get("Ok"))
+        .and_then(Value::as_str)
+    {
+        if selected_model_id != requested_model_id {
+            return Err("Grok Build selected a different model than requested.".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 async fn sanitize_permission_request(
     rpc_id: Value,
     params: &Value,
@@ -654,6 +694,37 @@ mod tests {
                 "method": "session/cancel",
                 "params": { "sessionId": "session-42" }
             })
+        );
+    }
+
+    #[test]
+    fn validates_grok_build_model_selection_metadata() {
+        assert!(validate_set_model_response(
+            &json!({ "_meta": { "model": { "Ok": "grok-4.5" } } }),
+            "grok-4.5"
+        )
+        .is_ok());
+        assert!(validate_set_model_response(
+            &json!({ "_meta": { "model": { "Err": "incompatible" } } }),
+            "grok-4.5"
+        )
+        .is_err());
+        assert!(validate_set_model_response(&json!({}), "grok-4.5").is_ok());
+    }
+
+    #[test]
+    fn sends_reasoning_effort_through_grok_build_model_metadata() {
+        assert_eq!(
+            set_model_params("session-1", "grok-4.5", Some("medium")),
+            json!({
+                "sessionId": "session-1",
+                "modelId": "grok-4.5",
+                "_meta": { "reasoningEffort": "medium" }
+            })
+        );
+        assert_eq!(
+            set_model_params("session-1", "grok-4.5", None),
+            json!({ "sessionId": "session-1", "modelId": "grok-4.5" })
         );
     }
 
