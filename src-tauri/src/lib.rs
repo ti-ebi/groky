@@ -1,10 +1,13 @@
 mod acp;
 
-use acp::{AcpTransport, ApprovalMode};
+use acp::{
+    normalize_stop_reason, AcpTransport, ApprovalMode, PromptResourceLink, SessionUpdateEvent,
+};
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::{HashMap, HashSet},
     env,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -23,6 +26,7 @@ use tokio::{
     sync::Mutex,
     time::timeout,
 };
+use url::Url;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -33,6 +37,7 @@ const SESSION_HISTORY_FILE: &str = "sessions.json";
 const WORKSPACE_HISTORY_FILE: &str = "working-directories.json";
 const DEFAULT_SESSION_TITLE: &str = "New Grok session";
 const MAX_SESSION_TITLE_CHARS: usize = 72;
+const MAX_ATTACHMENTS: usize = 10;
 static MANAGED_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -47,9 +52,29 @@ struct GrokSession {
     prompt_active: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TransportKey {
+    working_directory: String,
+    approval_mode: ApprovalMode,
+}
+
+#[derive(Clone)]
+struct ManagedTransport {
+    transport: AcpTransport,
+    capabilities: AgentCapabilities,
+}
+
+#[derive(Default)]
+struct GrokRuntimeState {
+    sessions: HashMap<String, GrokSession>,
+    transports: HashMap<TransportKey, ManagedTransport>,
+    active_session_id: Option<String>,
+}
+
 #[derive(Default)]
 struct GrokRuntime {
-    session: Mutex<Option<GrokSession>>,
+    inner: Mutex<GrokRuntimeState>,
+    history: Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +107,20 @@ struct ConnectResult {
 #[serde(rename_all = "camelCase")]
 struct LoadSessionResult {
     connection: ConnectResult,
-    updates: Vec<Value>,
+    updates: Vec<SessionUpdateEvent>,
+}
+
+impl From<&GrokSession> for ConnectResult {
+    fn from(session: &GrokSession) -> Self {
+        Self {
+            session_id: session.session_id.clone(),
+            workspace: session.workspace.clone(),
+            working_directory: session.working_directory.clone(),
+            cli_version: session.cli_version.clone(),
+            approval_mode: session.approval_mode,
+            models: session.models.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -161,7 +199,7 @@ struct ModelInfo {
     name: String,
     #[serde(default)]
     description: Option<String>,
-    #[serde(rename = "_meta", default)]
+    #[serde(rename(serialize = "metadata", deserialize = "_meta"), default)]
     metadata: Option<ModelMetadata>,
 }
 
@@ -195,9 +233,18 @@ struct ReasoningEffortInfo {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PromptResult {
-    stop_reason: Option<String>,
+    stop_reason: String,
     text: String,
     thought: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileAttachment {
+    path: String,
+    name: String,
+    size: i64,
+    mime_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +252,7 @@ struct PromptResult {
 struct ConnectionEvent {
     status: &'static str,
     message: Option<String>,
+    session_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -420,16 +468,25 @@ async fn install_app_update(
 
 async fn grok_prompt_active(runtime: &GrokRuntime) -> bool {
     runtime
-        .session
+        .inner
         .lock()
         .await
-        .as_ref()
-        .is_some_and(|session| session.prompt_active.load(Ordering::Acquire))
+        .sessions
+        .values()
+        .any(|session| session.prompt_active.load(Ordering::Acquire))
 }
 
 #[tauri::command]
 async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, String> {
-    if let Some(session) = state.session.lock().await.as_ref() {
+    let active_session = {
+        let runtime = state.inner.lock().await;
+        runtime
+            .active_session_id
+            .as_deref()
+            .and_then(|session_id| runtime.sessions.get(session_id))
+            .cloned()
+    };
+    if let Some(session) = active_session {
         return Ok(OnboardingStatus {
             stage: "connected",
             cli_version: Some(session.cli_version.clone()),
@@ -570,20 +627,118 @@ async fn choose_workspace() -> Result<Option<String>, String> {
     .map_err(|_| "Failed to open the folder picker.".to_string())
 }
 
+fn inspect_attachment_paths(paths: Vec<PathBuf>) -> Result<Vec<FileAttachment>, String> {
+    let mut seen = HashSet::new();
+    let mut attachments = Vec::new();
+
+    for path in paths {
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| "One of the selected files is no longer available.".to_string())?;
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        if attachments.len() == MAX_ATTACHMENTS {
+            return Err(format!("Attach up to {MAX_ATTACHMENTS} files at a time."));
+        }
+
+        let metadata = canonical
+            .metadata()
+            .map_err(|_| "One of the selected files could not be inspected.".to_string())?;
+        if !metadata.is_file() {
+            return Err("Only files can be attached to a message.".to_string());
+        }
+        let size = i64::try_from(metadata.len())
+            .map_err(|_| "One of the selected files is too large to attach.".to_string())?;
+        let name = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| "One of the selected files has no usable name.".to_string())?;
+
+        attachments.push(FileAttachment {
+            path: canonical.to_string_lossy().into_owned(),
+            name,
+            size,
+            mime_type: mime_guess::from_path(&canonical)
+                .first_raw()
+                .map(str::to_string),
+        });
+    }
+
+    Ok(attachments)
+}
+
+async fn inspect_attachment_path_strings(
+    paths: Vec<String>,
+) -> Result<Vec<FileAttachment>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_attachment_paths(paths.into_iter().map(PathBuf::from).collect())
+    })
+    .await
+    .map_err(|_| "Failed to inspect the selected files.".to_string())?
+}
+
+#[tauri::command]
+async fn choose_attachments() -> Result<Vec<FileAttachment>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(paths) = rfd::FileDialog::new()
+            .set_title("Attach files to this message")
+            .pick_files()
+        else {
+            return Ok(Vec::new());
+        };
+        inspect_attachment_paths(paths)
+    })
+    .await
+    .map_err(|_| "Failed to open the file picker.".to_string())?
+}
+
+#[tauri::command]
+async fn inspect_attachments(paths: Vec<String>) -> Result<Vec<FileAttachment>, String> {
+    inspect_attachment_path_strings(paths).await
+}
+
+fn attachment_resource_links(
+    attachments: &[FileAttachment],
+) -> Result<Vec<PromptResourceLink>, String> {
+    attachments
+        .iter()
+        .map(|attachment| {
+            let uri = Url::from_file_path(Path::new(&attachment.path))
+                .map_err(|_| "One of the selected file paths could not be attached.".to_string())?;
+            Ok(PromptResourceLink {
+                uri: uri.to_string(),
+                name: attachment.name.clone(),
+                mime_type: attachment.mime_type.clone(),
+                size: attachment.size,
+            })
+        })
+        .collect()
+}
+
 #[tauri::command]
 async fn open_grok_install_guide() -> Result<(), String> {
     open_url(INSTALL_GUIDE_URL)
 }
 
 #[tauri::command]
-async fn reveal_working_directory(state: State<'_, GrokRuntime>) -> Result<(), String> {
-    let working_directory = state
-        .session
-        .lock()
-        .await
-        .as_ref()
-        .map(|session| session.working_directory.clone())
-        .ok_or_else(|| "Start a session first.".to_string())?;
+async fn reveal_working_directory(
+    state: State<'_, GrokRuntime>,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    let working_directory = {
+        let runtime = state.inner.lock().await;
+        let session_id = session_id
+            .as_deref()
+            .or(runtime.active_session_id.as_deref())
+            .ok_or_else(|| "Start a session first.".to_string())?;
+        runtime
+            .sessions
+            .get(session_id)
+            .map(|session| session.working_directory.clone())
+            .ok_or_else(|| "That session is not active.".to_string())?
+    };
     open_directory(Path::new(&working_directory))
 }
 
@@ -594,6 +749,22 @@ async fn grok_list_sessions(app: AppHandle) -> Result<Vec<SessionSummary>, Strin
         .iter()
         .map(SessionSummary::from)
         .collect())
+}
+
+#[tauri::command]
+async fn grok_rename_session(
+    app: AppHandle,
+    state: State<'_, GrokRuntime>,
+    session_id: String,
+    title: String,
+) -> Result<SessionSummary, String> {
+    let title = normalize_session_title(&title)?;
+    let _history = state.history.lock().await;
+    let mut sessions = read_session_history(&app).await?;
+    let summary = rename_session_title(&mut sessions, &session_id, title)
+        .ok_or_else(|| "That session is no longer in Groky history.".to_string())?;
+    write_session_history(&app, &sessions).await?;
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -669,6 +840,7 @@ async fn grok_mutate_sessions(
         return Err("Choose either one session or one working directory.".to_string());
     }
 
+    let _history = state.history.lock().await;
     let mut sessions = read_session_history(&app).await?;
     let session_id = session_id.as_deref();
     let workspace = workspace.as_deref();
@@ -679,26 +851,153 @@ async fn grok_mutate_sessions(
         return Err("No matching sessions were found.".to_string());
     }
 
-    let active = state.session.lock().await.clone();
-    let active_is_affected = active.as_ref().is_some_and(|active| {
-        sessions.iter().any(|session| {
-            session.session_id == active.session_id
-                && session_matches_history_target(session, session_id, workspace)
-        })
-    });
-    if active_is_affected {
-        if active
-            .as_ref()
-            .is_some_and(|active| active.prompt_active.load(Ordering::Acquire))
-        {
-            return Err("Stop the active turn before changing its history.".to_string());
+    let affected_ids = sessions
+        .iter()
+        .filter(|session| session_matches_history_target(session, session_id, workspace))
+        .map(|session| session.session_id.clone())
+        .collect::<Vec<_>>();
+    let forgotten_sessions = {
+        let mut runtime = state.inner.lock().await;
+        if affected_ids.iter().any(|session_id| {
+            runtime
+                .sessions
+                .get(session_id)
+                .is_some_and(|session| session.prompt_active.load(Ordering::Acquire))
+        }) {
+            return Err("Stop active turns before changing their history.".to_string());
         }
-        disconnect_runtime(&state).await;
-    }
+
+        if !matches!(action, SessionHistoryAction::Restore)
+            && runtime
+                .active_session_id
+                .as_ref()
+                .is_some_and(|active| affected_ids.contains(active))
+        {
+            runtime.active_session_id = None;
+        }
+        if matches!(action, SessionHistoryAction::Delete) {
+            affected_ids
+                .iter()
+                .filter_map(|session_id| {
+                    runtime
+                        .sessions
+                        .remove(session_id)
+                        .map(|session| (session_id.clone(), session.transport))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+    };
 
     apply_session_history_action(&mut sessions, action, session_id, workspace);
     write_session_history(&app, &sessions).await?;
+    for (session_id, transport) in forgotten_sessions {
+        transport.forget_session(&session_id).await;
+    }
     Ok(sessions.iter().map(SessionSummary::from).collect())
+}
+
+fn auth_error_message(error: AuthError) -> String {
+    match error {
+        AuthError::NeedsLogin => AUTH_REQUIRED_ERROR.to_string(),
+        AuthError::Transport(message) => message,
+    }
+}
+
+async fn acquire_transport(
+    app: &AppHandle,
+    state: &GrokRuntime,
+    cli: &CliInfo,
+    workspace_path: &Path,
+    working_directory: &str,
+    approval_mode: ApprovalMode,
+) -> Result<ManagedTransport, String> {
+    let key = TransportKey {
+        working_directory: working_directory.to_string(),
+        approval_mode,
+    };
+    {
+        let mut runtime = state.inner.lock().await;
+        if let Some(transport) = runtime.transports.get(&key).cloned() {
+            if transport.transport.is_alive() {
+                return Ok(transport);
+            }
+            runtime.transports.remove(&key);
+        }
+    }
+
+    let transport = AcpTransport::spawn(
+        &cli.binary,
+        workspace_path,
+        approval_mode,
+        Some(app.clone()),
+    )
+    .await?;
+    let capabilities = match initialize_and_authenticate(&transport).await {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            transport.shutdown().await;
+            return Err(auth_error_message(error));
+        }
+    };
+    let candidate = ManagedTransport {
+        transport: transport.clone(),
+        capabilities,
+    };
+
+    let existing = {
+        let mut runtime = state.inner.lock().await;
+        if let Some(existing) = runtime
+            .transports
+            .get(&key)
+            .filter(|existing| existing.transport.is_alive())
+        {
+            Some(existing.clone())
+        } else {
+            runtime.transports.remove(&key);
+            runtime.transports.insert(key, candidate.clone());
+            None
+        }
+    };
+    if let Some(existing) = existing {
+        transport.shutdown().await;
+        Ok(existing)
+    } else {
+        Ok(candidate)
+    }
+}
+
+async fn runtime_session(state: &GrokRuntime, session_id: &str) -> Result<GrokSession, String> {
+    let session = state
+        .inner
+        .lock()
+        .await
+        .sessions
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "That session is not active in Groky.".to_string())?;
+    if !session.transport.is_alive() {
+        return Err(
+            "The connection to Grok Build was closed. Reopen the session to continue.".to_string(),
+        );
+    }
+    Ok(session)
+}
+
+async fn forget_rejected_session(state: &GrokRuntime, transport: &AcpTransport, session_id: &str) {
+    let collides_with_same_transport = state
+        .inner
+        .lock()
+        .await
+        .sessions
+        .get(session_id)
+        .is_some_and(|session| session.transport.is_same_transport(transport));
+    if collides_with_same_transport {
+        transport.invalidate().await;
+    } else {
+        transport.forget_session(session_id).await;
+    }
 }
 
 #[tauri::command]
@@ -724,43 +1023,19 @@ async fn grok_connect(
     };
     let cwd = workspace_path.to_string_lossy().into_owned();
     let cli = resolve_cli().await?;
+    let managed_transport =
+        acquire_transport(&app, &state, &cli, &workspace_path, &cwd, approval_mode).await?;
+    let transport = managed_transport.transport;
 
-    disconnect_runtime(&state).await;
-
-    let transport = AcpTransport::spawn(
-        &cli.binary,
-        &workspace_path,
-        approval_mode,
-        Some(app.clone()),
-    )
-    .await?;
-    if let Err(error) = initialize_and_authenticate(&transport).await {
-        transport.shutdown().await;
-        return Err(match error {
-            AuthError::NeedsLogin => AUTH_REQUIRED_ERROR.to_string(),
-            AuthError::Transport(message) => message,
-        });
-    }
-
-    let result = transport
-        .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
-        .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => {
-            transport.shutdown().await;
-            return Err(error);
-        }
-    };
+    let result = transport.new_session(&cwd).await?;
     let Some(session_id) = result.get("sessionId").and_then(Value::as_str) else {
-        transport.shutdown().await;
         return Err("Grok Build did not return a session ID.".to_string());
     };
     let session_id = session_id.to_string();
     let models = match parse_session_models(&result) {
         Ok(models) => models,
         Err(error) => {
-            transport.shutdown().await;
+            forget_rejected_session(&state, &transport, &session_id).await;
             return Err(error);
         }
     };
@@ -776,28 +1051,40 @@ async fn grok_connect(
         prompt_active: Arc::new(AtomicBool::new(false)),
     };
 
-    if let Err(error) = persist_new_session(&app, &session).await {
-        session.transport.shutdown().await;
-        return Err(error);
+    {
+        let mut runtime = state.inner.lock().await;
+        if runtime.sessions.contains_key(&session_id) {
+            drop(runtime);
+            forget_rejected_session(&state, &session.transport, &session_id).await;
+            return Err("Grok Build returned a session ID that is already active.".to_string());
+        }
+        runtime.sessions.insert(session_id.clone(), session.clone());
+        runtime.active_session_id = Some(session_id.clone());
     }
-    *state.session.lock().await = Some(session);
+    {
+        let _history = state.history.lock().await;
+        if let Err(error) = persist_new_session(&app, &session).await {
+            let mut runtime = state.inner.lock().await;
+            runtime.sessions.remove(&session_id);
+            if runtime.active_session_id.as_ref() == Some(&session_id) {
+                runtime.active_session_id = None;
+            }
+            drop(runtime);
+            forget_rejected_session(&state, &session.transport, &session_id).await;
+            return Err(error);
+        }
+    }
 
     let _ = app.emit(
         "grok://connection",
         ConnectionEvent {
             status: "connected",
             message: None,
+            session_ids: vec![session_id.clone()],
         },
     );
 
-    Ok(ConnectResult {
-        session_id,
-        workspace: selected_workspace,
-        working_directory: cwd,
-        cli_version: cli.version,
-        approval_mode,
-        models,
-    })
+    Ok(ConnectResult::from(&session))
 }
 
 #[tauri::command]
@@ -806,6 +1093,33 @@ async fn grok_load_session(
     state: State<'_, GrokRuntime>,
     session_id: String,
 ) -> Result<LoadSessionResult, String> {
+    let warm_session = {
+        let mut runtime = state.inner.lock().await;
+        let session = runtime
+            .sessions
+            .get(&session_id)
+            .filter(|session| session.transport.is_alive())
+            .cloned();
+        if session.is_none() {
+            runtime.sessions.remove(&session_id);
+        }
+        if session.is_some() {
+            runtime.active_session_id = Some(session_id.clone());
+        }
+        session
+    };
+    if let Some(session) = warm_session {
+        let updates = session.transport.session_updates(&session_id).await;
+        {
+            let _history = state.history.lock().await;
+            touch_persisted_session(&app, &session, None).await?;
+        }
+        return Ok(LoadSessionResult {
+            connection: ConnectResult::from(&session),
+            updates,
+        });
+    }
+
     let persisted = read_session_history(&app)
         .await?
         .into_iter()
@@ -821,45 +1135,22 @@ async fn grok_load_session(
     }
     let cwd = workspace_path.to_string_lossy().into_owned();
     let cli = resolve_cli().await?;
-
-    disconnect_runtime(&state).await;
-
-    let transport = AcpTransport::spawn(
-        &cli.binary,
+    let managed_transport = acquire_transport(
+        &app,
+        &state,
+        &cli,
         &workspace_path,
+        &cwd,
         persisted.approval_mode,
-        Some(app.clone()),
     )
     .await?;
-    let capabilities = match initialize_and_authenticate(&transport).await {
-        Ok(capabilities) => capabilities,
-        Err(error) => {
-            transport.shutdown().await;
-            return Err(match error {
-                AuthError::NeedsLogin => AUTH_REQUIRED_ERROR.to_string(),
-                AuthError::Transport(message) => message,
-            });
-        }
-    };
-    if !capabilities.load_session {
-        transport.shutdown().await;
+    if !managed_transport.capabilities.load_session {
         return Err("This Grok Build version cannot reopen saved sessions.".to_string());
     }
+    let transport = managed_transport.transport;
 
-    let (result, updates) = match transport.load_session(&persisted.session_id, &cwd).await {
-        Ok(result) => result,
-        Err(error) => {
-            transport.shutdown().await;
-            return Err(error);
-        }
-    };
-    let models = match parse_session_models(&result) {
-        Ok(models) => models,
-        Err(error) => {
-            transport.shutdown().await;
-            return Err(error);
-        }
-    };
+    let (result, updates) = transport.load_session(&persisted.session_id, &cwd).await?;
+    let models = parse_session_models(&result)?;
 
     let session = GrokSession {
         transport,
@@ -871,26 +1162,29 @@ async fn grok_load_session(
         models: models.clone(),
         prompt_active: Arc::new(AtomicBool::new(false)),
     };
-    touch_persisted_session(&app, &session, None).await?;
-    *state.session.lock().await = Some(session);
+    {
+        let _history = state.history.lock().await;
+        touch_persisted_session(&app, &session, None).await?;
+    }
+    {
+        let mut runtime = state.inner.lock().await;
+        runtime
+            .sessions
+            .insert(persisted.session_id.clone(), session.clone());
+        runtime.active_session_id = Some(persisted.session_id.clone());
+    }
 
     let _ = app.emit(
         "grok://connection",
         ConnectionEvent {
             status: "connected",
             message: None,
+            session_ids: vec![persisted.session_id.clone()],
         },
     );
 
     Ok(LoadSessionResult {
-        connection: ConnectResult {
-            session_id: persisted.session_id,
-            workspace: persisted.workspace,
-            working_directory: cwd,
-            cli_version: cli.version,
-            approval_mode: persisted.approval_mode,
-            models,
-        },
+        connection: ConnectResult::from(&session),
         updates,
     })
 }
@@ -902,21 +1196,45 @@ async fn grok_disconnect(state: State<'_, GrokRuntime>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn grok_deactivate_session(
+    state: State<'_, GrokRuntime>,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    let mut runtime = state.inner.lock().await;
+    if session_id
+        .as_ref()
+        .is_none_or(|session_id| runtime.active_session_id.as_ref() == Some(session_id))
+    {
+        runtime.active_session_id = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn grok_activate_session(
+    state: State<'_, GrokRuntime>,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    state.inner.lock().await.active_session_id = session_id;
+    Ok(())
+}
+
+#[tauri::command]
 async fn grok_prompt(
     app: AppHandle,
     state: State<'_, GrokRuntime>,
+    session_id: String,
     prompt: String,
+    attachment_paths: Vec<String>,
 ) -> Result<PromptResult, String> {
-    if prompt.trim().is_empty() {
-        return Err("Enter a message.".to_string());
+    let prompt = prompt.trim().to_string();
+    let attachments = inspect_attachment_path_strings(attachment_paths).await?;
+    if prompt.is_empty() && attachments.is_empty() {
+        return Err("Enter a message or attach a file.".to_string());
     }
+    let resources = attachment_resource_links(&attachments)?;
 
-    let session = state
-        .session
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
+    let session = runtime_session(&state, &session_id).await?;
 
     if session
         .prompt_active
@@ -926,50 +1244,54 @@ async fn grok_prompt(
         return Err("The previous request is still running.".to_string());
     }
 
-    if let Err(error) = touch_persisted_session(&app, &session, Some(prompt.trim())).await {
+    let persisted = {
+        let _history = state.history.lock().await;
+        let title_source = if prompt.is_empty() {
+            attachments
+                .first()
+                .map(|attachment| attachment.name.as_str())
+        } else {
+            Some(prompt.as_str())
+        };
+        touch_persisted_session(&app, &session, title_source).await
+    };
+    if let Err(error) = persisted {
         session.prompt_active.store(false, Ordering::Release);
         return Err(error);
     }
 
     let result = session
         .transport
-        .prompt(&session.session_id, prompt.trim())
+        .prompt(&session.session_id, &prompt, &resources)
         .await;
     session.prompt_active.store(false, Ordering::Release);
 
     let (result, output) = result?;
     Ok(PromptResult {
-        stop_reason: result
-            .get("stopReason")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        stop_reason: normalize_stop_reason(
+            result
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+        ),
         text: output.text,
         thought: output.thought,
     })
 }
 
 #[tauri::command]
-async fn grok_cancel(state: State<'_, GrokRuntime>) -> Result<(), String> {
-    let session = state
-        .session
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
+async fn grok_cancel(state: State<'_, GrokRuntime>, session_id: String) -> Result<(), String> {
+    let session = runtime_session(&state, &session_id).await?;
     session.transport.cancel(&session.session_id).await
 }
 
 #[tauri::command]
 async fn grok_set_model(
     state: State<'_, GrokRuntime>,
+    session_id: String,
     model_id: String,
 ) -> Result<SessionModelState, String> {
-    let session = state
-        .session
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
+    let session = runtime_session(&state, &session_id).await?;
     let mut models = session.models.clone().ok_or_else(|| {
         "Grok Build did not advertise model selection for this session.".to_string()
     })?;
@@ -994,12 +1316,9 @@ async fn grok_set_model(
         .await?;
     models.current_model_id = model_id;
 
-    let mut active_session = state.session.lock().await;
-    let Some(active_session) = active_session
-        .as_mut()
-        .filter(|active| active.session_id == session.session_id)
-    else {
-        return Err("The Grok Build session changed while selecting a model.".to_string());
+    let mut runtime = state.inner.lock().await;
+    let Some(active_session) = runtime.sessions.get_mut(&session.session_id) else {
+        return Err("The Grok Build session closed while selecting a model.".to_string());
     };
     active_session.models = Some(models.clone());
 
@@ -1009,14 +1328,10 @@ async fn grok_set_model(
 #[tauri::command]
 async fn grok_set_reasoning_effort(
     state: State<'_, GrokRuntime>,
+    session_id: String,
     reasoning_effort: String,
 ) -> Result<SessionModelState, String> {
-    let session = state
-        .session
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
+    let session = runtime_session(&state, &session_id).await?;
     let mut models = session.models.clone().ok_or_else(|| {
         "Grok Build did not advertise reasoning controls for this session.".to_string()
     })?;
@@ -1053,12 +1368,9 @@ async fn grok_set_reasoning_effort(
         metadata.reasoning_effort = Some(selected_effort);
     }
 
-    let mut active_session = state.session.lock().await;
-    let Some(active_session) = active_session
-        .as_mut()
-        .filter(|active| active.session_id == session.session_id)
-    else {
-        return Err("The Grok Build session changed while selecting reasoning effort.".to_string());
+    let mut runtime = state.inner.lock().await;
+    let Some(active_session) = runtime.sessions.get_mut(&session.session_id) else {
+        return Err("The Grok Build session closed while selecting reasoning effort.".to_string());
     };
     active_session.models = Some(models.clone());
 
@@ -1068,18 +1380,14 @@ async fn grok_set_reasoning_effort(
 #[tauri::command]
 async fn grok_respond_permission(
     state: State<'_, GrokRuntime>,
+    session_id: String,
     request_id: String,
     option_id: Option<String>,
 ) -> Result<(), String> {
-    let session = state
-        .session
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
+    let session = runtime_session(&state, &session_id).await?;
     session
         .transport
-        .respond_permission(&request_id, option_id.as_deref())
+        .respond_permission(&session.session_id, &request_id, option_id.as_deref())
         .await
 }
 
@@ -1188,9 +1496,18 @@ fn reasoning_effort_value(
 }
 
 async fn disconnect_runtime(state: &GrokRuntime) {
-    let old_session = state.session.lock().await.take();
-    if let Some(session) = old_session {
-        session.transport.shutdown().await;
+    let transports = {
+        let mut runtime = state.inner.lock().await;
+        runtime.sessions.clear();
+        runtime.active_session_id = None;
+        runtime
+            .transports
+            .drain()
+            .map(|(_, managed)| managed.transport)
+            .collect::<Vec<_>>()
+    };
+    for transport in transports {
+        transport.shutdown().await;
     }
 }
 
@@ -1435,6 +1752,18 @@ fn session_matches_history_target(
         || workspace.is_some_and(|path| session.workspace.as_deref() == Some(path))
 }
 
+fn rename_session_title(
+    sessions: &mut [PersistedSession],
+    session_id: &str,
+    title: String,
+) -> Option<SessionSummary> {
+    let session = sessions
+        .iter_mut()
+        .find(|session| session.session_id == session_id)?;
+    session.title = title;
+    Some(SessionSummary::from(&*session))
+}
+
 fn apply_session_history_action(
     sessions: &mut Vec<PersistedSession>,
     action: SessionHistoryAction,
@@ -1475,6 +1804,19 @@ fn title_from_prompt(prompt: &str) -> String {
     } else {
         title
     }
+}
+
+fn normalize_session_title(title: &str) -> Result<String, String> {
+    let normalized = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return Err("Enter a session name.".to_string());
+    }
+    if normalized.chars().count() > MAX_SESSION_TITLE_CHARS {
+        return Err(format!(
+            "Session names can be up to {MAX_SESSION_TITLE_CHARS} characters."
+        ));
+    }
+    Ok(normalized)
 }
 
 async fn persist_new_session(app: &AppHandle, session: &GrokSession) -> Result<(), String> {
@@ -1645,15 +1987,20 @@ pub fn run() {
             grok_login,
             grok_logout,
             choose_workspace,
+            choose_attachments,
+            inspect_attachments,
             open_grok_install_guide,
             reveal_working_directory,
             grok_list_sessions,
+            grok_rename_session,
             grok_list_workspaces,
             grok_add_workspace,
             grok_remove_workspace,
             grok_mutate_sessions,
             grok_connect,
             grok_load_session,
+            grok_activate_session,
+            grok_deactivate_session,
             grok_disconnect,
             grok_prompt,
             grok_cancel,
@@ -1668,9 +2015,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_capabilities, apply_session_history_action, extract_device_auth_code,
-        managed_workspace_name, parse_session_models, reasoning_effort_value,
-        remove_workspace_history, title_from_prompt, upsert_session_history,
+        agent_capabilities, apply_session_history_action, attachment_resource_links,
+        extract_device_auth_code, inspect_attachment_paths, managed_workspace_name,
+        normalize_session_title, parse_session_models, reasoning_effort_value,
+        remove_workspace_history, rename_session_title, title_from_prompt, upsert_session_history,
         upsert_workspace_history, ApprovalMode, PersistedSession, PersistedWorkspace,
         SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
     };
@@ -1720,6 +2068,70 @@ mod tests {
         assert_eq!(title.chars().count(), MAX_SESSION_TITLE_CHARS);
         assert!(title.ends_with('…'));
         assert_eq!(title_from_prompt(" \n "), DEFAULT_SESSION_TITLE);
+    }
+
+    #[test]
+    fn inspects_files_and_builds_percent_encoded_resource_links() {
+        let directory = std::env::temp_dir().join(format!(
+            "groky-attachment-test-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_micros()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary directory should be created");
+        let path = directory.join("design brief.md");
+        std::fs::write(&path, "Review me").expect("temporary attachment should be written");
+
+        let attachments =
+            inspect_attachment_paths(vec![path]).expect("a regular local file should be accepted");
+        let resources = attachment_resource_links(&attachments)
+            .expect("an accepted local file should have a file URL");
+
+        assert_eq!(attachments[0].name, "design brief.md");
+        assert_eq!(attachments[0].size, 9);
+        assert_eq!(attachments[0].mime_type.as_deref(), Some("text/markdown"));
+        assert!(resources[0].uri.ends_with("/design%20brief.md"));
+        assert!(inspect_attachment_paths(vec![directory.clone()]).is_err());
+
+        std::fs::remove_dir_all(directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn validates_and_normalizes_session_names() {
+        assert_eq!(
+            normalize_session_title("  Release\n\nplanning  ").as_deref(),
+            Ok("Release planning")
+        );
+        assert_eq!(
+            normalize_session_title(" \n ").unwrap_err(),
+            "Enter a session name."
+        );
+        assert!(normalize_session_title(&"a".repeat(MAX_SESSION_TITLE_CHARS + 1)).is_err());
+    }
+
+    #[test]
+    fn renames_only_the_requested_session_without_reordering_activity() {
+        let session = |session_id: &str, title: &str, updated_at: i64| PersistedSession {
+            session_id: session_id.to_string(),
+            title: title.to_string(),
+            workspace: Some("/workspace".to_string()),
+            working_directory: "/workspace".to_string(),
+            approval_mode: ApprovalMode::Ask,
+            created_at: 1,
+            updated_at,
+            archived: false,
+        };
+        let mut sessions = vec![
+            session("first", "First", 20),
+            session("second", "Second", 10),
+        ];
+
+        let renamed = rename_session_title(&mut sessions, "second", "Release plan".to_string())
+            .expect("session should be renamed");
+
+        assert_eq!(renamed.title, "Release plan");
+        assert_eq!(renamed.updated_at, 10);
+        assert_eq!(sessions[0].session_id, "first");
+        assert_eq!(sessions[1].title, "Release plan");
     }
 
     #[test]

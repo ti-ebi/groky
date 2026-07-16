@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -10,10 +11,12 @@ import {
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@fontsource-variable/sora/index.css";
 import "./App.css";
 
@@ -35,6 +38,7 @@ type IconName =
   | "folder-open"
   | "logout"
   | "panel"
+  | "paperclip"
   | "plus"
   | "refresh"
   | "search"
@@ -79,7 +83,7 @@ interface ModelInfo {
   modelId: string;
   name: string;
   description?: string | null;
-  _meta?: ModelMetadata | null;
+  metadata?: ModelMetadata | null;
 }
 
 interface ModelMetadata {
@@ -99,31 +103,88 @@ interface ReasoningEffortInfo {
 }
 
 interface PromptResult {
-  stopReason: string | null;
+  stopReason: StopReason;
   text: string;
   thought: string;
 }
 
-interface SessionUpdate {
-  sessionId: string;
-  kind:
-    | "agent_message_chunk"
-    | "agent_thought_chunk"
-    | "user_message_chunk"
-    | "tool_call"
-    | "tool_call_update"
-    | "plan";
-  text?: string;
-  toolCallId?: string | null;
-  title?: string | null;
-  toolKind?: string | null;
-  status?: string | null;
-  entries?: PlanEntry[];
+type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" | "unknown";
+type ToolStatus = "pending" | "in_progress" | "completed" | "failed" | "cancelled";
+type ConversationState = "streaming" | "historical" | "complete" | "cancelled" | "refused" | "limited" | "error";
+
+interface ToolLocation {
+  path: string;
+  line?: number | null;
 }
+
+interface AvailableCommand {
+  name: string;
+  description: string;
+  inputHint?: string | null;
+}
+
+interface SessionConfigOption {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  value?: boolean | null;
+}
+
+interface SessionUsage {
+  used: number;
+  size: number;
+  cost?: { amount: number; currency: string } | null;
+}
+
+interface TurnMetrics {
+  totalTokens?: number | null;
+  outputTokens?: number | null;
+  reasoningTokens?: number | null;
+  modelCalls?: number | null;
+  apiDurationMs?: number | null;
+}
+
+type SessionUpdate = { sessionId: string } & (
+  | { kind: "user_message_chunk"; text: string; attachments?: MessageAttachment[] }
+  | { kind: "agent_message_chunk" | "agent_thought_chunk"; text: string }
+  | {
+      kind: "tool_call" | "tool_call_update";
+      toolCallId: string;
+      title?: string | null;
+      toolKind?: string | null;
+      status?: ToolStatus | null;
+      locations?: ToolLocation[] | null;
+    }
+  | { kind: "plan"; entries: PlanEntry[] }
+  | { kind: "available_commands_update"; availableCommands: AvailableCommand[] }
+  | { kind: "current_mode_update"; currentModeId: string }
+  | { kind: "config_option_update"; configOptions: SessionConfigOption[] }
+  | { kind: "session_info_update"; title?: string | null; updatedAt?: string | null }
+  | { kind: "usage_update"; used: number; size: number; cost?: SessionUsage["cost"] }
+  | { kind: "turn_completed"; stopReason: StopReason; metrics?: TurnMetrics | null }
+  | {
+      kind: "permission_requested";
+      requestId: string;
+      toolCallId: string;
+      title: string;
+      toolKind?: string | null;
+      options: PermissionOption[];
+    }
+  | {
+      kind: "permission_decision";
+      requestId: string;
+      toolCallId: string;
+      title: string;
+      label: string;
+      outcome: PermissionDecision["outcome"];
+    }
+);
 
 interface ConnectionEvent {
   status: "connected" | "disconnected";
   message?: string | null;
+  sessionIds?: string[];
 }
 
 interface DeviceAuthCodeEvent {
@@ -139,6 +200,7 @@ interface PermissionOption {
 interface PermissionRequest {
   requestId: string;
   sessionId: string;
+  toolCallId: string;
   title: string;
   toolKind?: string | null;
   options: PermissionOption[];
@@ -148,12 +210,31 @@ interface ToolActivity {
   id: string;
   title: string;
   kind?: string;
-  status?: string;
+  status: ToolStatus;
+  locations?: ToolLocation[];
 }
 
 interface PlanEntry {
   content: string;
-  status: string;
+  status: "pending" | "in_progress" | "completed";
+  priority?: "low" | "medium" | "high" | null;
+}
+
+interface PermissionDecision {
+  toolCallId: string;
+  title: string;
+  label: string;
+  outcome: "allowed" | "rejected" | "dismissed";
+}
+
+interface MessageAttachment {
+  name: string;
+  size: number;
+  mimeType?: string | null;
+}
+
+interface FileAttachment extends MessageAttachment {
+  path: string;
 }
 
 interface ConversationMessage {
@@ -168,8 +249,26 @@ interface ConversationMessage {
   thoughtElapsedMs?: number;
   tools?: ToolActivity[];
   plan?: PlanEntry[];
-  state?: "streaming" | "complete" | "cancelled" | "error";
+  attachments?: MessageAttachment[];
+  permissionDecisions?: PermissionDecision[];
+  metrics?: TurnMetrics;
+  stopReason?: StopReason;
+  state?: ConversationState;
   error?: string;
+}
+
+interface SessionViewState {
+  connection: Connection;
+  disconnected: boolean;
+  messages: ConversationMessage[];
+  draft: string;
+  attachments: FileAttachment[];
+  running: boolean;
+  permissions: PermissionRequest[];
+  availableCommands: AvailableCommand[];
+  currentModeId: string | null;
+  configOptions: SessionConfigOption[];
+  usage: SessionUsage | null;
 }
 
 interface ConversationTurnPreview {
@@ -183,6 +282,7 @@ interface SidebarSessionSummary {
   title: string;
   workspace: string | null;
   running: boolean;
+  needsAttention: boolean;
   updatedAt: number;
   archived: boolean;
 }
@@ -281,6 +381,8 @@ interface AppUpdateProgress {
 
 type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "error";
 type ApprovalMode = "ask" | "alwaysApprove";
+type AppView = "session" | "settings";
+type SettingsSection = "application" | "grok" | "account" | "archived";
 
 interface ApprovalModeOption {
   id: ApprovalMode;
@@ -337,6 +439,7 @@ const SIDEBAR_COLLAPSED_KEY = "groky.sidebar.collapsed";
 const DEFAULT_SIDEBAR_WIDTH = 258;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 420;
+const MAX_SESSION_TITLE_CHARS = 72;
 
 function clampSidebarWidth(width: number) {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
@@ -378,6 +481,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     "folder-open": <><path d="M3 9V7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1" /><path d="m3 10 2 9h14l2-9Z" /></>,
     logout: <><path d="M10 5H5v14h5" /><path d="M14 8l4 4-4 4M8 12h10" /></>,
     panel: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M15 4v16" /></>,
+    paperclip: <path d="m20.5 11.5-8.9 8.9a5 5 0 0 1-7.1-7.1l9.6-9.6a3.5 3.5 0 1 1 5 5l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9" />,
     plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
     refresh: <><path d="M20 6v5h-5" /><path d="M4 18v-5h5" /><path d="M18 9a7 7 0 0 0-12-2L4 11M6 15a7 7 0 0 0 12 2l2-4" /></>,
     search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
@@ -449,10 +553,15 @@ function SidebarSessionRow({
   session,
   selected,
   disabled,
+  editing,
+  renaming,
   menuOpen,
   subtitle,
   onSelect,
   onToggleMenu,
+  onStartRename,
+  onRename,
+  onCancelRename,
   onArchive,
   onRestore,
   onDelete,
@@ -460,59 +569,116 @@ function SidebarSessionRow({
   session: SidebarSessionSummary;
   selected: boolean;
   disabled: boolean;
+  editing: boolean;
+  renaming: boolean;
   menuOpen: boolean;
   subtitle?: string;
   onSelect: () => void;
   onToggleMenu: () => void;
+  onStartRename: () => void;
+  onRename: (title: string) => void;
+  onCancelRename: () => void;
   onArchive: () => void;
   onRestore: () => void;
   onDelete: () => void;
 }) {
+  const renameInput = useRef<HTMLInputElement | null>(null);
+  const [titleDraft, setTitleDraft] = useState(session.title);
+
+  useEffect(() => {
+    if (!editing) return;
+    setTitleDraft(session.title);
+    const animationFrame = window.requestAnimationFrame(() => {
+      renameInput.current?.focus();
+      renameInput.current?.select();
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [editing, session.title]);
+
+  function submitRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onRename(titleDraft);
+  }
+
   return (
-    <div className={`session-row ${selected ? "selected" : ""}`} data-sidebar-menu-root>
-      <button
-        className="session-main"
-        type="button"
-        aria-current={selected ? "page" : undefined}
-        disabled={disabled}
-        title={session.title}
-        onClick={onSelect}
-      >
-        <span className="session-copy">
-          <span>{session.title}</span>
-          {subtitle && <small>{subtitle}</small>}
-        </span>
-        {session.running && (
-          <span className="session-running-indicator" aria-label="Running">
-            <span className="task-status" aria-hidden="true" />
-          </span>
-        )}
-      </button>
-      <div className="session-row-actions">
-        <button
-          className="session-more"
-          type="button"
-          aria-label={`Session actions for ${session.title}`}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          disabled={disabled}
-          onClick={onToggleMenu}
-        >
-          <Icon name="dots" size={15} />
-        </button>
-        <button
-          className="session-archive"
-          type="button"
-          aria-label={`${session.archived ? "Restore" : "Archive"} ${session.title}`}
-          title={session.archived ? "Restore session" : "Archive session"}
-          disabled={disabled}
-          onClick={session.archived ? onRestore : onArchive}
-        >
-          <Icon name={session.archived ? "refresh" : "archive"} size={14} />
-        </button>
-      </div>
-      {menuOpen && (
+    <div
+      className={`session-row ${selected ? "selected" : ""} ${editing ? "editing" : ""}`}
+      data-sidebar-menu-root
+      {...(editing ? { "data-session-rename-root": "" } : {})}
+    >
+      {editing ? (
+        <form className="session-rename-form" onSubmit={submitRename}>
+          <input
+            ref={renameInput}
+            value={titleDraft}
+            aria-label={`Rename ${session.title}. Press Enter to save or Escape to cancel.`}
+            disabled={renaming}
+            required
+            onChange={(event) => setTitleDraft(
+              Array.from(event.target.value).slice(0, MAX_SESSION_TITLE_CHARS).join("")
+            )}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              event.stopPropagation();
+              onCancelRename();
+            }}
+          />
+        </form>
+      ) : (
+        <>
+          <button
+            className="session-main"
+            type="button"
+            aria-current={selected ? "page" : undefined}
+            disabled={disabled}
+            title={session.title}
+            onClick={onSelect}
+          >
+            <span className="session-copy">
+              <span>{session.title}</span>
+              {subtitle && <small>{subtitle}</small>}
+            </span>
+            {session.running && !session.needsAttention && (
+              <span className="session-running-indicator" aria-label="Running">
+                <span className="task-status" aria-hidden="true" />
+              </span>
+            )}
+            {session.needsAttention && (
+              <span className="session-attention-indicator" aria-label="Needs approval">!</span>
+            )}
+          </button>
+          <div className="session-row-actions">
+            <button
+              className="session-more"
+              type="button"
+              aria-label={`Session actions for ${session.title}`}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              disabled={disabled}
+              onClick={onToggleMenu}
+            >
+              <Icon name="dots" size={15} />
+            </button>
+            <button
+              className="session-archive"
+              type="button"
+              aria-label={`${session.archived ? "Restore" : "Archive"} ${session.title}`}
+              title={session.archived ? "Restore session" : "Archive session"}
+              disabled={disabled}
+              onClick={session.archived ? onRestore : onArchive}
+            >
+              <Icon name={session.archived ? "refresh" : "archive"} size={14} />
+            </button>
+          </div>
+        </>
+      )}
+      {menuOpen && !editing && (
         <div className="sidebar-context-menu session-context-menu" role="menu">
+          <button type="button" role="menuitem" onClick={onStartRename}>
+            <Icon name="compose" size={14} />
+            <span>Rename</span>
+          </button>
           <button className="danger-menu-item" type="button" role="menuitem" onClick={onDelete}>
             <Icon name="trash" size={14} />
             <span>Delete</span>
@@ -678,8 +844,121 @@ function titleFromPrompt(prompt: string) {
   return characters.length > 72 ? `${characters.slice(0, 71).join("")}…` : normalized || "New Grok session";
 }
 
-function messagesFromSessionReplay(sessionId: string, updates: SessionUpdate[]) {
+function formatFileSize(bytes: number) {
+  const safeBytes = Math.max(0, bytes);
+  if (safeBytes < 1024) return `${safeBytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = safeBytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function stateFromStopReason(stopReason: StopReason): ConversationState {
+  switch (stopReason) {
+    case "end_turn":
+      return "complete";
+    case "cancelled":
+      return "cancelled";
+    case "refusal":
+      return "refused";
+    case "max_tokens":
+    case "max_turn_requests":
+      return "limited";
+    default:
+      return "error";
+  }
+}
+
+function applySessionUpdateToMessage(
+  message: ConversationMessage,
+  update: SessionUpdate,
+  now: number,
+): ConversationMessage {
+  switch (update.kind) {
+    case "agent_message_chunk":
+      return { ...finishThought(message, now), text: message.text + update.text };
+    case "agent_thought_chunk": {
+      const active = message.state === "streaming";
+      return {
+        ...message,
+        thought: (message.thought ?? "") + update.text,
+        thoughtActive: active,
+        thoughtStartedAt: active
+          ? message.thoughtActive ? message.thoughtStartedAt ?? now : now
+          : undefined,
+      };
+    }
+    case "plan":
+      return { ...finishThought(message, now), plan: update.entries };
+    case "tool_call":
+    case "tool_call_update": {
+      const tools = [...(message.tools ?? [])];
+      const index = tools.findIndex((tool) => tool.id === update.toolCallId);
+      const existing = index >= 0 ? tools[index] : undefined;
+      const nextTool: ToolActivity = {
+        id: update.toolCallId,
+        title: update.title ?? existing?.title ?? "Working with a local tool",
+        kind: update.toolKind ?? existing?.kind ?? undefined,
+        status: update.status ?? existing?.status ?? "in_progress",
+        locations: update.locations ?? existing?.locations ?? [],
+      };
+      if (index >= 0) tools[index] = nextTool;
+      else tools.push(nextTool);
+      return { ...finishThought(message, now), tools };
+    }
+    case "turn_completed": {
+      if (update.stopReason === "unknown") {
+        return {
+          ...finishThought(message, now),
+          metrics: update.metrics ?? message.metrics,
+        };
+      }
+      const state = stateFromStopReason(update.stopReason);
+      return {
+        ...finishRun(message, now),
+        state,
+        stopReason: update.stopReason,
+        metrics: update.metrics ?? message.metrics,
+        error: state === "error" ? "Grok Build ended the turn for an unknown reason." : message.error,
+      };
+    }
+    case "permission_decision":
+      return {
+        ...message,
+        permissionDecisions: [
+          ...(message.permissionDecisions ?? []),
+          { toolCallId: update.toolCallId, title: update.title, label: update.label, outcome: update.outcome },
+        ],
+      };
+    default:
+      return message;
+  }
+}
+
+interface SessionReplayProjection {
+  messages: ConversationMessage[];
+  availableCommands: AvailableCommand[];
+  currentModeId: string | null;
+  configOptions: SessionConfigOption[];
+  usage: SessionUsage | null;
+  title: string | null;
+  updatedAt: number | null;
+  permissions: PermissionRequest[];
+}
+
+function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): SessionReplayProjection {
   const messages: ConversationMessage[] = [];
+  let availableCommands: AvailableCommand[] = [];
+  let currentModeId: string | null = null;
+  let configOptions: SessionConfigOption[] = [];
+  let usage: SessionUsage | null = null;
+  let title: string | null = null;
+  let updatedAt: number | null = null;
+  let permissions: PermissionRequest[] = [];
   const currentAssistant = () => {
     const last = messages[messages.length - 1];
     if (last?.role === "assistant") return last;
@@ -687,7 +966,7 @@ function messagesFromSessionReplay(sessionId: string, updates: SessionUpdate[]) 
       id: makeMessageId("replayed-assistant"),
       role: "assistant",
       text: "",
-      state: "complete",
+      state: "historical",
     };
     messages.push(assistant);
     return assistant;
@@ -696,40 +975,70 @@ function messagesFromSessionReplay(sessionId: string, updates: SessionUpdate[]) 
   updates.filter((update) => update.sessionId === sessionId).forEach((update) => {
     if (update.kind === "user_message_chunk") {
       const last = messages[messages.length - 1];
-      if (last?.role === "user") last.text += update.text ?? "";
+      if (last?.role === "user") {
+        last.text += update.text ?? "";
+        last.attachments = [...(last.attachments ?? []), ...(update.attachments ?? [])];
+      }
       else messages.push({
         id: makeMessageId("replayed-user"),
         role: "user",
         text: update.text ?? "",
+        attachments: update.attachments ?? [],
       });
       return;
     }
 
-    const assistant = currentAssistant();
-    if (update.kind === "agent_message_chunk") {
-      assistant.text += update.text ?? "";
-    } else if (update.kind === "agent_thought_chunk") {
-      assistant.thought = (assistant.thought ?? "") + (update.text ?? "");
-    } else if (update.kind === "plan") {
-      assistant.plan = update.entries ?? [];
-    } else if (update.kind === "tool_call" || update.kind === "tool_call_update") {
-      const id = update.toolCallId ?? `replayed-tool-${assistant.tools?.length ?? 0}`;
-      const tools = assistant.tools ?? [];
-      const index = tools.findIndex((tool) => tool.id === id);
-      const existing = index >= 0 ? tools[index] : undefined;
-      const tool: ToolActivity = {
-        id,
-        title: update.title ?? existing?.title ?? "Worked with a local tool",
-        kind: update.toolKind ?? existing?.kind ?? undefined,
-        status: update.status ?? existing?.status ?? "completed",
-      };
-      if (index >= 0) tools[index] = tool;
-      else tools.push(tool);
-      assistant.tools = tools;
+    if (update.kind === "available_commands_update") {
+      availableCommands = update.availableCommands;
+      return;
     }
+    if (update.kind === "current_mode_update") {
+      currentModeId = update.currentModeId;
+      return;
+    }
+    if (update.kind === "config_option_update") {
+      configOptions = update.configOptions;
+      return;
+    }
+    if (update.kind === "usage_update") {
+      usage = { used: update.used, size: update.size, cost: update.cost };
+      return;
+    }
+    if (update.kind === "session_info_update") {
+      if (update.title) title = update.title;
+      if (update.updatedAt) {
+        const parsed = Date.parse(update.updatedAt);
+        if (Number.isFinite(parsed)) updatedAt = parsed;
+      }
+      return;
+    }
+    if (update.kind === "permission_requested") {
+      const permission = {
+        requestId: update.requestId,
+        sessionId: update.sessionId,
+        toolCallId: update.toolCallId,
+        title: update.title,
+        toolKind: update.toolKind,
+        options: update.options,
+      };
+      permissions = [
+        ...permissions.filter((entry) => entry.requestId !== permission.requestId),
+        permission,
+      ];
+      return;
+    }
+    if (update.kind === "permission_decision") {
+      permissions = permissions.filter((entry) => entry.requestId !== update.requestId);
+      const assistant = currentAssistant();
+      Object.assign(assistant, applySessionUpdateToMessage(assistant, update, Date.now()));
+      return;
+    }
+
+    const assistant = currentAssistant();
+    Object.assign(assistant, applySessionUpdateToMessage(assistant, update, Date.now()));
   });
 
-  return messages;
+  return { messages, availableCommands, currentModeId, configOptions, usage, title, updatedAt, permissions };
 }
 
 function previewText(text: string, limit: number) {
@@ -743,9 +1052,10 @@ function conversationTurnPreviews(messages: ConversationMessage[]) {
 
   messages.forEach((message) => {
     if (message.role === "user") {
+      const attachmentNames = message.attachments?.map((attachment) => attachment.name).join(", ") ?? "";
       turns.push({
         id: message.id,
-        request: previewText(message.text, 96) || "Untitled request",
+        request: previewText(message.text, 96) || attachmentNames || "Untitled request",
         response: "Waiting for Grok's response…",
       });
       return;
@@ -1118,6 +1428,277 @@ function AppUpdateNotice({
   );
 }
 
+const SETTINGS_SECTIONS: Array<{
+  id: SettingsSection;
+  label: string;
+  description: string;
+}> = [
+  { id: "application", label: "Application", description: "Version and signed desktop updates" },
+  { id: "grok", label: "Grok Build", description: "CLI and active session details" },
+  { id: "account", label: "Account", description: "Authentication and sign out" },
+  { id: "archived", label: "Archived chats", description: "Restore or delete archived chats" },
+];
+
+function SettingsSidebar({
+  overlayTitlebar,
+  section,
+  onSectionChange,
+  onBack,
+}: {
+  overlayTitlebar: boolean;
+  section: SettingsSection;
+  onSectionChange: (section: SettingsSection) => void;
+  onBack: () => void;
+}) {
+  return (
+    <aside className="sidebar settings-sidebar">
+      <div className="window-nav settings-window-nav" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
+        <button className="settings-return" type="button" onClick={onBack}>
+          <Icon name="arrow-right" size={15} />
+          <span>Back to Groky</span>
+        </button>
+      </div>
+
+      <div className="settings-sidebar-heading">
+        <h2>Settings</h2>
+      </div>
+
+      <nav className="settings-sidebar-nav" aria-label="Settings">
+        {SETTINGS_SECTIONS.map((option) => (
+          <button
+            className={section === option.id ? "active" : ""}
+            type="button"
+            aria-current={section === option.id ? "page" : undefined}
+            key={option.id}
+            onClick={() => onSectionChange(option.id)}
+          >
+            <span className="settings-nav-label">{option.label}</span>
+            <Icon name="arrow-right" size={12} />
+          </button>
+        ))}
+      </nav>
+
+      <div className="settings-sidebar-footer">
+        <span className="avatar">G</span>
+        <span><strong>Grok Build</strong><small>Signed in via the local CLI</small></span>
+      </div>
+    </aside>
+  );
+}
+
+function SettingsScreen({
+  overlayTitlebar,
+  section,
+  appVersion,
+  cliVersion,
+  connected,
+  approvalMode,
+  modelName,
+  currentModeId,
+  configOptions,
+  usage,
+  update,
+  updatePhase,
+  updateNotice,
+  archivedSessions,
+  archivedActionsDisabled,
+  onCheckForUpdates,
+  onSignOut,
+  onRestoreArchived,
+  onDeleteArchived,
+}: {
+  overlayTitlebar: boolean;
+  section: SettingsSection;
+  appVersion: string | null;
+  cliVersion: string | null;
+  connected: boolean;
+  approvalMode: ApprovalMode;
+  modelName: string;
+  currentModeId: string | null;
+  configOptions: SessionConfigOption[];
+  usage: SessionUsage | null;
+  update: AppUpdateInfo | null;
+  updatePhase: AppUpdatePhase;
+  updateNotice: string | null;
+  archivedSessions: SidebarSessionSummary[];
+  archivedActionsDisabled: boolean;
+  onCheckForUpdates: () => void;
+  onSignOut: () => void;
+  onRestoreArchived: (sessionId: string) => void;
+  onDeleteArchived: (session: SidebarSessionSummary) => void;
+}) {
+  const checkingForUpdates = updatePhase === "checking";
+  const updating = updatePhase === "downloading";
+  const activeSection = SETTINGS_SECTIONS.find((option) => option.id === section) ?? SETTINGS_SECTIONS[0];
+  const updateButtonLabel = checkingForUpdates
+    ? "Checking…"
+    : updating
+      ? "Updating…"
+      : "Check for updates";
+
+  return (
+    <div className="settings-page">
+      <header className="taskbar settings-taskbar" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
+        <div className="taskbar-leading">
+          <div className="task-title"><Icon name="sliders" /><strong>{activeSection.label}</strong></div>
+        </div>
+      </header>
+
+      <div className="settings-scroll">
+        <div className="settings-content">
+          <div className="settings-intro">
+            <span>GROKY / SETTINGS</span>
+            <h1>{activeSection.label}</h1>
+            <p>{activeSection.description}.</p>
+          </div>
+
+          {section === "application" && <section className="settings-card" aria-labelledby="application-settings-title">
+            <header>
+              <div>
+                <h2 id="application-settings-title">Application</h2>
+                <p>Version and signed desktop updates.</p>
+              </div>
+            </header>
+            <div className="settings-list">
+              <div className="settings-row">
+                <div><strong>Groky version</strong><small>The version installed on this device.</small></div>
+                <span className="settings-value">{appVersion ? `Version ${appVersion}` : "Unavailable"}</span>
+              </div>
+              <div className="settings-row settings-update-row">
+                <div>
+                  <strong>Software updates</strong>
+                  <small>{update ? `Version ${update.version} is available.` : "Check GitHub Releases for a signed update."}</small>
+                </div>
+                <button type="button" disabled={checkingForUpdates || updating} onClick={onCheckForUpdates}>
+                  <Icon name="refresh" size={14} />
+                  {updateButtonLabel}
+                </button>
+              </div>
+              {updateNotice && <p className="settings-inline-notice" role="status">{updateNotice}</p>}
+            </div>
+          </section>}
+
+          {section === "grok" && <section className="settings-card" aria-labelledby="grok-settings-title">
+            <header>
+              <div>
+                <h2 id="grok-settings-title">Grok Build</h2>
+                <p>Details reported by the local CLI and active session.</p>
+              </div>
+            </header>
+            <div className="settings-list">
+              <div className="settings-row">
+                <div><strong>Connection</strong><small>Local ACP transport status.</small></div>
+                <span className={`settings-status ${connected ? "connected" : ""}`}><i />{connected ? "Connected" : "Ready"}</span>
+              </div>
+              <div className="settings-row">
+                <div><strong>Engine</strong><small>Grok Build CLI detected by Groky.</small></div>
+                <span className="settings-value">{cliVersion ?? "Not detected"}</span>
+              </div>
+              <div className="settings-row">
+                <div><strong>Model</strong><small>Model for the active session.</small></div>
+                <span className="settings-value">{modelName}</span>
+              </div>
+              <div className="settings-row">
+                <div><strong>Approval mode</strong><small>Permission behavior for the active session.</small></div>
+                <span className="settings-value">{approvalModeOption(approvalMode).label}</span>
+              </div>
+              {currentModeId && (
+                <div className="settings-row">
+                  <div><strong>Session mode</strong><small>Current mode reported through ACP.</small></div>
+                  <span className="settings-value">{currentModeId}</span>
+                </div>
+              )}
+              {usage && (
+                <div className="settings-row">
+                  <div><strong>Context usage</strong><small>Cumulative context reported by the active session.</small></div>
+                  <span className="settings-value">
+                    {formatTokenCount(usage.used)} / {formatTokenCount(usage.size)}
+                    {usage.size > 0 ? ` (${Math.round((usage.used / usage.size) * 100)}%)` : ""}
+                  </span>
+                </div>
+              )}
+              {usage?.cost && (
+                <div className="settings-row">
+                  <div><strong>Session cost</strong><small>Cumulative estimate reported by Grok Build.</small></div>
+                  <span className="settings-value">{usage.cost.amount.toFixed(4)} {usage.cost.currency}</span>
+                </div>
+              )}
+              {configOptions.map((option) => (
+                <div className="settings-row" key={option.id}>
+                  <div><strong>{option.name}</strong><small>{option.description ?? "Session option reported through ACP."}</small></div>
+                  <span className="settings-value">
+                    {option.value === undefined || option.value === null ? "Available" : option.value ? "On" : "Off"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>}
+
+          {section === "account" && <section className="settings-card settings-account-card" aria-labelledby="account-settings-title">
+            <header>
+              <div>
+                <h2 id="account-settings-title">Account</h2>
+                <p>Authentication is managed by the official Grok Build CLI.</p>
+              </div>
+            </header>
+            <div className="settings-account-action">
+              <div><strong>Signed in</strong><small>Signing out clears the current Groky session.</small></div>
+              <button type="button" onClick={onSignOut}><Icon name="logout" size={14} /> Sign out</button>
+            </div>
+          </section>}
+
+          {section === "archived" && <section className="settings-card archived-settings-card" aria-labelledby="archived-settings-title">
+            <header>
+              <div>
+                <h2 id="archived-settings-title">Archived chats</h2>
+                <p>Chats kept outside the main sidebar.</p>
+              </div>
+            </header>
+            {archivedSessions.length > 0 ? (
+              <div className="archived-settings-list">
+                {archivedSessions.map((session) => (
+                  <div className="archived-settings-row" key={session.sessionId}>
+                    <span className="archived-settings-icon"><Icon name="archive" size={14} /></span>
+                    <span className="archived-settings-copy">
+                      <strong>{session.title}</strong>
+                      <small>{session.workspace ? workspaceName(session.workspace) : "Standalone"}</small>
+                    </span>
+                    <span className="archived-settings-actions">
+                      <button
+                        type="button"
+                        disabled={archivedActionsDisabled}
+                        onClick={() => onRestoreArchived(session.sessionId)}
+                      >
+                        <Icon name="refresh" size={13} />
+                        Restore
+                      </button>
+                      <button
+                        className="archived-delete"
+                        type="button"
+                        aria-label={`Delete ${session.title}`}
+                        disabled={archivedActionsDisabled}
+                        onClick={() => onDeleteArchived(session)}
+                      >
+                        <Icon name="trash" size={13} />
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="archived-settings-empty">
+                <Icon name="archive" size={17} />
+                <strong>No archived chats</strong>
+                <p>Archived chats will appear here instead of in the main sidebar.</p>
+              </div>
+            )}
+          </section>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ApprovalModeSelector({
   mode,
   busy,
@@ -1239,10 +1820,10 @@ function ModelSelector({
   const [changingReasoningEffort, setChangingReasoningEffort] = useState<string | null>(null);
   const root = useRef<HTMLDivElement | null>(null);
   const selected = currentModel(models);
-  const reasoningEffort = selected?._meta?.reasoningEffort;
-  const reasoningEfforts = selected?._meta?.supportsReasoningEffort === false
+  const reasoningEffort = selected?.metadata?.reasoningEffort;
+  const reasoningEfforts = selected?.metadata?.supportsReasoningEffort === false
     ? []
-    : selected?._meta?.reasoningEfforts ?? [];
+    : selected?.metadata?.reasoningEfforts ?? [];
   const selectedReasoning = reasoningEfforts.find((effort) =>
     effort.id === reasoningEffort || effort.value === reasoningEffort
   );
@@ -1431,18 +2012,24 @@ function App() {
   const sidebarShortcutLabel = isMacOS() ? "⌘B" : "Ctrl+B";
   const [stage, setStage] = useState<OnboardingStage>("checking");
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
-  const [connection, setConnection] = useState<Connection | null>(null);
+  const [sessionViews, setSessionViews] = useState<Record<string, SessionViewState>>({});
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(() => new Set());
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [deviceAuthCode, setDeviceAuthCode] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [sessionHistory, setSessionHistory] = useState<PersistedSessionSummary[]>([]);
   const [workspaceHistory, setWorkspaceHistory] = useState<PersistedWorkspaceSummary[]>([]);
-  const [draft, setDraft] = useState("");
-  const [running, setRunning] = useState(false);
-  const [permission, setPermission] = useState<PermissionRequest | null>(null);
+  const [pendingDraft, setPendingDraft] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<FileAttachment[]>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [fileDragActive, setFileDragActive] = useState(false);
+  const [fileDragCount, setFileDragCount] = useState(0);
+  const [respondingPermissionId, setRespondingPermissionId] = useState<string | null>(null);
   const [showConnection, setShowConnection] = useState(false);
+  const [activeView, setActiveView] = useState<AppView>("session");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("application");
   const [connectionNotice, setConnectionNotice] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null);
@@ -1457,11 +2044,14 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
-  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const [historyMutating, setHistoryMutating] = useState(false);
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
-  const activeAssistantId = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const activeAssistantIds = useRef<Map<string, string>>(new Map());
+  const sessionViewsRef = useRef(sessionViews);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
   const composer = useRef<HTMLFormElement | null>(null);
@@ -1470,12 +2060,144 @@ function App() {
   const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
 
+  const activeSession = activeSessionId ? sessionViews[activeSessionId] : undefined;
+  const connection = activeSession && !activeSession.disconnected ? activeSession.connection : null;
+  const messages = activeSession?.messages ?? [];
+  const draft = activeSession?.draft ?? pendingDraft;
+  const attachments = activeSession?.attachments ?? pendingAttachments;
+  const running = activeSession?.running ?? false;
+  const permission = activeSession?.permissions[0] ?? null;
+  const activeSessionLoading = activeSessionId !== null && loadingSessionIds.has(activeSessionId);
+  const anySessionRunning = Object.values(sessionViews).some((session) => session.running);
+  const sessionTransitioning = activeSessionLoading || stage === "connecting";
+  const commandSuggestions = useMemo(() => {
+    const match = draft.match(/^\/([^\s]*)$/);
+    if (!match) return [];
+    const query = match[1].toLocaleLowerCase();
+    return (activeSession?.availableCommands ?? [])
+      .filter((command) => command.name.toLocaleLowerCase().includes(query))
+      .slice(0, 6);
+  }, [activeSession?.availableCommands, draft]);
+
+  function updateSessionView(
+    sessionId: string,
+    update: (current: SessionViewState) => SessionViewState,
+    render = true,
+  ) {
+    const current = sessionViewsRef.current;
+    const session = current[sessionId];
+    if (!session) return;
+    const next = { ...current, [sessionId]: update(session) };
+    sessionViewsRef.current = next;
+    if (render) setSessionViews(next);
+  }
+
+  function setSessionMessages(
+    sessionId: string,
+    action: SetStateAction<ConversationMessage[]>,
+  ) {
+    updateSessionView(
+      sessionId,
+      (session) => ({
+        ...session,
+        messages: typeof action === "function" ? action(session.messages) : action,
+      }),
+      activeSessionIdRef.current === sessionId,
+    );
+  }
+
+  function setSessionRunning(sessionId: string, running: boolean) {
+    updateSessionView(sessionId, (session) => ({ ...session, running }));
+  }
+
+  function enqueueSessionPermission(sessionId: string, permission: PermissionRequest) {
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      permissions: [
+        ...session.permissions.filter((entry) => entry.requestId !== permission.requestId),
+        permission,
+      ],
+    }));
+  }
+
+  function resolveSessionPermission(sessionId: string, requestId: string) {
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      permissions: session.permissions.filter((entry) => entry.requestId !== requestId),
+    }));
+  }
+
+  function setDraft(next: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionId) {
+      updateSessionView(sessionId, (session) => ({ ...session, draft: next }));
+    } else {
+      setPendingDraft(next);
+    }
+  }
+
+  function setAttachments(next: FileAttachment[]) {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionId) {
+      updateSessionView(sessionId, (session) => ({ ...session, attachments: next }));
+    } else {
+      setPendingAttachments(next);
+    }
+  }
+
+  function activateSession(sessionId: string | null) {
+    activeSessionIdRef.current = sessionId;
+    setSessionViews(sessionViewsRef.current);
+    setActiveSessionId(sessionId);
+    if (isTauri()) {
+      void invoke("grok_activate_session", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  function upsertSessionView(
+    nextConnection: Connection,
+    nextMessages?: ConversationMessage[],
+    replay?: SessionReplayProjection,
+  ) {
+    const current = sessionViewsRef.current;
+    const existing = current[nextConnection.sessionId];
+    const next = {
+      ...current,
+      [nextConnection.sessionId]: {
+        connection: nextConnection,
+        disconnected: false,
+        messages: nextMessages ?? existing?.messages ?? [],
+        draft: existing?.draft ?? "",
+        attachments: existing?.attachments ?? [],
+        running: existing?.running ?? false,
+        permissions: replay ? replay.permissions : existing?.permissions ?? [],
+        availableCommands: replay?.availableCommands ?? existing?.availableCommands ?? [],
+        currentModeId: replay?.currentModeId ?? existing?.currentModeId ?? null,
+        configOptions: replay?.configOptions ?? existing?.configOptions ?? [],
+        usage: replay?.usage ?? existing?.usage ?? null,
+      },
+    };
+    sessionViewsRef.current = next;
+    setSessionViews(next);
+  }
+
+  function clearAllSessionViews() {
+    activeSessionIdRef.current = null;
+    activeAssistantIds.current.clear();
+    sessionViewsRef.current = {};
+    setActiveSessionId(null);
+    setSessionViews({});
+    setLoadingSessionIds(new Set());
+    setPendingAttachments([]);
+  }
+
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
   const messageHistory = useMemo(() => conversationTurnPreviews(messages), [messages]);
   const appUpdating = updatePhase === "downloading";
   const sidebarSessions: SidebarSessionSummary[] = sessionHistory.map((session) => ({
     ...session,
-    running: running && connection?.sessionId === session.sessionId,
+    running: sessionViews[session.sessionId]?.running ?? false,
+    needsAttention: (sessionViews[session.sessionId]?.permissions.length ?? 0) > 0,
   }));
   const trackedWorkspacePaths = new Set(workspaceHistory.map((entry) => entry.path));
   const visibleSidebarSessions = sidebarSessions.filter((session) =>
@@ -1491,8 +2213,80 @@ function App() {
     path,
     sessions: sessionsByWorkspace.get(path) ?? [],
   }));
-  const sidebarActionsDisabled = running || appUpdating || stage === "connecting" || historyMutating;
-  const sessionLocationEditable = connection === null && messages.length === 0 && !running;
+  const sidebarActionsDisabled = appUpdating || stage === "connecting" || historyMutating || renamingSessionId !== null;
+  const sessionLocationEditable = !activeSessionLoading && connection === null && messages.length === 0 && !running;
+  const attachmentDisabled = activeSessionLoading || running || appUpdating || stage === "connecting";
+
+  const addAttachmentPaths = useCallback(async (paths: string[]) => {
+    if (paths.length === 0 || attachmentDisabled) return;
+    const targetSessionId = activeSessionIdRef.current;
+    setAttachmentBusy(true);
+    try {
+      const inspected = await invoke<FileAttachment[]>("inspect_attachments", {
+        paths: [...attachments.map((attachment) => attachment.path), ...paths],
+      });
+      if (targetSessionId) {
+        updateSessionView(targetSessionId, (session) => ({ ...session, attachments: inspected }));
+      } else {
+        setPendingAttachments(inspected);
+      }
+    } catch (error) {
+      setConnectionNotice(String(error));
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }, [attachmentDisabled, attachments]);
+
+  async function chooseAttachmentFiles() {
+    if (attachmentDisabled || attachmentBusy) return;
+    setAttachmentBusy(true);
+    try {
+      const selected = await invoke<FileAttachment[]>("choose_attachments");
+      if (selected.length > 0) {
+        await addAttachmentPaths(selected.map((attachment) => attachment.path));
+      }
+    } catch (error) {
+      setConnectionNotice(String(error));
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type === "leave") {
+        setFileDragActive(false);
+        setFileDragCount(0);
+        return;
+      }
+      if (activeView !== "session" || attachmentDisabled) {
+        setFileDragActive(false);
+        return;
+      }
+      if (payload.type === "enter") {
+        setFileDragActive(true);
+        setFileDragCount(payload.paths.length);
+      } else if (payload.type === "over") {
+        setFileDragActive(true);
+      } else if (payload.type === "drop") {
+        setFileDragActive(false);
+        setFileDragCount(0);
+        void addAttachmentPaths(payload.paths);
+      }
+    }).then((stopListening) => {
+      if (disposed) stopListening();
+      else unlisten = stopListening;
+    }).catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [activeView, attachmentDisabled, addAttachmentPaths]);
 
   useEffect(() => {
     if (!overlayTitlebar) return;
@@ -1572,6 +2366,60 @@ function App() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [sidebarMenu]);
+
+  useEffect(() => {
+    if (!editingSessionId) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        renamingSessionId === null
+        && (!(event.target instanceof Element) || !event.target.closest("[data-session-rename-root]"))
+      ) {
+        setEditingSessionId(null);
+      }
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && renamingSessionId === null) setEditingSessionId(null);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [editingSessionId, renamingSessionId]);
+
+  useEffect(() => {
+    if (!showConnection) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest("[data-connection-popover-root]")) {
+        setShowConnection(false);
+      }
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setShowConnection(false);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showConnection]);
+
+  useEffect(() => {
+    if (activeView !== "settings") return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !showConnection && !sidebarMenu && !deleteConfirmation) {
+        setActiveView("session");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeView, deleteConfirmation, showConnection, sidebarMenu]);
 
   useEffect(() => {
     if (running || appUpdating || stage === "connecting" || historyMutating || sidebarCollapsed) {
@@ -1729,53 +2577,85 @@ function App() {
 
     void Promise.all([
       listen<SessionUpdate>("grok://session-update", ({ payload }) => {
-        const messageId = activeAssistantId.current;
+        if (payload.kind === "available_commands_update") {
+          updateSessionView(payload.sessionId, (session) => ({
+            ...session,
+            availableCommands: payload.availableCommands,
+          }));
+        } else if (payload.kind === "current_mode_update") {
+          updateSessionView(payload.sessionId, (session) => ({
+            ...session,
+            currentModeId: payload.currentModeId,
+          }));
+        } else if (payload.kind === "config_option_update") {
+          updateSessionView(payload.sessionId, (session) => ({
+            ...session,
+            configOptions: payload.configOptions,
+          }));
+        } else if (payload.kind === "usage_update") {
+          updateSessionView(payload.sessionId, (session) => ({
+            ...session,
+            usage: { used: payload.used, size: payload.size, cost: payload.cost },
+          }));
+        } else if (payload.kind === "session_info_update") {
+          const parsedUpdatedAt = payload.updatedAt ? Date.parse(payload.updatedAt) : Number.NaN;
+          setSessionHistory((current) => current.map((entry) => entry.sessionId === payload.sessionId
+            ? {
+                ...entry,
+                title: payload.title || entry.title,
+                updatedAt: Number.isFinite(parsedUpdatedAt) ? parsedUpdatedAt : entry.updatedAt,
+              }
+            : entry));
+        } else if (payload.kind === "permission_decision") {
+          resolveSessionPermission(payload.sessionId, payload.requestId);
+        }
+
+        const messageId = activeAssistantIds.current.get(payload.sessionId);
         if (!messageId) return;
-        setMessages((current) => current.map((message) => {
+        setSessionMessages(payload.sessionId, (current) => current.map((message) => {
           if (message.id !== messageId) return message;
-          if (payload.kind === "agent_message_chunk") {
-            return { ...finishThought(message, Date.now()), text: message.text + (payload.text ?? "") };
-          }
-          if (payload.kind === "agent_thought_chunk") {
-            return {
-              ...message,
-              thought: (message.thought ?? "") + (payload.text ?? ""),
-              thoughtActive: true,
-              thoughtStartedAt: message.thoughtActive ? message.thoughtStartedAt ?? Date.now() : Date.now(),
-            };
-          }
-          if (payload.kind === "plan") {
-            return { ...finishThought(message, Date.now()), plan: payload.entries ?? [] };
-          }
-          if (payload.kind === "tool_call" || payload.kind === "tool_call_update") {
-            const id = payload.toolCallId ?? `tool-${message.tools?.length ?? 0}`;
-            const tools = [...(message.tools ?? [])];
-            const index = tools.findIndex((tool) => tool.id === id);
-            const nextTool: ToolActivity = {
-              id,
-              title: payload.title ?? tools[index]?.title ?? "Working with a local tool",
-              kind: payload.toolKind ?? tools[index]?.kind ?? undefined,
-              status: payload.status ?? tools[index]?.status ?? "in_progress",
-            };
-            if (index >= 0) tools[index] = nextTool;
-            else tools.push(nextTool);
-            return { ...finishThought(message, Date.now()), tools };
-          }
-          return message;
+          return applySessionUpdateToMessage(message, payload, Date.now());
         }));
       }),
       listen<PermissionRequest>("grok://permission-request", ({ payload }) => {
-        const messageId = activeAssistantId.current;
+        const messageId = activeAssistantIds.current.get(payload.sessionId);
         if (messageId) {
           const endedAt = Date.now();
-          setMessages((current) => current.map((message) =>
+          setSessionMessages(payload.sessionId, (current) => current.map((message) =>
             message.id === messageId ? finishThought(message, endedAt) : message
           ));
         }
-        setPermission(payload);
+        enqueueSessionPermission(payload.sessionId, payload);
+        if (payload.sessionId !== activeSessionIdRef.current) {
+          setConnectionNotice("A background session is waiting for approval.");
+        }
       }),
       listen<ConnectionEvent>("grok://connection", ({ payload }) => {
-        if (payload.status === "disconnected" && connection && !connectionTransitioning.current) {
+        if (payload.status !== "disconnected") return;
+        const affectedSessionIds = payload.sessionIds ?? [];
+        const endedAt = Date.now();
+        affectedSessionIds.forEach((sessionId) => {
+          const messageId = activeAssistantIds.current.get(sessionId);
+          updateSessionView(sessionId, (session) => ({
+            ...session,
+            disconnected: true,
+            running: false,
+            permissions: [],
+            messages: session.messages.map((message) => message.id === messageId
+              ? {
+                  ...finishRun(message, endedAt),
+                  state: "error",
+                  error: payload.message ?? "Grok Build disconnected.",
+                }
+              : message),
+          }));
+          activeAssistantIds.current.delete(sessionId);
+        });
+        if (
+          activeSessionIdRef.current
+          && (affectedSessionIds.length === 0 || affectedSessionIds.includes(activeSessionIdRef.current))
+          && !connectionTransitioning.current
+        ) {
           setConnectionNotice(payload.message ?? "Grok Build disconnected.");
         }
       }),
@@ -1791,7 +2671,7 @@ function App() {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [connection]);
+  }, []);
 
   useLayoutEffect(() => {
     const container = conversation.current;
@@ -1940,7 +2820,7 @@ function App() {
   }
 
   async function installAppUpdate() {
-    if (!appUpdate || running || updatePhase === "downloading") return;
+    if (!appUpdate || anySessionRunning || updatePhase === "downloading") return;
     setUpdateError(null);
     setUpdateProgress({ stage: "downloading", downloaded: 0, total: null });
     setUpdatePhase("downloading");
@@ -2003,12 +2883,12 @@ function App() {
         workspace: targetWorkspace,
         approvalMode: targetApprovalMode,
       });
-      setConnection(next);
+      upsertSessionView(next, clearConversation ? [] : undefined);
+      activateSession(next.sessionId);
       setWorkspace(next.workspace);
       setApprovalMode(next.approvalMode);
       setStatus((current) => current ? { ...current, stage: "connected", cliVersion: next.cliVersion } : current);
       setStage("connected");
-      if (clearConversation) setMessages([]);
       await refreshSessionHistory();
       connectionTransitioning.current = false;
       return next;
@@ -2016,9 +2896,7 @@ function App() {
       const message = String(error);
       const authRequired = message.includes(AUTH_REQUIRED_ERROR);
       setSetupError(authRequired ? null : message);
-      setConnection(null);
-      setMessages([]);
-      setStage(authRequired ? "needsAuth" : "ready");
+      setStage(authRequired ? "needsAuth" : activeSessionIdRef.current ? "connected" : "ready");
       connectionTransitioning.current = false;
       return null;
     }
@@ -2026,48 +2904,87 @@ function App() {
 
   async function loadSession(session: PersistedSessionSummary) {
     setSidebarMenu(null);
+    setActiveView("session");
     if (
-      session.sessionId === connection?.sessionId
-      || running
+      (session.sessionId === activeSessionIdRef.current
+        && !sessionViewsRef.current[session.sessionId]?.disconnected)
       || appUpdating
-      || stage === "connecting"
     ) return;
 
+    const previousSessionId = activeSessionIdRef.current;
+    const cached = sessionViewsRef.current[session.sessionId];
+    activateSession(session.sessionId);
     setShowConnection(false);
     setSetupError(null);
     setConnectionNotice(null);
-    setPermission(null);
-    setDraft("");
-    activeAssistantId.current = null;
-    connectionTransitioning.current = true;
-    setStage("connecting");
+    setWorkspace(cached?.connection.workspace ?? session.workspace);
+    if (cached) setApprovalMode(cached.connection.approvalMode);
+    else {
+      setPendingDraft("");
+      setPendingAttachments([]);
+    }
+    if (loadingSessionIds.has(session.sessionId)) return;
+    if (!cached) {
+      setLoadingSessionIds((current) => new Set(current).add(session.sessionId));
+    }
 
     try {
       const loaded = await invoke<LoadSessionResult>("grok_load_session", {
         sessionId: session.sessionId,
       });
-      setConnection(loaded.connection);
-      setWorkspace(loaded.connection.workspace);
-      setApprovalMode(loaded.connection.approvalMode);
-      setMessages(messagesFromSessionReplay(loaded.connection.sessionId, loaded.updates));
+      const alreadyCached = Boolean(sessionViewsRef.current[session.sessionId]);
+      const replay = alreadyCached
+        ? undefined
+        : sessionReplayProjection(loaded.connection.sessionId, loaded.updates);
+      upsertSessionView(
+        loaded.connection,
+        replay?.messages,
+        replay,
+      );
+      if (replay?.title || replay?.updatedAt) {
+        setSessionHistory((current) => current.map((entry) => entry.sessionId === session.sessionId
+          ? {
+              ...entry,
+              title: replay.title ?? entry.title,
+              updatedAt: replay.updatedAt ?? entry.updatedAt,
+            }
+          : entry));
+      }
+      if (activeSessionIdRef.current === session.sessionId) {
+        setWorkspace(loaded.connection.workspace);
+        setApprovalMode(loaded.connection.approvalMode);
+      }
+      void invoke("grok_activate_session", {
+        sessionId: activeSessionIdRef.current,
+      }).catch(() => undefined);
       setStatus((current) => current ? {
         ...current,
         stage: "connected",
         cliVersion: loaded.connection.cliVersion,
       } : current);
       setStage("connected");
-      await refreshSessionHistory();
-      connectionTransitioning.current = false;
+      void refreshSessionHistory();
     } catch (error) {
-      await invoke("grok_disconnect").catch(() => undefined);
       const message = String(error);
       const authRequired = message.includes(AUTH_REQUIRED_ERROR);
-      setConnection(null);
-      setMessages([]);
-      setApprovalMode("ask");
-      setSetupError(authRequired ? null : message);
-      setStage(authRequired ? "needsAuth" : "ready");
-      connectionTransitioning.current = false;
+      if (activeSessionIdRef.current === session.sessionId) {
+        activateSession(previousSessionId);
+        const previous = previousSessionId ? sessionViewsRef.current[previousSessionId] : undefined;
+        setWorkspace(previous?.connection.workspace ?? workspace);
+        setApprovalMode(previous?.connection.approvalMode ?? "ask");
+        setSetupError(authRequired ? null : message);
+        setStage(authRequired ? "needsAuth" : previousSessionId ? "connected" : "ready");
+      } else {
+        void invoke("grok_activate_session", {
+          sessionId: activeSessionIdRef.current,
+        }).catch(() => undefined);
+      }
+    } finally {
+      setLoadingSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(session.sessionId);
+        return next;
+      });
     }
   }
 
@@ -2108,12 +3025,10 @@ function App() {
         workspace: path,
       });
       if (disconnectsActiveSession) {
-        connectionTransitioning.current = true;
-        await invoke("grok_disconnect").catch(() => undefined);
-        connectionTransitioning.current = false;
-        setConnection(null);
-        setMessages([]);
-        setPermission(null);
+        await invoke("grok_deactivate_session", { sessionId: connection?.sessionId }).catch(() => undefined);
+        activateSession(null);
+        setPendingDraft("");
+        setPendingAttachments([]);
         setApprovalMode("ask");
         setStage("ready");
       }
@@ -2142,6 +3057,12 @@ function App() {
       target.sessionId === connection.sessionId
       || (target.workspace !== undefined && target.workspace === connection.workspace)
     );
+    const affectedSessionIds = sessionHistory
+      .filter((session) =>
+        target.sessionId === session.sessionId
+        || (target.workspace !== undefined && target.workspace === session.workspace)
+      )
+      .map((session) => session.sessionId);
     setSidebarMenu(null);
     setHistoryMutating(true);
     setConnectionNotice(null);
@@ -2152,10 +3073,19 @@ function App() {
         workspace: target.workspace,
       });
       setSessionHistory(sessions);
+      if (action === "delete") {
+        const nextViews = Object.fromEntries(
+          Object.entries(sessionViewsRef.current)
+            .filter(([sessionId]) => !affectedSessionIds.includes(sessionId)),
+        );
+        sessionViewsRef.current = nextViews;
+        setSessionViews(nextViews);
+        affectedSessionIds.forEach((sessionId) => activeAssistantIds.current.delete(sessionId));
+      }
       if (affectsActive && action !== "restore") {
-        setConnection(null);
-        setMessages([]);
-        setPermission(null);
+        activateSession(null);
+        setPendingDraft("");
+        setPendingAttachments([]);
         setApprovalMode("ask");
         setStage("ready");
       }
@@ -2163,6 +3093,48 @@ function App() {
       setConnectionNotice(String(error));
     } finally {
       setHistoryMutating(false);
+    }
+  }
+
+  function startSessionRename(sessionId: string) {
+    setSidebarMenu(null);
+    setConnectionNotice(null);
+    setEditingSessionId(sessionId);
+  }
+
+  async function renameSession(sessionId: string, title: string) {
+    if (renamingSessionId !== null) return;
+    const normalizedTitle = title.trim().replace(/\s+/g, " ");
+    const session = sessionHistory.find((candidate) => candidate.sessionId === sessionId);
+    if (!normalizedTitle) {
+      setConnectionNotice("Enter a session name.");
+      return;
+    }
+    if (!session) {
+      setEditingSessionId(null);
+      setConnectionNotice("That session is no longer in Groky history.");
+      return;
+    }
+    if (normalizedTitle === session.title) {
+      setEditingSessionId(null);
+      return;
+    }
+
+    setRenamingSessionId(sessionId);
+    setConnectionNotice(null);
+    try {
+      const renamed = await invoke<PersistedSessionSummary>("grok_rename_session", {
+        sessionId,
+        title: normalizedTitle,
+      });
+      setSessionHistory((current) => current.map((candidate) =>
+        candidate.sessionId === renamed.sessionId ? renamed : candidate
+      ));
+      setEditingSessionId(null);
+    } catch (error) {
+      setConnectionNotice(String(error));
+    } finally {
+      setRenamingSessionId(null);
     }
   }
 
@@ -2198,7 +3170,7 @@ function App() {
   async function revealWorkingDirectory() {
     setConnectionNotice(null);
     try {
-      await invoke("reveal_working_directory");
+      await invoke("reveal_working_directory", { sessionId: connection?.sessionId });
     } catch (error) {
       setConnectionNotice(String(error));
     }
@@ -2220,10 +3192,13 @@ function App() {
     if (sidebarActionsDisabled) return;
     const nextMode: ApprovalMode = "ask";
     setSidebarMenu(null);
+    setActiveView("session");
+    const previousSessionId = connection?.sessionId;
+    activateSession(null);
+    setPendingDraft("");
+    setPendingAttachments([]);
     if (connection) {
-      connectionTransitioning.current = true;
-      await invoke("grok_disconnect").catch(() => undefined);
-      connectionTransitioning.current = false;
+      void invoke("grok_deactivate_session", { sessionId: previousSessionId }).catch(() => undefined);
     }
     if (targetWorkspace) {
       setCollapsedWorkspaces((current) => {
@@ -2232,13 +3207,9 @@ function App() {
         return next;
       });
     }
-    setDraft("");
-    setMessages([]);
-    setPermission(null);
     setApprovalMode(nextMode);
     setSetupError(null);
     setConnectionNotice(null);
-    setConnection(null);
     setWorkspace(targetWorkspace);
     setStage("ready");
   }
@@ -2250,15 +3221,49 @@ function App() {
   }
 
   async function loadModels() {
-    const activeConnection = connection ?? await connect(workspace);
+    const activeConnection = await ensureActiveConnection();
     return activeConnection !== null;
   }
 
+  async function ensureActiveConnection() {
+    const currentSession = activeSessionIdRef.current
+      ? sessionViewsRef.current[activeSessionIdRef.current]
+      : undefined;
+    if (!currentSession?.disconnected) return connection ?? await connect(workspace);
+
+    const sessionId = currentSession.connection.sessionId;
+    connectionTransitioning.current = true;
+    setLoadingSessionIds((current) => new Set(current).add(sessionId));
+    try {
+      const loaded = await invoke<LoadSessionResult>("grok_load_session", { sessionId });
+      upsertSessionView(loaded.connection);
+      setWorkspace(loaded.connection.workspace);
+      setApprovalMode(loaded.connection.approvalMode);
+      setConnectionNotice(null);
+      return loaded.connection;
+    } catch (error) {
+      setConnectionNotice(String(error));
+      return null;
+    } finally {
+      connectionTransitioning.current = false;
+      setLoadingSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+    }
+  }
+
   async function changeModel(modelId: string) {
+    const sessionId = connection?.sessionId;
+    if (!sessionId) return null;
     setConnectionNotice(null);
     try {
-      const models = await invoke<SessionModelState>("grok_set_model", { modelId });
-      setConnection((active) => active ? { ...active, models } : active);
+      const models = await invoke<SessionModelState>("grok_set_model", { sessionId, modelId });
+      updateSessionView(sessionId, (session) => ({
+        ...session,
+        connection: { ...session.connection, models },
+      }));
       return models;
     } catch (error) {
       setConnectionNotice(String(error));
@@ -2267,10 +3272,15 @@ function App() {
   }
 
   async function changeReasoningEffort(reasoningEffort: string) {
+    const sessionId = connection?.sessionId;
+    if (!sessionId) return null;
     setConnectionNotice(null);
     try {
-      const models = await invoke<SessionModelState>("grok_set_reasoning_effort", { reasoningEffort });
-      setConnection((active) => active ? { ...active, models } : active);
+      const models = await invoke<SessionModelState>("grok_set_reasoning_effort", { sessionId, reasoningEffort });
+      updateSessionView(sessionId, (session) => ({
+        ...session,
+        connection: { ...session.connection, models },
+      }));
       return models;
     } catch (error) {
       setConnectionNotice(String(error));
@@ -2281,16 +3291,19 @@ function App() {
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const prompt = draft.trim();
-    if (!prompt || running || appUpdating || stage === "connecting") return;
+    const sentAttachments = attachments;
+    if ((!prompt && sentAttachments.length === 0) || running || appUpdating || sessionTransitioning) return;
 
-    const activeConnection = connection ?? await connect(workspace);
+    const activeConnection = await ensureActiveConnection();
     if (!activeConnection) return;
 
     setSessionHistory((current) => current
       .map((session) => session.sessionId === activeConnection.sessionId
         ? {
             ...session,
-            title: session.title === "New Grok session" ? titleFromPrompt(prompt) : session.title,
+            title: session.title === "New Grok session"
+              ? titleFromPrompt(prompt || sentAttachments[0].name)
+              : session.title,
             updatedAt: Date.now(),
           }
         : session)
@@ -2300,6 +3313,7 @@ function App() {
       id: makeMessageId("user"),
       role: "user",
       text: prompt,
+      attachments: sentAttachments.map(({ name, size, mimeType }) => ({ name, size, mimeType })),
     };
     const assistantMessage: ConversationMessage = {
       id: makeMessageId("assistant"),
@@ -2308,36 +3322,46 @@ function App() {
       startedAt: Date.now(),
       state: "streaming",
     };
-    activeAssistantId.current = assistantMessage.id;
-    setMessages((current) => [...current, userMessage, assistantMessage]);
-    setDraft("");
-    setRunning(true);
-    setPermission(null);
+    const sessionId = activeConnection.sessionId;
+    activeAssistantIds.current.set(sessionId, assistantMessage.id);
+    setSessionMessages(sessionId, (current) => [...current, userMessage, assistantMessage]);
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      draft: "",
+      attachments: [],
+      running: true,
+    }));
 
     try {
-      const result = await invoke<PromptResult>("grok_prompt", { prompt });
+      const result = await invoke<PromptResult>("grok_prompt", {
+        sessionId,
+        prompt,
+        attachmentPaths: sentAttachments.map((attachment) => attachment.path),
+      });
       const endedAt = Date.now();
-      setMessages((current) => current.map((message) =>
-        message.id === assistantMessage.id
-          ? {
-              ...finishRun(message, endedAt),
-              text: result.text || message.text,
-              thought: result.thought || message.thought,
-              state: "complete",
-            }
-          : message
+      setSessionMessages(sessionId, (current) => current.map((message) =>
+        message.id === assistantMessage.id ? (() => {
+          const state = stateFromStopReason(result.stopReason);
+          return {
+            ...finishRun(message, endedAt),
+            text: result.text || message.text,
+            thought: result.thought || message.thought,
+            state,
+            stopReason: result.stopReason,
+            error: state === "error" ? "Grok Build ended the turn for an unknown reason." : message.error,
+          };
+        })() : message
       ));
     } catch (error) {
       const endedAt = Date.now();
-      setMessages((current) => current.map((message) =>
+      setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === assistantMessage.id
           ? { ...finishRun(message, endedAt), state: "error", error: String(error) }
           : message
       ));
     } finally {
-      setRunning(false);
-      setPermission(null);
-      activeAssistantId.current = null;
+      setSessionRunning(sessionId, false);
+      activeAssistantIds.current.delete(sessionId);
       void refreshSessionHistory();
     }
   }
@@ -2351,13 +3375,29 @@ function App() {
     }
   }
 
+  function selectAvailableCommand(command: AvailableCommand) {
+    setDraft(`/${command.name} `);
+    window.requestAnimationFrame(() => composerTextarea.current?.focus());
+  }
+
   async function cancelRun() {
+    const sessionId = connection?.sessionId;
+    if (!sessionId) return;
     try {
-      await invoke("grok_cancel");
-      const messageId = activeAssistantId.current;
+      await invoke("grok_cancel", { sessionId });
+      const messageId = activeAssistantIds.current.get(sessionId);
       const endedAt = Date.now();
-      setMessages((current) => current.map((message) =>
-        message.id === messageId ? { ...finishRun(message, endedAt), state: "cancelled" } : message
+      setSessionMessages(sessionId, (current) => current.map((message) =>
+        message.id === messageId
+          ? {
+              ...finishRun(message, endedAt),
+              state: "cancelled",
+              stopReason: "cancelled",
+              tools: message.tools?.map((tool) => tool.status === "pending" || tool.status === "in_progress"
+                ? { ...tool, status: "cancelled" }
+                : tool),
+            }
+          : message
       ));
     } catch (error) {
       setConnectionNotice(String(error));
@@ -2368,22 +3408,33 @@ function App() {
     if (!permission) return;
     const current = permission;
     const selectedOption = current.options.find((option) => option.optionId === optionId);
-    setPermission(null);
+    setRespondingPermissionId(current.requestId);
     try {
-      await invoke("grok_respond_permission", { requestId: current.requestId, optionId });
+      await invoke("grok_respond_permission", {
+        sessionId: current.sessionId,
+        requestId: current.requestId,
+        optionId,
+      });
+      resolveSessionPermission(current.sessionId, current.requestId);
       if (enablesAlwaysApprove(selectedOption)) {
         setApprovalMode("alwaysApprove");
-        setConnection((active) => active ? { ...active, approvalMode: "alwaysApprove" } : active);
+        updateSessionView(current.sessionId, (session) => ({
+          ...session,
+          connection: { ...session.connection, approvalMode: "alwaysApprove" },
+        }));
       }
     } catch (error) {
       setConnectionNotice(String(error));
+    } finally {
+      setRespondingPermissionId(null);
     }
   }
 
   async function signOut() {
     setShowConnection(false);
-    setConnection(null);
-    setMessages([]);
+    setActiveView("session");
+    clearAllSessionViews();
+    setPendingDraft("");
     setApprovalMode("ask");
     setStage("checking");
     try {
@@ -2397,11 +3448,12 @@ function App() {
 
   async function disconnect() {
     setShowConnection(false);
+    setActiveView("session");
     try {
       await invoke("grok_disconnect");
     } finally {
-      setConnection(null);
-      setMessages([]);
+      clearAllSessionViews();
+      setPendingDraft("");
       setApprovalMode("ask");
       setStage("ready");
     }
@@ -2415,7 +3467,7 @@ function App() {
       phase={updatePhase}
       progress={updateProgress}
       error={updateError}
-      taskRunning={running}
+      taskRunning={anySessionRunning}
       onInstall={() => void installAppUpdate()}
       onDismiss={dismissAppUpdate}
     />
@@ -2443,7 +3495,7 @@ function App() {
   return (
     <>
       <div
-        className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
+        className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${activeView === "settings" ? "settings-open" : ""} ${activeView === "session" && sidebarCollapsed ? "sidebar-collapsed" : ""}`}
         style={{
           "--sidebar-width": `${sidebarWidth}px`,
           ...(overlayTitlebar && nativeTitlebarHeight !== null
@@ -2451,6 +3503,14 @@ function App() {
             : {}),
         } as CSSProperties}
       >
+      {activeView === "settings" ? (
+        <SettingsSidebar
+          overlayTitlebar={overlayTitlebar}
+          section={activeSettingsSection}
+          onSectionChange={setActiveSettingsSection}
+          onBack={() => setActiveView("session")}
+        />
+      ) : (
       <aside className="sidebar">
         <div className="window-nav" {...dragRegionProps}>
           <button className="icon-button sidebar-toggle" type="button" aria-label="Hide sidebar" title={`Hide sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
@@ -2571,8 +3631,10 @@ function App() {
                           <SidebarSessionRow
                             key={session.sessionId}
                             session={session}
-                            selected={connection?.sessionId === session.sessionId}
+                            selected={activeSessionId === session.sessionId}
                             disabled={sidebarActionsDisabled}
+                            editing={editingSessionId === session.sessionId}
+                            renaming={renamingSessionId === session.sessionId}
                             menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
                             onSelect={() => void loadSession(session)}
                             onToggleMenu={() => setSidebarMenu((current) =>
@@ -2580,6 +3642,9 @@ function App() {
                                 ? null
                                 : { kind: "session", sessionId: session.sessionId }
                             )}
+                            onStartRename={() => startSessionRename(session.sessionId)}
+                            onRename={(title) => void renameSession(session.sessionId, title)}
+                            onCancelRename={() => setEditingSessionId(null)}
                             onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
                             onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
                             onDelete={() => requestSessionDelete(session)}
@@ -2603,8 +3668,10 @@ function App() {
                   <SidebarSessionRow
                     key={session.sessionId}
                     session={session}
-                    selected={connection?.sessionId === session.sessionId}
+                    selected={activeSessionId === session.sessionId}
                     disabled={sidebarActionsDisabled}
+                    editing={editingSessionId === session.sessionId}
+                    renaming={renamingSessionId === session.sessionId}
                     menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
                     onSelect={() => void loadSession(session)}
                     onToggleMenu={() => setSidebarMenu((current) =>
@@ -2612,6 +3679,9 @@ function App() {
                         ? null
                         : { kind: "session", sessionId: session.sessionId }
                     )}
+                    onStartRename={() => startSessionRename(session.sessionId)}
+                    onRename={(title) => void renameSession(session.sessionId, title)}
+                    onCancelRename={() => setEditingSessionId(null)}
                     onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
                     onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
                     onDelete={() => requestSessionDelete(session)}
@@ -2621,58 +3691,23 @@ function App() {
             </section>
           )}
 
-          {archivedSidebarSessions.length > 0 && (
-            <section className="archived-sessions">
-              <button
-                className="archived-heading"
-                type="button"
-                aria-expanded={archivedOpen}
-                onClick={() => {
-                  setSidebarMenu(null);
-                  setArchivedOpen((current) => !current);
-                }}
-              >
-                <Icon name="archive" size={14} />
-                <span>Archived</span>
-                <small>{archivedSidebarSessions.length}</small>
-              </button>
-              <div className={`archived-session-reveal ${archivedOpen ? "is-open" : ""}`} aria-hidden={!archivedOpen} inert={!archivedOpen}>
-                <div className="project-session-reveal-inner">
-                  <div className="task-list archived-task-list" aria-label="Archived sessions">
-                    {archivedSidebarSessions.map((session) => (
-                      <SidebarSessionRow
-                        key={session.sessionId}
-                        session={session}
-                        selected={false}
-                        disabled={sidebarActionsDisabled}
-                        subtitle={session.workspace ? workspaceName(session.workspace) : "Standalone"}
-                        menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
-                        onSelect={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
-                        onToggleMenu={() => setSidebarMenu((current) =>
-                          current?.kind === "session" && current.sessionId === session.sessionId
-                            ? null
-                            : { kind: "session", sessionId: session.sessionId }
-                        )}
-                        onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
-                        onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
-                        onDelete={() => requestSessionDelete(session)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </section>
-          )}
         </div>
 
-        <button className="profile-row" type="button" onClick={() => setShowConnection((current) => !current)}>
+        <button
+          className="profile-row"
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded={showConnection}
+          data-connection-popover-root
+          onClick={() => setShowConnection((current) => !current)}
+        >
           <span className="avatar">G</span>
           <span className="profile-copy"><strong>Grok Build</strong><small>{cleanVersion(connection?.cliVersion ?? status?.cliVersion ?? null)}</small></span>
           <span className={`connection-pill ${connection ? "" : "idle"}`}>{connection ? "live" : "signed in"}</span>
         </button>
 
         {showConnection && (
-          <div className="connection-popover">
+          <div className="connection-popover" role="dialog" aria-label="Grok Build account and connection" data-connection-popover-root>
             <div className="popover-heading"><span>LOCAL CONNECTION</span><button className="icon-button" type="button" onClick={() => setShowConnection(false)}><Icon name="x" size={15} /></button></div>
             <dl>
               <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
@@ -2683,6 +3718,20 @@ function App() {
               {connection && <div><dt>{connection.workspace ? "Working directory" : "Session directory"}</dt><dd title={connection.workingDirectory}>{connection.workingDirectory}</dd></div>}
               {connection && <div><dt>Transport</dt><dd>ACP stdio</dd></div>}
             </dl>
+            <button
+              className="popover-settings-link"
+              type="button"
+              onClick={() => {
+                setShowConnection(false);
+                setSidebarMenu(null);
+                setActiveSettingsSection("application");
+                setActiveView("settings");
+              }}
+            >
+              <Icon name="sliders" size={14} />
+              <span>Settings</span>
+              <span className="popover-settings-arrow"><Icon name="arrow-right" size={12} /></span>
+            </button>
             <div className="popover-update">
               <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={updatePhase === "checking" || updatePhase === "downloading"}>
                 <Icon name="refresh" size={13} />
@@ -2692,14 +3741,15 @@ function App() {
             </div>
             <div className="popover-actions">
               {connection && <button type="button" onClick={() => void revealWorkingDirectory()}><Icon name="external-link" size={14} /> Open folder</button>}
-              {connection && <button type="button" onClick={() => void disconnect()}>Disconnect</button>}
+              {connection && <button type="button" onClick={() => void disconnect()}><Icon name="stop" size={13} /> Disconnect</button>}
               <button className="danger-action" type="button" onClick={() => void signOut()}><Icon name="logout" size={14} /> Sign out</button>
             </div>
           </div>
         )}
       </aside>
+      )}
 
-      {!sidebarCollapsed && (
+      {activeView === "session" && !sidebarCollapsed && (
         <div
           className="sidebar-resizer"
           role="separator"
@@ -2719,6 +3769,37 @@ function App() {
       )}
 
       <main className="workspace">
+        {activeView === "settings" ? (
+          <SettingsScreen
+            overlayTitlebar={overlayTitlebar}
+            section={activeSettingsSection}
+            appVersion={appVersion}
+            cliVersion={connection?.cliVersion ?? status?.cliVersion ?? null}
+            connected={connection !== null}
+            approvalMode={approvalMode}
+            modelName={currentModel(connection?.models ?? null)?.name ?? "Grok Build default"}
+            currentModeId={activeSession?.currentModeId ?? null}
+            configOptions={activeSession?.configOptions ?? []}
+            usage={activeSession?.usage ?? null}
+            update={appUpdate}
+            updatePhase={updatePhase}
+            updateNotice={updateCheckNotice}
+            archivedSessions={archivedSidebarSessions}
+            archivedActionsDisabled={sidebarActionsDisabled}
+            onCheckForUpdates={() => void checkForAppUpdate(true)}
+            onSignOut={() => void signOut()}
+            onRestoreArchived={(sessionId) => void mutateSessionHistory("restore", { sessionId })}
+            onDeleteArchived={(session) => requestSessionDelete(session)}
+          />
+        ) : (
+        <>
+        {fileDragActive && (
+          <div className="file-drop-overlay" role="status" aria-live="polite">
+            <span className="file-drop-glyph"><Icon name="paperclip" size={24} /></span>
+            <strong>Drop to attach</strong>
+            <small>{fileDragCount === 1 ? "1 file ready" : `${fileDragCount || "Multiple"} files ready`}</small>
+          </div>
+        )}
         <header className="taskbar" {...dragRegionProps}>
           <div className="taskbar-leading">
             {sidebarCollapsed && (
@@ -2729,9 +3810,19 @@ function App() {
             </div>
           </div>
           <div className="task-actions">
-            <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : stage === "connecting" ? "Connecting" : "Signed in"}</span>
+            <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : sessionTransitioning ? "Loading session" : "Signed in"}</span>
             {connection && <span className="branch-button"><Icon name="branch" /><span>local</span></span>}
-            <button className="icon-button" type="button" aria-label="Connection settings" onClick={() => setShowConnection((current) => !current)}><Icon name="sliders" /></button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Connection settings"
+              aria-haspopup="dialog"
+              aria-expanded={showConnection}
+              data-connection-popover-root
+              onClick={() => setShowConnection((current) => !current)}
+            >
+              <Icon name="sliders" />
+            </button>
           </div>
         </header>
 
@@ -2751,7 +3842,14 @@ function App() {
           onScroll={handleConversationScroll}
         >
           <div className="conversation-inner">
-            {messages.length === 0 ? (
+            {activeSessionLoading ? (
+              <div className="empty-conversation" role="status" aria-live="polite">
+                <span className="empty-orbit"><i /><i /></span>
+                <p className="message-kicker">GROK BUILD / RESTORING</p>
+                <h1>Loading session…</h1>
+                <p>The conversation will appear here while other sessions continue in the background.</p>
+              </div>
+            ) : messages.length === 0 ? (
               <div className="empty-conversation">
                 <span className="empty-orbit"><i /><i /></span>
                 <p className="message-kicker">GROK BUILD / READY</p>
@@ -2768,7 +3866,11 @@ function App() {
             ))}
 
             {permission && (
-              <PermissionCard permission={permission} onRespond={(optionId) => void respondToPermission(optionId)} />
+              <PermissionCard
+                permission={permission}
+                busy={respondingPermissionId === permission.requestId}
+                onRespond={(optionId) => void respondToPermission(optionId)}
+              />
             )}
           </div>
         </section>
@@ -2805,6 +3907,44 @@ function App() {
               <span className="session-location-hint">Change until the first message</span>
             </div>
           )}
+          {attachments.length > 0 && (
+            <div className="attachment-tray" aria-label="Files attached to this message">
+              {attachments.map((attachment) => (
+                <div className="attachment-chip" key={attachment.path}>
+                  <span className="attachment-chip-icon"><Icon name="paperclip" size={13} /></span>
+                  <span className="attachment-chip-copy">
+                    <strong>{attachment.name}</strong>
+                    <small>{formatFileSize(attachment.size)}</small>
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${attachment.name}`}
+                    disabled={attachmentDisabled}
+                    onClick={() => setAttachments(attachments.filter((item) => item.path !== attachment.path))}
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {commandSuggestions.length > 0 && (
+            <div className="command-suggestions" role="menu" aria-label="Available Grok commands">
+              <span className="command-suggestions-label">COMMANDS</span>
+              {commandSuggestions.map((command) => (
+                <button
+                  type="button"
+                  role="menuitem"
+                  key={command.name}
+                  onClick={() => selectAvailableCommand(command)}
+                >
+                  <code>/{command.name}</code>
+                  <span>{command.description}</span>
+                  {command.inputHint && <small>{command.inputHint}</small>}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="prompt-row">
             <span className="prompt-symbol" aria-hidden="true">❯</span>
             <textarea
@@ -2813,15 +3953,26 @@ function App() {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={handleComposerKeyDown}
-              placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : stage === "connecting" ? "Starting Grok Build…" : "Ask Groky to build, debug, or review"}
+              placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : sessionTransitioning ? "Loading session…" : "Ask Groky to build, debug, or review"}
               rows={2}
-              disabled={running || appUpdating || stage === "connecting"}
+              disabled={running || appUpdating || sessionTransitioning}
             />
           </div>
           <div className="composer-toolbar">
+            <button
+              className="icon-button attachment-button add-context"
+              type="button"
+              aria-label="Attach files"
+              title="Attach files"
+              aria-busy={attachmentBusy}
+              disabled={attachmentDisabled || attachmentBusy}
+              onClick={() => void chooseAttachmentFiles()}
+            >
+              <Icon name="paperclip" size={16} />
+            </button>
             <ApprovalModeSelector
               mode={approvalMode}
-              busy={running || appUpdating || stage === "connecting"}
+              busy={running || appUpdating || sessionTransitioning}
               locked={messages.length > 0}
               onChange={(nextMode) => void changeApprovalMode(nextMode)}
             />
@@ -2832,7 +3983,7 @@ function App() {
             <ModelSelector
               connected={connection !== null}
               models={connection?.models ?? null}
-              busy={running || appUpdating || stage === "connecting"}
+              busy={running || appUpdating || sessionTransitioning}
               onLoad={loadModels}
               onChange={changeModel}
               onReasoningChange={changeReasoningEffort}
@@ -2840,10 +3991,12 @@ function App() {
             {running ? (
               <button className="send-button stop-button" type="button" aria-label="Stop" onClick={() => void cancelRun()}><Icon name="stop" size={15} /></button>
             ) : (
-              <button className="send-button" type="submit" aria-label="Send" disabled={!draft.trim() || appUpdating || stage === "connecting"}><Icon name="arrow-up" size={17} /></button>
+              <button className="send-button" type="submit" aria-label="Send" disabled={(!draft.trim() && attachments.length === 0) || appUpdating || sessionTransitioning}><Icon name="arrow-up" size={17} /></button>
             )}
           </div>
         </form>
+        </>
+        )}
       </main>
       </div>
       {deleteConfirmation && (
@@ -2890,10 +4043,6 @@ function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active:
       ? "Thought"
       : `Thought for ${formatThoughtDuration(elapsedMs)}`;
 
-  useEffect(() => {
-    setOpen(active);
-  }, [active]);
-
   return (
     <div className="thought-block" data-open={open}>
       <button
@@ -2912,12 +4061,136 @@ function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active:
   );
 }
 
+function PlanBlock({ entries, active }: { entries: PlanEntry[]; active: boolean }) {
+  const [open, setOpen] = useState(false);
+  const contentId = useId();
+  const current = entries.find((entry) => entry.status === "in_progress")
+    ?? entries.find((entry) => entry.status === "pending");
+  const completed = entries.filter((entry) => entry.status === "completed").length;
+  const summary = active && current
+    ? current.content
+    : `${completed}/${entries.length} plan steps complete`;
+
+  return (
+    <div className="progress-disclosure plan-disclosure" data-open={open}>
+      <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
+        <span className="progress-disclosure-label"><Icon name="chevron-down" size={13} /> PLAN</span>
+        <span className="progress-disclosure-summary">{summary}</span>
+      </button>
+      <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
+        <div>
+          {entries.map((entry, index) => (
+            <div className="plan-row" key={`${entry.content}-${index}`}>
+              <i className={entry.status} />
+              <span>{entry.content}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function fileNameFromPath(path: string) {
+  const segments = path.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] ?? path;
+}
+
+function formatTokenCount(value: number) {
+  return new Intl.NumberFormat("en", { notation: value >= 10_000 ? "compact" : "standard" }).format(value);
+}
+
+function ActivityBlock({
+  tools,
+  active,
+  metrics,
+  elapsedMs,
+}: {
+  tools: ToolActivity[];
+  active: boolean;
+  metrics?: TurnMetrics;
+  elapsedMs?: number;
+}) {
+  const failed = tools.filter((tool) => tool.status === "failed");
+  const cancelled = tools.filter((tool) => tool.status === "cancelled");
+  const interrupted = failed.length + cancelled.length;
+  const [open, setOpen] = useState(interrupted > 0);
+  const contentId = useId();
+  const locations = Array.from(new Set(tools.flatMap((tool) => tool.locations?.map((location) => location.path) ?? [])));
+  const latest = [...tools].reverse().find((tool) => tool.status === "in_progress" || tool.status === "pending")
+    ?? tools[tools.length - 1];
+
+  useEffect(() => {
+    if (interrupted > 0) setOpen(true);
+  }, [interrupted]);
+
+  const summaryParts = active && latest
+    ? [latest.title, tools.length > 1 ? `${tools.length} actions` : null]
+    : [
+        tools.length > 0 ? `${tools.length} ${tools.length === 1 ? "action" : "actions"}` : null,
+        locations.length > 0 ? `${locations.length} ${locations.length === 1 ? "file" : "files"}` : null,
+        failed.length > 0 ? `${failed.length} failed` : null,
+        cancelled.length > 0 ? `${cancelled.length} cancelled` : null,
+      ];
+  const metadata = [
+    metrics?.totalTokens !== undefined && metrics.totalTokens !== null
+      ? `${formatTokenCount(metrics.totalTokens)} tokens`
+      : null,
+    metrics?.modelCalls !== undefined && metrics.modelCalls !== null
+      ? `${metrics.modelCalls} ${metrics.modelCalls === 1 ? "model call" : "model calls"}`
+      : null,
+    metrics?.apiDurationMs !== undefined && metrics.apiDurationMs !== null
+      ? `${formatDuration(metrics.apiDurationMs)} API time`
+      : null,
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div className={`progress-disclosure activity-disclosure ${interrupted > 0 ? "has-failure" : ""}`} data-open={open}>
+      <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
+        <span className="progress-disclosure-label"><Icon name="chevron-down" size={13} /> ACTIVITY</span>
+        <span className="progress-disclosure-summary">{summaryParts.filter(Boolean).join(" · ") || "Turn details"}</span>
+        {elapsedMs !== undefined && <small>{formatDuration(elapsedMs)}</small>}
+      </button>
+      <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
+        <div>
+          {tools.map((tool) => (
+            <div className={`activity-row ${tool.status}`} key={tool.id}>
+              <span className="activity-icon">
+                {tool.status === "completed" ? <Icon name="check" size={13} /> : <Icon name="terminal" size={13} />}
+              </span>
+              <span className="activity-copy">
+                <strong>{tool.title}</strong>
+                {tool.locations && tool.locations.length > 0 && (
+                  <small>{tool.locations.map((location) => fileNameFromPath(location.path)).join(", ")}</small>
+                )}
+              </span>
+              <span className="activity-detail">{tool.status.replace(/_/g, " ")}</span>
+            </div>
+          ))}
+          {metadata && <p className="activity-metadata">{metadata}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConversationItem({ message }: { message: ConversationMessage }) {
   if (message.role === "user") {
     return (
       <div className="user-message" data-history-message-id={message.id}>
         <span className="message-kicker">REQUEST</span>
-        {message.text}
+        {message.text && <div className="user-message-copy">{message.text}</div>}
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="message-attachments" aria-label="Attached files">
+            {message.attachments.map((attachment, index) => (
+              <span className="message-attachment" key={`${attachment.name}-${index}`}>
+                <Icon name="paperclip" size={12} />
+                <span>{attachment.name}</span>
+                <small>{formatFileSize(attachment.size)}</small>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -2927,17 +4200,31 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
     ? "Working…"
     : message.state === "cancelled"
       ? duration ? `Turn cancelled by user in ${duration}.` : "Turn cancelled by user."
+      : message.state === "refused"
+        ? "Grok declined this request."
+        : message.state === "limited"
+          ? message.stopReason === "max_tokens" ? "Stopped at the token limit." : "Stopped at the turn limit."
       : message.state === "error"
         ? duration ? `Turn failed in ${duration}.` : "Turn failed."
-        : duration ? `Worked for ${duration}.` : "Turn completed.";
+        : message.state === "historical" ? "Recorded turn." : "Turn completed.";
+  const showRunHeading = message.state === "streaming"
+    || message.state === "cancelled"
+    || message.state === "refused"
+    || message.state === "limited"
+    || message.state === "error";
+  const hasActivity = Boolean(message.tools?.length);
 
   return (
     <article className={`assistant-turn ${message.state ?? "complete"}`}>
-      <div className="run-heading">
-        <span className="run-diamond">◆</span>
-        <span>{runStatus}</span>
-        <span className="run-line" />
-      </div>
+      {showRunHeading && (
+        <div className="run-heading">
+          <span className="run-diamond">◆</span>
+          <span>{runStatus}</span>
+          <span className="run-line" />
+        </div>
+      )}
+
+      {message.state !== "streaming" && message.text && <div className="response-copy">{message.text}</div>}
 
       {message.thought && (
         <ThoughtBlock
@@ -2948,23 +4235,27 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
       )}
 
       {message.plan && message.plan.length > 0 && (
-        <div className="plan-block">
-          <span className="message-kicker">PLAN</span>
-          {message.plan.map((entry, index) => (
-            <div className="plan-row" key={`${entry.content}-${index}`}><i className={entry.status} />{entry.content}</div>
-          ))}
-        </div>
+        <PlanBlock entries={message.plan} active={message.state === "streaming"} />
       )}
 
-      {message.tools?.map((tool) => (
-        <div className="activity-row" key={tool.id}>
-          <span className="activity-icon">{tool.status === "completed" ? <Icon name="check" size={13} /> : <Icon name="terminal" size={13} />}</span>
-          <span>{tool.title}</span>
-          <span className="activity-detail">{tool.status?.replace(/_/g, " ") ?? tool.kind ?? "running"}</span>
+      {hasActivity && (
+        <ActivityBlock
+          tools={message.tools ?? []}
+          active={message.state === "streaming"}
+          metrics={message.metrics}
+          elapsedMs={message.elapsedMs}
+        />
+      )}
+
+      {message.permissionDecisions?.map((decision, index) => (
+        <div className={`permission-decision ${decision.outcome}`} key={`${decision.title}-${index}`}>
+          <Icon name={decision.outcome === "allowed" ? "check" : "x"} size={13} />
+          <span>{decision.label}</span>
+          <small>{decision.title}</small>
         </div>
       ))}
 
-      {message.text && <div className="response-copy">{message.text}</div>}
+      {message.state === "streaming" && message.text && <div className="response-copy">{message.text}</div>}
       {message.state === "streaming" && !message.text && <div className="response-skeleton"><i /><i /><i /></div>}
       {message.error && <p className="message-error">{message.error}</p>}
     </article>
@@ -2986,7 +4277,15 @@ function permissionOptionClass(kind: string) {
   }
 }
 
-function PermissionCard({ permission, onRespond }: { permission: PermissionRequest; onRespond: (optionId: string | null) => void }) {
+function PermissionCard({
+  permission,
+  busy,
+  onRespond,
+}: {
+  permission: PermissionRequest;
+  busy: boolean;
+  onRespond: (optionId: string | null) => void;
+}) {
   const hasRejectOption = permission.options.some((option) => option.kind.startsWith("reject"));
 
   return (
@@ -3001,14 +4300,15 @@ function PermissionCard({ permission, onRespond }: { permission: PermissionReque
             <button
               className={permissionOptionClass(option.kind)}
               type="button"
+              disabled={busy}
               key={option.optionId}
               onClick={() => onRespond(option.optionId)}
             >
-              {option.name}
+              {busy ? "Responding…" : option.name}
             </button>
           ))}
           {!hasRejectOption && (
-            <button className="reject" type="button" onClick={() => onRespond(null)}>Cancel request</button>
+            <button className="reject" type="button" disabled={busy} onClick={() => onRespond(null)}>Cancel request</button>
           )}
         </div>
       </div>
