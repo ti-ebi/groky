@@ -22,6 +22,7 @@ type IconName =
   | "check"
   | "chevron-down"
   | "compose"
+  | "copy"
   | "dots"
   | "download"
   | "external-link"
@@ -157,6 +158,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     check: <path d="m5 12 4 4L19 6" />,
     "chevron-down": <path d="m8 10 4 4 4-4" />,
     compose: <><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z" /></>,
+    copy: <><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
     dots: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>,
     download: <><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></>,
     "external-link": <><path d="M14 5h5v5" /><path d="m19 5-8 8" /><path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></>,
@@ -213,6 +215,33 @@ function makeMessageId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+async function copyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through for webviews where the Clipboard API is present but unavailable.
+    }
+  }
+
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    if (!document.execCommand("copy")) throw new Error("Clipboard copy failed");
+  } finally {
+    textarea.remove();
+    activeElement?.focus({ preventScroll: true });
+  }
+}
+
 function Onboarding({
   stage,
   status,
@@ -235,6 +264,30 @@ function Onboarding({
   const cliReady = !["checking", "missingCli", "webOnly"].includes(stage);
   const authReady = ["ready", "connecting", "connected"].includes(stage);
   const currentStep = stage === "checking" ? "00" : stage === "missingCli" ? "01" : "02";
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const copyResetTimer = useRef<number | null>(null);
+  const copyLabel = copyState === "copied" ? "COPIED" : copyState === "error" ? "RETRY" : "COPY";
+
+  useEffect(() => {
+    setCopyState("idle");
+    return () => {
+      if (copyResetTimer.current !== null) window.clearTimeout(copyResetTimer.current);
+    };
+  }, [deviceAuthCode]);
+
+  async function copyAuthCode() {
+    if (!deviceAuthCode) return;
+
+    try {
+      await copyToClipboard(deviceAuthCode);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+
+    if (copyResetTimer.current !== null) window.clearTimeout(copyResetTimer.current);
+    copyResetTimer.current = window.setTimeout(() => setCopyState("idle"), 2200);
+  }
 
   return (
     <div className="onboarding-shell">
@@ -244,7 +297,7 @@ function Onboarding({
       </header>
 
       <main className="onboarding-main">
-        <section className="setup-card" aria-live="polite">
+        <section className={`setup-card ${deviceAuthCode ? "auth-code-active" : ""}`} aria-live="polite">
           <div className="setup-card-topline">
             <span>SETUP / {currentStep}</span>
             <span className="setup-signal"><i /><i /><i /><i /><i /></span>
@@ -288,13 +341,6 @@ function Onboarding({
                 <p className="setup-kicker">ACCOUNT CONNECTION</p>
                 <h1>Sign in where<br />you trust.</h1>
                 <p>Groky opens xAI authentication in your browser and waits for approval. No code needs to be copied back into the app.</p>
-                {deviceAuthCode && (
-                  <div className="device-auth-code" role="status" aria-label={`Browser verification code ${deviceAuthCode}`}>
-                    <span><i /> BROWSER VERIFICATION</span>
-                    <strong>{deviceAuthCode}</strong>
-                    <small>Make sure this code matches the browser before you continue.</small>
-                  </div>
-                )}
                 <div className="setup-actions">
                   <button className="primary-action" type="button" onClick={onLogin} disabled={Boolean(busyLabel)}>
                     {busyLabel ?? "Sign in to Grok"} {!busyLabel && <Icon name="arrow-right" size={15} />}
@@ -318,10 +364,31 @@ function Onboarding({
             )}
           </div>
 
-          <ol className="setup-rail" aria-label="Setup progress">
-            <SetupStep index="01" label="Grok CLI" detail={cliReady ? cleanVersion(status?.cliVersion ?? null) : "Required"} state={cliReady ? "done" : stage === "missingCli" ? "current" : "waiting"} />
-            <SetupStep index="02" label="Authentication" detail={authReady ? "Connected" : deviceAuthCode ? "Match browser code" : "Browser approval"} state={authReady ? "done" : stage === "needsAuth" ? "current" : "waiting"} />
-          </ol>
+          <aside className={`setup-side ${deviceAuthCode ? "has-auth-code" : ""}`}>
+            {deviceAuthCode && (
+              <div className="device-auth-code">
+                <div className="device-auth-heading">
+                  <span><i /> BROWSER VERIFICATION</span>
+                  <button
+                    className={`device-auth-copy ${copyState}`}
+                    type="button"
+                    aria-label={copyState === "copied" ? "Browser verification code copied" : copyState === "error" ? "Retry copying browser verification code" : "Copy browser verification code"}
+                    onClick={() => void copyAuthCode()}
+                  >
+                    <Icon name={copyState === "copied" ? "check" : "copy"} size={12} />
+                    <span aria-live="polite">{copyLabel}</span>
+                  </button>
+                </div>
+                <strong role="status" aria-label={`Browser verification code ${deviceAuthCode}`}>{deviceAuthCode}</strong>
+                <small>Make sure this code matches the browser before you continue.</small>
+              </div>
+            )}
+
+            <ol className="setup-rail" aria-label="Setup progress">
+              <SetupStep index="01" label="Grok CLI" detail={cliReady ? cleanVersion(status?.cliVersion ?? null) : "Required"} state={cliReady ? "done" : stage === "missingCli" ? "current" : "waiting"} />
+              <SetupStep index="02" label="Authentication" detail={authReady ? "Connected" : deviceAuthCode ? "Match browser code" : "Browser approval"} state={authReady ? "done" : stage === "needsAuth" ? "current" : "waiting"} />
+            </ol>
+          </aside>
 
           {(error && stage !== "error") && <p className="setup-inline-error">{error}</p>}
         </section>
