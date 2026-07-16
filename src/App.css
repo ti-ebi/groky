@@ -3121,19 +3121,10 @@ body.is-resizing-sidebar .app-shell {
   opacity: 0.74;
 }
 
-.popover-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: var(--muted);
-  font: 8px var(--mono);
-  letter-spacing: 0.12em;
-}
-
 .connection-popover dl {
   display: grid;
   gap: 7px;
-  margin: 10px 0 5px;
+  margin: 0 0 5px;
   padding: 10px 0;
   border-block: 1px solid var(--line);
 }

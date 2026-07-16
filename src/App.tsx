@@ -4146,7 +4146,6 @@ function App() {
 
         {showConnection && (
           <div className="connection-popover" role="dialog" aria-label="Grok Build statistics and account" data-connection-popover-root>
-            <div className="popover-heading"><span>STATISTICS</span><button className="icon-button" type="button" onClick={() => setShowConnection(false)}><Icon name="x" size={15} /></button></div>
             <dl>
               <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
               <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
