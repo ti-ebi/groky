@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="black-tile" cx="34%" cy="18%" r="86%">
+      <stop offset="0" stop-color="#202522" />
+      <stop offset="0.52" stop-color="#101311" />
+      <stop offset="1" stop-color="#050605" />
+    </radialGradient>
+    <linearGradient id="white-disc" x1="174" y1="126" x2="346" y2="390" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" />
+      <stop offset="1" stop-color="#e9efed" />
+    </linearGradient>
+  </defs>
+  <path
+    d="M144 36H368C429 36 476 83 476 144V368C476 429 429 476 368 476H144C83 476 36 429 36 368V144C36 83 83 36 144 36Z"
+    fill="url(#black-tile)"
+    stroke="#343a37"
+    stroke-width="4"
+  />
+  <circle cx="256" cy="256" r="164" fill="url(#white-disc)" stroke="#8fe3c1" stroke-width="8" />
+  <ellipse
+    cx="256"
+    cy="256"
+    rx="112"
+    ry="58"
+    fill="none"
+    stroke="#090b0a"
+    stroke-width="24"
+    transform="rotate(32 256 256)"
+  />
+  <ellipse
+    cx="256"
+    cy="256"
+    rx="112"
+    ry="58"
+    fill="none"
+    stroke="#090b0a"
+    stroke-width="24"
+    transform="rotate(-32 256 256)"
+  />
+</svg>
