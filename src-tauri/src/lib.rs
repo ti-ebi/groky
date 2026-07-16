@@ -1,6 +1,6 @@
 mod acp;
 
-use acp::AcpTransport;
+use acp::{AcpTransport, ApprovalMode};
 use chrono::{DateTime, Local};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -68,6 +68,7 @@ struct ConnectResult {
     workspace: Option<String>,
     working_directory: String,
     cli_version: String,
+    approval_mode: ApprovalMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,7 +275,7 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
-    let transport = match AcpTransport::spawn(&cli.binary, &cwd, None).await {
+    let transport = match AcpTransport::spawn(&cli.binary, &cwd, ApprovalMode::Ask, None).await {
         Ok(transport) => transport,
         Err(message) => {
             return Ok(OnboardingStatus {
@@ -411,7 +412,9 @@ async fn grok_connect(
     app: AppHandle,
     state: State<'_, GrokRuntime>,
     workspace: Option<String>,
+    approval_mode: Option<ApprovalMode>,
 ) -> Result<ConnectResult, String> {
+    let approval_mode = approval_mode.unwrap_or_default();
     let (workspace_path, selected_workspace) = if let Some(workspace) = workspace {
         let workspace_path = PathBuf::from(&workspace)
             .canonicalize()
@@ -430,7 +433,13 @@ async fn grok_connect(
 
     disconnect_runtime(&state).await;
 
-    let transport = AcpTransport::spawn(&cli.binary, &workspace_path, Some(app.clone())).await?;
+    let transport = AcpTransport::spawn(
+        &cli.binary,
+        &workspace_path,
+        approval_mode,
+        Some(app.clone()),
+    )
+    .await?;
     if let Err(error) = initialize_and_authenticate(&transport).await {
         transport.shutdown().await;
         return Err(match error {
@@ -478,6 +487,7 @@ async fn grok_connect(
         workspace: selected_workspace,
         working_directory: cwd,
         cli_version: cli.version,
+        approval_mode,
     })
 }
 

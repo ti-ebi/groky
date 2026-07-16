@@ -61,6 +61,7 @@ interface Connection {
   workspace: string | null;
   workingDirectory: string;
   cliVersion: string;
+  approvalMode: ApprovalMode;
 }
 
 interface PromptResult {
@@ -146,6 +147,48 @@ interface AppUpdateProgress {
 }
 
 type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "error";
+type ApprovalMode = "ask" | "alwaysApprove";
+
+interface ApprovalModeOption {
+  id: ApprovalMode;
+  label: string;
+  shortDescription: string;
+  description: string;
+  glyph: string;
+  tag?: string;
+}
+
+const APPROVAL_MODES: ApprovalModeOption[] = [
+  {
+    id: "ask",
+    label: "Ask",
+    shortDescription: "Review actions",
+    description: "Ask before actions that are not already allowed.",
+    glyph: "?",
+    tag: "Recommended",
+  },
+  {
+    id: "alwaysApprove",
+    label: "Always approve",
+    shortDescription: "Approval prompts skipped",
+    description: "Skip prompts unless a policy rule still requires approval.",
+    glyph: "!",
+  },
+];
+
+const approvalModeOption = (mode: ApprovalMode) =>
+  APPROVAL_MODES.find((option) => option.id === mode) ?? APPROVAL_MODES[0];
+
+function enablesAlwaysApprove(option: PermissionOption | undefined) {
+  if (!option || option.kind !== "allow_always") return false;
+
+  const id = option.optionId.toLowerCase().replace(/_/g, "-");
+  const name = option.name.toLowerCase();
+  return id.includes("always-approve")
+    || name.includes("always approve")
+    || name.includes("all sessions")
+    || name.includes("all tool");
+}
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 const AUTH_REQUIRED_ERROR = "GROK_AUTH_REQUIRED";
@@ -483,6 +526,105 @@ function AppUpdateNotice({
   );
 }
 
+function ApprovalModeSelector({
+  mode,
+  busy,
+  locked,
+  onChange,
+}: {
+  mode: ApprovalMode;
+  busy: boolean;
+  locked: boolean;
+  onChange: (mode: ApprovalMode) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement | null>(null);
+  const selected = approvalModeOption(mode);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (busy) setOpen(false);
+  }, [busy]);
+
+  return (
+    <div className={`approval-control mode-${mode}`} ref={root}>
+      <button
+        className="approval-button"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Approval mode: ${selected.label}`}
+        title={locked ? "Start a new task to choose another approval mode" : undefined}
+        disabled={busy}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="shield-mark" aria-hidden="true">{selected.glyph}</span>
+        <span>{selected.label}</span>
+        <Icon name="chevron-down" size={13} />
+      </button>
+
+      {open && (
+        <div className="approval-menu" role="listbox" aria-label="Session approval mode">
+          <div className="approval-menu-heading">
+            <span>APPROVAL MODE</span>
+            <small>Choose when Grok asks</small>
+          </div>
+          <div className="approval-menu-options">
+            {APPROVAL_MODES.map((option) => {
+              const isSelected = option.id === mode;
+              return (
+                <button
+                  className={`approval-option ${option.id === "alwaysApprove" ? "danger" : ""}`}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  disabled={locked || busy}
+                  key={option.id}
+                  onClick={() => {
+                    setOpen(false);
+                    onChange(option.id);
+                  }}
+                >
+                  <span className="approval-option-glyph" aria-hidden="true">{option.glyph}</span>
+                  <span className="approval-option-copy">
+                    <span>
+                      <strong>{option.label}</strong>
+                      {option.tag && <em>{option.tag}</em>}
+                    </span>
+                    <small>{option.description}</small>
+                  </span>
+                  {isSelected && <Icon name="check" size={15} />}
+                </button>
+              );
+            })}
+          </div>
+          <div className={`approval-menu-note ${locked ? "locked" : ""}`}>
+            <span>{locked ? "Mode set for this task" : selected.shortDescription}</span>
+            <small>{locked ? "Approval requests may still offer additional choices." : "The approval mode is applied when this task starts."}</small>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [stage, setStage] = useState<OnboardingStage>("checking");
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
@@ -504,6 +646,7 @@ function App() {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateCheckNotice, setUpdateCheckNotice] = useState<string | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const activeAssistantId = useRef<string | null>(null);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
@@ -763,14 +906,22 @@ function App() {
     }
   }
 
-  async function connect(targetWorkspace: string | null = workspace, clearConversation = false) {
+  async function connect(
+    targetWorkspace: string | null = workspace,
+    clearConversation = false,
+    targetApprovalMode: ApprovalMode = approvalMode,
+  ) {
     setSetupError(null);
     setConnectionNotice(null);
     setStage("connecting");
     try {
-      const next = await invoke<Connection>("grok_connect", { workspace: targetWorkspace });
+      const next = await invoke<Connection>("grok_connect", {
+        workspace: targetWorkspace,
+        approvalMode: targetApprovalMode,
+      });
       setConnection(next);
       setWorkspace(next.workspace);
+      setApprovalMode(next.approvalMode);
       setStatus((current) => current ? { ...current, stage: "connected", cliVersion: next.cliVersion } : current);
       setStage("connected");
       if (clearConversation) setMessages([]);
@@ -803,12 +954,20 @@ function App() {
 
   async function startNewTask() {
     if (appUpdating) return;
+    const nextMode: ApprovalMode = "ask";
     setDraft("");
     setMessages([]);
     setPermission(null);
+    setApprovalMode(nextMode);
     setSetupError(null);
     setConnectionNotice(null);
-    if (connection) await connect(workspace, true);
+    if (connection) await connect(workspace, true, nextMode);
+  }
+
+  async function changeApprovalMode(nextMode: ApprovalMode) {
+    if (nextMode === approvalMode || running || appUpdating || stage === "connecting" || messages.length > 0) return;
+    setApprovalMode(nextMode);
+    if (connection) await connect(workspace, false, nextMode);
   }
 
   async function submitTask(event: FormEvent<HTMLFormElement>) {
@@ -885,9 +1044,14 @@ function App() {
   async function respondToPermission(optionId: string | null) {
     if (!permission) return;
     const current = permission;
+    const selectedOption = current.options.find((option) => option.optionId === optionId);
     setPermission(null);
     try {
       await invoke("grok_respond_permission", { requestId: current.requestId, optionId });
+      if (enablesAlwaysApprove(selectedOption)) {
+        setApprovalMode("alwaysApprove");
+        setConnection((active) => active ? { ...active, approvalMode: "alwaysApprove" } : active);
+      }
     } catch (error) {
       setConnectionNotice(String(error));
     }
@@ -897,6 +1061,7 @@ function App() {
     setShowConnection(false);
     setConnection(null);
     setMessages([]);
+    setApprovalMode("ask");
     setStage("checking");
     try {
       await invoke("grok_logout");
@@ -914,6 +1079,7 @@ function App() {
     } finally {
       setConnection(null);
       setMessages([]);
+      setApprovalMode("ask");
       setStage("ready");
     }
   }
@@ -1004,6 +1170,7 @@ function App() {
               <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
               <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
               <div><dt>Account</dt><dd>Signed in</dd></div>
+              {connection && <div><dt>Approvals</dt><dd>{approvalModeOption(connection.approvalMode).label}</dd></div>}
               {connection && <div><dt>{connection.workspace ? "Workspace" : "Groky workspace"}</dt><dd title={connection.workingDirectory}>{connection.workingDirectory}</dd></div>}
               {connection && <div><dt>Transport</dt><dd>ACP stdio</dd></div>}
             </dl>
@@ -1086,7 +1253,7 @@ function App() {
           </button>
         )}
 
-        <form className={`composer ${running ? "is-running" : ""}`} onSubmit={submitTask}>
+        <form className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
           <div className="prompt-row">
             <span className="prompt-symbol" aria-hidden="true">❯</span>
             <textarea
@@ -1100,7 +1267,12 @@ function App() {
             />
           </div>
           <div className="composer-toolbar">
-            <span className="access-button"><span className="shield-mark">?</span><span>CLI permissions</span></span>
+            <ApprovalModeSelector
+              mode={approvalMode}
+              busy={running || appUpdating || stage === "connecting"}
+              locked={messages.length > 0}
+              onChange={(nextMode) => void changeApprovalMode(nextMode)}
+            />
             <span className="local-chip"><span className="live-dot" />{workspace ? "workspace" : connection ? "Groky workspace" : "on send"}</span>
             <span className="toolbar-spacer" />
             <span className="model-button"><Icon name="bolt" size={14} /><span>Grok Build</span><span className="reasoning">· agent</span></span>
@@ -1162,7 +1334,24 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
   );
 }
 
+function permissionOptionClass(kind: string) {
+  switch (kind) {
+    case "allow_once":
+      return "allow-once";
+    case "allow_always":
+      return "allow-always";
+    case "reject_always":
+      return "reject reject-always";
+    case "reject_once":
+      return "reject";
+    default:
+      return kind.includes("reject") ? "reject" : "allow-once";
+  }
+}
+
 function PermissionCard({ permission, onRespond }: { permission: PermissionRequest; onRespond: (optionId: string | null) => void }) {
+  const hasRejectOption = permission.options.some((option) => option.kind.startsWith("reject"));
+
   return (
     <aside className="permission-card" aria-live="assertive">
       <div className="permission-glyph">!</div>
@@ -1172,9 +1361,18 @@ function PermissionCard({ permission, onRespond }: { permission: PermissionReque
         <small>{permission.toolKind?.replace(/_/g, " ") ?? "Local tool action"}</small>
         <div className="permission-actions">
           {permission.options.map((option) => (
-            <button className={option.kind.includes("reject") ? "reject" : ""} type="button" key={option.optionId} onClick={() => onRespond(option.optionId)}>{option.name}</button>
+            <button
+              className={permissionOptionClass(option.kind)}
+              type="button"
+              key={option.optionId}
+              onClick={() => onRespond(option.optionId)}
+            >
+              {option.name}
+            </button>
           ))}
-          <button className="reject" type="button" onClick={() => onRespond(null)}>Cancel</button>
+          {!hasRejectOption && (
+            <button className="reject" type="button" onClick={() => onRespond(null)}>Cancel request</button>
+          )}
         </div>
       </div>
     </aside>

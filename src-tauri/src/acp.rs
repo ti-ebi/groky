@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -23,6 +23,27 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 type PendingResponse = oneshot::Sender<Result<Value, String>>;
 type PendingResponses = HashMap<u64, PendingResponse>;
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalMode {
+    #[default]
+    Ask,
+    AlwaysApprove,
+}
+
+impl ApprovalMode {
+    fn agent_args(self) -> Vec<&'static str> {
+        let mut args = vec!["--no-auto-update", "--permission-mode"];
+
+        match self {
+            Self::Ask => args.extend(["default", "agent", "stdio"]),
+            Self::AlwaysApprove => args.extend(["bypassPermissions", "agent", "stdio"]),
+        }
+
+        args
+    }
+}
 
 #[derive(Debug)]
 enum InboundFrame {
@@ -92,10 +113,11 @@ impl AcpTransport {
     pub async fn spawn(
         binary: &Path,
         cwd: &Path,
+        approval_mode: ApprovalMode,
         event_sink: Option<AppHandle>,
     ) -> Result<Self, String> {
         let mut child = Command::new(binary)
-            .args(["--no-auto-update", "agent", "stdio"])
+            .args(approval_mode.agent_args())
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -540,6 +562,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn approval_modes_build_explicit_session_arguments() {
+        assert_eq!(
+            ApprovalMode::Ask.agent_args(),
+            [
+                "--no-auto-update",
+                "--permission-mode",
+                "default",
+                "agent",
+                "stdio"
+            ]
+        );
+        assert_eq!(
+            ApprovalMode::AlwaysApprove.agent_args(),
+            [
+                "--no-auto-update",
+                "--permission-mode",
+                "bypassPermissions",
+                "agent",
+                "stdio"
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalMode::AlwaysApprove).unwrap(),
+            json!("alwaysApprove")
+        );
+    }
+
+    #[test]
     fn decodes_json_rpc_notification_framing() {
         let frame = decode_frame(
             r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1"}}"#,
@@ -565,6 +615,34 @@ mod tests {
         assert!(!route_response(&mut pending, 8, Ok(json!({}))));
         assert_eq!(receiver.await.unwrap().unwrap()["ok"], true);
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preserves_agent_permission_choices_for_the_client() {
+        let permissions = Arc::new(Mutex::new(HashMap::new()));
+        let counter = Arc::new(AtomicU64::new(1));
+        let event = sanitize_permission_request(
+            json!(42),
+            &json!({
+                "sessionId": "session-1",
+                "toolCall": { "title": "Run cargo test", "kind": "execute" },
+                "options": [
+                    { "optionId": "once", "name": "Allow once", "kind": "allow_once" },
+                    { "optionId": "always", "name": "Always allow cargo test", "kind": "allow_always" },
+                    { "optionId": "reject", "name": "Reject", "kind": "reject_once" }
+                ]
+            }),
+            &permissions,
+            &counter,
+        )
+        .await
+        .expect("valid permission request should be exposed to the client");
+
+        assert_eq!(event.options.len(), 3);
+        assert_eq!(event.options[0].kind, "allow_once");
+        assert_eq!(event.options[1].kind, "allow_always");
+        assert_eq!(event.options[2].kind, "reject_once");
+        assert_eq!(permissions.lock().await.len(), 1);
     }
 
     #[test]

@@ -778,7 +778,7 @@ textarea:focus-visible {
   margin-left: -4px;
 }
 
-.access-button,
+.approval-button,
 .model-button {
   display: flex;
   height: 30px;
@@ -789,12 +789,13 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
-.access-button {
+.approval-button {
   padding: 0 7px;
   color: var(--accent);
+  transition: color 140ms ease, background 140ms ease, opacity 140ms ease;
 }
 
-.access-button:hover,
+.approval-button:hover,
 .model-button:hover {
   background: var(--surface-hover);
 }
@@ -808,6 +809,211 @@ textarea:focus-visible {
   border-radius: 7px 7px 9px 9px;
   font-size: 9px;
   font-weight: 700;
+}
+
+.approval-control {
+  position: relative;
+}
+
+.approval-control .approval-button .icon {
+  margin-left: -2px;
+  color: color-mix(in srgb, currentColor 68%, transparent);
+}
+
+.approval-control.mode-ask .approval-button {
+  color: var(--signal-strong);
+}
+
+.approval-control.mode-alwaysApprove .approval-button {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.approval-control .approval-button:disabled {
+  cursor: default;
+  opacity: 0.64;
+}
+
+.approval-menu {
+  position: absolute;
+  z-index: 16;
+  bottom: 40px;
+  left: -4px;
+  width: min(342px, calc(100vw - 80px));
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: 0 22px 64px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
+  backdrop-filter: blur(22px);
+  animation: approval-menu-in 150ms ease-out both;
+}
+
+.approval-menu-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 5px 7px 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.approval-menu-heading > span {
+  color: var(--text-soft);
+  font: 700 8px var(--mono);
+  letter-spacing: 0.13em;
+}
+
+.approval-menu-heading > small {
+  color: var(--muted);
+  font: 8px var(--mono);
+}
+
+.approval-menu-options {
+  display: grid;
+  gap: 3px;
+  padding: 6px 0;
+}
+
+.approval-option {
+  display: grid;
+  grid-template-columns: 31px minmax(0, 1fr) 18px;
+  min-height: 57px;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  transition: background 120ms ease, transform 90ms ease, opacity 120ms ease;
+}
+
+.approval-option:not(:disabled):hover {
+  background: var(--surface-hover);
+}
+
+.approval-option:not(:disabled):active {
+  transform: scale(0.99);
+}
+
+.approval-option[aria-selected="true"] {
+  background: var(--signal-soft);
+}
+
+.approval-option.danger[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+
+.approval-option:disabled {
+  cursor: default;
+  opacity: 0.54;
+}
+
+.approval-option-glyph {
+  display: grid;
+  width: 29px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px 9px 11px 11px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font: 700 10px var(--mono);
+}
+
+.approval-option[aria-selected="true"] .approval-option-glyph {
+  border-color: color-mix(in srgb, var(--signal) 52%, var(--line));
+  background: var(--surface);
+  color: var(--signal-strong);
+}
+
+.approval-option.danger .approval-option-glyph {
+  color: var(--accent);
+}
+
+.approval-option.danger[aria-selected="true"] .approval-option-glyph {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+  color: var(--accent);
+}
+
+.approval-option-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.approval-option-copy > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.approval-option-copy strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.approval-option-copy em {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--signal-soft);
+  color: var(--signal-strong);
+  font: normal 7px var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.approval-option-copy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-option > .icon {
+  color: var(--signal-strong);
+}
+
+.approval-option.danger > .icon {
+  color: var(--accent);
+}
+
+.approval-menu-note {
+  display: grid;
+  gap: 2px;
+  margin: 0 -1px -1px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 9px 9px;
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
+}
+
+.approval-menu-note > span {
+  color: var(--text-soft);
+  font: 700 8px var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.approval-menu-note > small {
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.approval-menu-note.locked > span {
+  color: var(--accent);
+}
+
+.composer.approval-mode-alwaysApprove {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line-strong));
+}
+
+.composer.approval-mode-alwaysApprove::before {
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .toolbar-spacer {
@@ -1969,16 +2175,34 @@ textarea:focus-visible {
 .permission-actions button {
   min-height: 29px;
   padding: 0 10px;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: var(--text);
   color: var(--app-bg);
   font-size: 10px;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 90ms ease;
+}
+
+.permission-actions button:hover {
+  transform: translateY(-1px);
+}
+
+.permission-actions button.allow-always {
+  border-color: color-mix(in srgb, var(--signal) 38%, var(--line));
+  background: var(--signal-soft);
+  color: var(--signal-strong);
 }
 
 .permission-actions button.reject {
   border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--text-soft);
+}
+
+.permission-actions button.reject-always {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 52%, var(--surface));
+  color: var(--accent);
 }
 
 .stop-button {
@@ -2005,6 +2229,11 @@ textarea:focus-visible {
 
 @keyframes popover-in {
   from { opacity: 0; transform: translateY(5px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes approval-menu-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 

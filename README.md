@@ -12,6 +12,7 @@ Groky runs the official Grok Build CLI locally and connects to `grok agent stdio
 - Optional workspace selection and switching from the main application screen
 - Authentication delegated to the official `grok login` flow
 - Local ACP sessions with streamed messages, thoughts, plans, and tool activity
+- Session approval modes for ask-first and always-approved work
 - Interactive approval prompts for tool permission requests
 - Run cancellation, reconnect, disconnect, and sign-out controls
 - Signed in-app updates from GitHub Releases
