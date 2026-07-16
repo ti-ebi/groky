@@ -4,8 +4,10 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { getVersion } from "@tauri-apps/api/app";
@@ -15,7 +17,6 @@ import "@fontsource-variable/sora/index.css";
 import "./App.css";
 
 type IconName =
-  | "arrow-left"
   | "arrow-right"
   | "arrow-down"
   | "arrow-up"
@@ -191,11 +192,38 @@ function enablesAlwaysApprove(option: PermissionOption | undefined) {
 }
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
+const isMacOS = () => /Macintosh|Mac OS X|MacIntel/.test(`${navigator.userAgent} ${navigator.platform}`);
+const usesOverlayTitlebar = () => isTauri() && isMacOS();
 const AUTH_REQUIRED_ERROR = "GROK_AUTH_REQUIRED";
+const SIDEBAR_WIDTH_KEY = "groky.sidebar.width";
+const SIDEBAR_COLLAPSED_KEY = "groky.sidebar.collapsed";
+const DEFAULT_SIDEBAR_WIDTH = 258;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 420;
+
+function clampSidebarWidth(width: number) {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
+}
+
+function storedSidebarWidth() {
+  try {
+    const width = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    return Number.isFinite(width) && width > 0 ? clampSidebarWidth(width) : DEFAULT_SIDEBAR_WIDTH;
+  } catch {
+    return DEFAULT_SIDEBAR_WIDTH;
+  }
+}
+
+function storedSidebarCollapsed() {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
 
 function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
-    "arrow-left": <><path d="m15 18-6-6 6-6" /><path d="M9 12h10" /></>,
     "arrow-right": <><path d="m9 18 6-6-6-6" /><path d="M5 12h10" /></>,
     "arrow-down": <><path d="m6 9 6 6 6-6" /><path d="M12 5v10" /></>,
     "arrow-up": <><path d="m18 15-6-6-6 6" /><path d="M12 9v10" /></>,
@@ -294,6 +322,7 @@ function Onboarding({
   busyLabel,
   deviceAuthCode,
   error,
+  titlebarHeight,
   onRetry,
   onOpenInstallGuide,
   onLogin,
@@ -303,10 +332,13 @@ function Onboarding({
   busyLabel: string | null;
   deviceAuthCode: string | null;
   error: string | null;
+  titlebarHeight: number | null;
   onRetry: () => void;
   onOpenInstallGuide: () => void;
   onLogin: () => void;
 }) {
+  const overlayTitlebar = usesOverlayTitlebar();
+  const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "" } : {};
   const cliReady = !["checking", "missingCli", "webOnly"].includes(stage);
   const authReady = ["ready", "connecting", "connected"].includes(stage);
   const currentStep = stage === "checking" ? "00" : stage === "missingCli" ? "01" : "02";
@@ -336,8 +368,13 @@ function Onboarding({
   }
 
   return (
-    <div className="onboarding-shell">
-      <header className="onboarding-header">
+    <div
+      className={`onboarding-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""}`}
+      style={overlayTitlebar && titlebarHeight !== null
+        ? { "--app-header-height": `${titlebarHeight}px` } as CSSProperties
+        : undefined}
+    >
+      <header className="onboarding-header" {...dragRegionProps}>
         <Brand />
         <span>Desktop client for Grok Build</span>
       </header>
@@ -626,6 +663,9 @@ function ApprovalModeSelector({
 }
 
 function App() {
+  const overlayTitlebar = usesOverlayTitlebar();
+  const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "" } : {};
+  const sidebarShortcutLabel = isMacOS() ? "⌘B" : "Ctrl+B";
   const [stage, setStage] = useState<OnboardingStage>("checking");
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [connection, setConnection] = useState<Connection | null>(null);
@@ -647,13 +687,116 @@ function App() {
   const [updateCheckNotice, setUpdateCheckNotice] = useState<string | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
+  const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
+  const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
   const activeAssistantId = useRef<string | null>(null);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
   const updateCheckInFlight = useRef(false);
+  const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
 
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
   const appUpdating = updatePhase === "downloading";
+
+  useEffect(() => {
+    if (!overlayTitlebar) return;
+
+    let disposed = false;
+    let animationFrame = 0;
+    const updateTitlebarHeight = () => {
+      void invoke<number | null>("configure_native_titlebar")
+        .then((height) => {
+          if (!disposed && height !== null && height > 0 && height <= 96) {
+            setNativeTitlebarHeight(height);
+          }
+        })
+        .catch(() => undefined);
+    };
+    const scheduleTitlebarUpdate = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(updateTitlebarHeight);
+    };
+
+    updateTitlebarHeight();
+    window.addEventListener("resize", scheduleTitlebarUpdate);
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener("resize", scheduleTitlebarUpdate);
+    };
+  }, [overlayTitlebar]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    } catch {
+      // Persistence is optional when storage is unavailable.
+    }
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+    } catch {
+      // Persistence is optional when storage is unavailable.
+    }
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const handleSidebarShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "b") return;
+      event.preventDefault();
+      setSidebarCollapsed((current) => !current);
+      setShowConnection(false);
+    };
+
+    window.addEventListener("keydown", handleSidebarShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleSidebarShortcut);
+      document.body.classList.remove("is-resizing-sidebar");
+    };
+  }, []);
+
+  function toggleSidebar() {
+    if (!sidebarCollapsed) setShowConnection(false);
+    setSidebarCollapsed((current) => !current);
+  }
+
+  function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || sidebarCollapsed) return;
+    event.preventDefault();
+    sidebarResizeStart.current = { pointerX: event.clientX, width: sidebarWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("is-resizing-sidebar");
+  }
+
+  function resizeSidebar(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = sidebarResizeStart.current;
+    if (!start) return;
+    setSidebarWidth(clampSidebarWidth(start.width + event.clientX - start.pointerX));
+  }
+
+  function finishSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!sidebarResizeStart.current) return;
+    sidebarResizeStart.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    document.body.classList.remove("is-resizing-sidebar");
+  }
+
+  function resizeSidebarWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? 32 : 12;
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") nextWidth = sidebarWidth - step;
+    if (event.key === "ArrowRight") nextWidth = sidebarWidth + step;
+    if (event.key === "Home") nextWidth = MIN_SIDEBAR_WIDTH;
+    if (event.key === "End") nextWidth = MAX_SIDEBAR_WIDTH;
+    if (nextWidth === null) return;
+    event.preventDefault();
+    setSidebarWidth(clampSidebarWidth(nextWidth));
+  }
 
   async function refreshStatus() {
     setSetupError(null);
@@ -1107,6 +1250,7 @@ function App() {
         busyLabel={busyLabel}
         deviceAuthCode={deviceAuthCode}
         error={setupError}
+          titlebarHeight={nativeTitlebarHeight}
           onRetry={() => void refreshStatus()}
           onOpenInstallGuide={() => void openInstallGuide()}
           onLogin={() => void login()}
@@ -1118,14 +1262,18 @@ function App() {
 
   return (
     <>
-      <div className="app-shell">
+      <div
+        className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
+        style={{
+          "--sidebar-width": `${sidebarWidth}px`,
+          ...(overlayTitlebar && nativeTitlebarHeight !== null
+            ? { "--app-header-height": `${nativeTitlebarHeight}px` }
+            : {}),
+        } as CSSProperties}
+      >
       <aside className="sidebar">
-        <div className="window-nav">
-          <button className="icon-button sidebar-toggle" type="button" aria-label="Toggle sidebar"><Icon name="panel" /></button>
-          <div className="history-buttons" aria-label="Navigation history">
-            <button className="icon-button dimmed" type="button" aria-label="Back" disabled><Icon name="arrow-left" /></button>
-            <button className="icon-button dimmed" type="button" aria-label="Forward" disabled><Icon name="arrow-right" /></button>
-          </div>
+        <div className="window-nav" {...dragRegionProps}>
+          <button className="icon-button sidebar-toggle" type="button" aria-label="Hide sidebar" title={`Hide sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
         </div>
 
         <div className="brand-row">
@@ -1190,11 +1338,35 @@ function App() {
         )}
       </aside>
 
+      {!sidebarCollapsed && (
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={Math.round(sidebarWidth)}
+          tabIndex={0}
+          onDoubleClick={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+          onKeyDown={resizeSidebarWithKeyboard}
+          onPointerDown={startSidebarResize}
+          onPointerMove={resizeSidebar}
+          onPointerUp={finishSidebarResize}
+          onPointerCancel={finishSidebarResize}
+        />
+      )}
+
       <main className="workspace">
-        <header className="taskbar">
-          <button className="task-title workspace-switcher" type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"} aria-label="Choose workspace">
-            <Icon name={workspace ? "folder" : "folder-open"} /><strong>{workspace ? projectName : "Groky workspace"}</strong><Icon name="chevron-down" size={13} />
-          </button>
+        <header className="taskbar" {...dragRegionProps}>
+          <div className="taskbar-leading">
+            {sidebarCollapsed && (
+              <button className="icon-button sidebar-restore" type="button" aria-label="Show sidebar" title={`Show sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
+            )}
+            <button className="task-title workspace-switcher" type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"} aria-label="Choose workspace">
+              <Icon name={workspace ? "folder" : "folder-open"} /><strong>{workspace ? projectName : "Groky workspace"}</strong><Icon name="chevron-down" size={13} />
+            </button>
+          </div>
           <div className="task-actions">
             <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : stage === "connecting" ? "Connecting" : "Signed in"}</span>
             {connection && <span className="branch-button"><Icon name="branch" /><span>local</span></span>}

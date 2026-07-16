@@ -28,6 +28,8 @@
   --display: "Sora Variable", "SF Pro Display", -apple-system, BlinkMacSystemFont, sans-serif;
   --mono: "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.11), 0 1px 3px rgba(0, 0, 0, 0.07);
+  --app-header-height: 48px;
+  --macos-titlebar-leading-inset: 78px;
 }
 
 * {
@@ -74,12 +76,23 @@ textarea:focus-visible {
 }
 
 .app-shell {
+  position: relative;
   display: grid;
-  grid-template-columns: 258px minmax(500px, 1fr);
+  grid-template-columns: var(--sidebar-width, 258px) minmax(500px, 1fr);
   width: 100%;
   height: 100%;
   background: var(--app-bg);
   color: var(--text);
+  transition: grid-template-columns 180ms ease;
+}
+
+.has-overlay-titlebar {
+  /* Replaced by the AppKit-configured titlebar height after the window mounts. */
+  --app-header-height: 40px;
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 0 minmax(500px, 1fr);
 }
 
 .sidebar {
@@ -91,6 +104,15 @@ textarea:focus-visible {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--signal) 2.5%, transparent), transparent 34%),
     var(--sidebar-bg);
+  transition: opacity 130ms ease, transform 180ms ease, visibility 0s linear;
+}
+
+.sidebar-collapsed .sidebar {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-12px);
+  transition-delay: 0s, 0s, 180ms;
 }
 
 .window-nav,
@@ -101,14 +123,18 @@ textarea:focus-visible {
 }
 
 .window-nav {
-  min-height: 50px;
+  height: var(--app-header-height);
+  min-height: var(--app-header-height);
   padding: 0 13px;
+  box-shadow: inset 0 -1px var(--line);
 }
 
-.history-buttons {
-  display: flex;
-  gap: 2px;
-  margin-left: 12px;
+.has-overlay-titlebar .window-nav {
+  padding-left: var(--macos-titlebar-leading-inset);
+}
+
+[data-tauri-drag-region] {
+  user-select: none;
 }
 
 .icon-button {
@@ -134,6 +160,45 @@ textarea:focus-visible {
 
 .icon-button.dimmed {
   opacity: 0.32;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  z-index: 12;
+  top: var(--app-header-height);
+  bottom: 0;
+  left: calc(var(--sidebar-width, 258px) - 3px);
+  width: 6px;
+  cursor: col-resize;
+  outline: 0;
+  touch-action: none;
+}
+
+.sidebar-resizer::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  content: "";
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after {
+  background: var(--signal);
+  box-shadow: 0 0 8px var(--signal-glow);
+}
+
+body.is-resizing-sidebar,
+body.is-resizing-sidebar * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.is-resizing-sidebar .app-shell {
+  transition: none;
 }
 
 .brand-row {
@@ -371,7 +436,7 @@ textarea:focus-visible {
 .workspace::before {
   position: absolute;
   z-index: -1;
-  inset: 51px 0 0;
+  inset: var(--app-header-height) 0 0;
   background:
     radial-gradient(circle at 68% 2%, var(--signal-soft), transparent 34%),
     radial-gradient(circle at 35% 80%, color-mix(in srgb, var(--signal) 4%, transparent), transparent 32%);
@@ -381,9 +446,10 @@ textarea:focus-visible {
 
 .taskbar {
   display: flex;
-  min-height: 51px;
+  height: var(--app-header-height);
+  min-height: var(--app-header-height);
   align-items: center;
-  border-bottom: 1px solid var(--line);
+  box-shadow: inset 0 -1px var(--line);
 }
 
 .taskbar {
@@ -391,6 +457,21 @@ textarea:focus-visible {
   padding: 0 12px 0 17px;
   background: color-mix(in srgb, var(--app-bg) 92%, transparent);
   backdrop-filter: blur(18px);
+}
+
+.has-overlay-titlebar.sidebar-collapsed .taskbar {
+  padding-left: var(--macos-titlebar-leading-inset);
+}
+
+.taskbar-leading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-restore {
+  color: var(--text-soft);
 }
 
 .task-title,
@@ -1166,7 +1247,7 @@ textarea:focus-visible {
 
 .onboarding-shell {
   display: grid;
-  grid-template-rows: 72px minmax(0, 1fr) 54px;
+  grid-template-rows: var(--app-header-height) minmax(0, 1fr) 54px;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -1187,6 +1268,10 @@ textarea:focus-visible {
 
 .onboarding-header {
   border-bottom: 1px solid var(--line);
+}
+
+.onboarding-shell.has-overlay-titlebar .onboarding-header {
+  padding-left: max(var(--macos-titlebar-leading-inset), clamp(24px, 4vw, 58px));
 }
 
 .onboarding-header > span,
@@ -2247,7 +2332,26 @@ textarea:focus-visible {
   to { transform: translateX(300%); }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 790px) {
+  .app-shell,
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: minmax(520px, 1fr);
+  }
+
+  .app-shell .sidebar {
+    position: absolute;
+    z-index: 18;
+    display: flex;
+    width: min(var(--sidebar-width, 258px), calc(100% - 64px));
+    height: 100%;
+    box-shadow: var(--shadow);
+  }
+
+  .sidebar-resizer {
+    z-index: 19;
+    left: calc(min(var(--sidebar-width, 258px), calc(100% - 64px)) - 3px);
+  }
+
   .onboarding-main { padding: 18px; }
   .setup-card, .setup-card.auth-code-active { grid-template-columns: 1fr; min-height: auto; }
   .setup-copy { min-height: 430px; padding-inline: 38px; }
