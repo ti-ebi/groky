@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" role="img" aria-labelledby="title description">
+  <title id="title">Groky</title>
+  <desc id="description">Groky orbit symbol and wordmark</desc>
+  <style>
+    .disc { fill: #161a18; stroke: #117568; }
+    .orbit { fill: none; stroke: #f6f9f8; }
+    .wordmark { fill: #151a18; }
+
+    @media (prefers-color-scheme: dark) {
+      .disc { fill: #eff5f2; stroke: #8fe3c1; }
+      .orbit { stroke: #090b0a; }
+      .wordmark { fill: #f4f8f6; }
+    }
+  </style>
+
+  <g aria-hidden="true">
+    <circle class="disc" cx="48" cy="48" r="35" stroke-width="2.5" />
+    <ellipse
+      class="orbit"
+      cx="48"
+      cy="48"
+      rx="23.75"
+      ry="12.5"
+      stroke-width="5"
+      transform="rotate(32 48 48)"
+    />
+    <ellipse
+      class="orbit"
+      cx="48"
+      cy="48"
+      rx="23.75"
+      ry="12.5"
+      stroke-width="5"
+      transform="rotate(-32 48 48)"
+    />
+  </g>
+
+  <text
+    class="wordmark"
+    x="102"
+    y="50"
+    dominant-baseline="middle"
+    font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    font-size="52"
+    font-weight="720"
+    letter-spacing="-2.5"
+  >Groky</text>
+</svg>

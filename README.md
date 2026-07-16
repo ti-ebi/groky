@@ -1,8 +1,6 @@
-<p align="center">
-  <strong>[Groky logo / wordmark placeholder]</strong>
-</p>
-
-<h1 align="center">Groky</h1>
+<h1 align="center">
+  <img src="docs/assets/groky-logo.svg" alt="Groky" width="300">
+</h1>
 
 <p align="center">
   A local desktop workspace for Grok Build.
@@ -25,9 +23,9 @@
 > [!IMPORTANT]
 > Groky is an independent, unofficial project and is not affiliated with or endorsed by xAI.
 
-> **Image placeholder — product hero**
->
-> Add a full-width screenshot of an active Groky session using a safe sample workspace. Suggested filename: `docs/assets/groky-hero.png`.
+<p align="center">
+  <img src="docs/assets/groky-hero.png" alt="Groky ready to start a standalone Grok Build session" width="100%">
+</p>
 
 ## Why Groky
 
