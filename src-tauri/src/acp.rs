@@ -5,7 +5,7 @@ use std::{
     path::Path,
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -100,6 +100,8 @@ pub struct AcpTransport {
     pending: Arc<Mutex<PendingResponses>>,
     permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
     turn_output: Arc<Mutex<TurnOutput>>,
+    replay_updates: Arc<Mutex<Option<Vec<Value>>>>,
+    shutdown_requested: Arc<AtomicBool>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -139,6 +141,8 @@ impl AcpTransport {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let permissions = Arc::new(Mutex::new(HashMap::new()));
         let turn_output = Arc::new(Mutex::new(TurnOutput::default()));
+        let replay_updates = Arc::new(Mutex::new(None));
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
         let permission_counter = Arc::new(AtomicU64::new(1));
 
         spawn_reader(
@@ -147,6 +151,8 @@ impl AcpTransport {
             pending.clone(),
             permissions.clone(),
             turn_output.clone(),
+            replay_updates.clone(),
+            shutdown_requested.clone(),
             permission_counter,
             event_sink,
         );
@@ -157,6 +163,8 @@ impl AcpTransport {
             pending,
             permissions,
             turn_output,
+            replay_updates,
+            shutdown_requested,
             next_id: Arc::new(AtomicU64::new(1)),
         })
     }
@@ -184,6 +192,19 @@ impl AcpTransport {
             .await?;
         let output = self.turn_output.lock().await.clone();
         Ok((response, output))
+    }
+
+    pub async fn load_session(
+        &self,
+        session_id: &str,
+        cwd: &str,
+    ) -> Result<(Value, Vec<Value>), String> {
+        *self.replay_updates.lock().await = Some(Vec::new());
+        let response = self
+            .request("session/load", load_session_params(session_id, cwd))
+            .await;
+        let updates = self.replay_updates.lock().await.take().unwrap_or_default();
+        response.map(|response| (response, updates))
     }
 
     async fn request_with_timeout(
@@ -273,6 +294,7 @@ impl AcpTransport {
     }
 
     pub async fn shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::Release);
         let _ = self.child.lock().await.kill().await;
     }
 }
@@ -283,6 +305,8 @@ fn spawn_reader(
     pending: Arc<Mutex<PendingResponses>>,
     permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
     turn_output: Arc<Mutex<TurnOutput>>,
+    replay_updates: Arc<Mutex<Option<Vec<Value>>>>,
+    shutdown_requested: Arc<AtomicBool>,
     permission_counter: Arc<AtomicU64>,
     event_sink: Option<AppHandle>,
 ) {
@@ -308,6 +332,7 @@ fn spawn_reader(
                     if method == "session/update" {
                         if let Some(update) = sanitize_session_update(&params) {
                             capture_turn_output(&mut *turn_output.lock().await, &update);
+                            capture_replay_update(&mut *replay_updates.lock().await, &update);
                             if let Some(app) = event_sink.as_ref() {
                                 let _ = app.emit("grok://session-update", update);
                             }
@@ -361,14 +386,16 @@ fn spawn_reader(
             let _ = sender.send(Err("The connection to Grok Build was closed.".to_string()));
         }
 
-        if let Some(app) = event_sink {
-            let _ = app.emit(
-                "grok://connection",
-                ConnectionEvent {
-                    status: "disconnected",
-                    message: Some("The connection to Grok Build was closed."),
-                },
-            );
+        if !shutdown_requested.load(Ordering::Acquire) {
+            if let Some(app) = event_sink {
+                let _ = app.emit(
+                    "grok://connection",
+                    ConnectionEvent {
+                        status: "disconnected",
+                        message: Some("The connection to Grok Build was closed."),
+                    },
+                );
+            }
         }
     });
 }
@@ -468,6 +495,10 @@ fn cancel_notification(session_id: &str) -> Value {
         "method": "session/cancel",
         "params": { "sessionId": session_id }
     })
+}
+
+fn load_session_params(session_id: &str, cwd: &str) -> Value {
+    json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] })
 }
 
 fn set_model_params(session_id: &str, model_id: &str, reasoning_effort: Option<&str>) -> Value {
@@ -597,6 +628,12 @@ fn capture_turn_output(output: &mut TurnOutput, update: &Value) {
     }
 }
 
+fn capture_replay_update(replay: &mut Option<Vec<Value>>, update: &Value) {
+    if let Some(updates) = replay.as_mut() {
+        updates.push(update.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +735,18 @@ mod tests {
     }
 
     #[test]
+    fn loading_a_session_includes_its_workspace_and_empty_mcp_servers() {
+        assert_eq!(
+            load_session_params("session-42", "/workspace/project"),
+            json!({
+                "sessionId": "session-42",
+                "cwd": "/workspace/project",
+                "mcpServers": []
+            })
+        );
+    }
+
+    #[test]
     fn validates_grok_build_model_selection_metadata() {
         assert!(validate_set_model_response(
             &json!({ "_meta": { "model": { "Ok": "grok-4.5" } } }),
@@ -752,5 +801,21 @@ mod tests {
         assert_eq!(update["kind"], "agent_message_chunk");
         assert_eq!(update["text"], "hello");
         assert_eq!(output.text, "hello");
+    }
+
+    #[test]
+    fn captures_sanitized_updates_only_while_replaying_history() {
+        let update = json!({
+            "sessionId": "s1",
+            "kind": "user_message_chunk",
+            "text": "hello"
+        });
+        let mut inactive = None;
+        capture_replay_update(&mut inactive, &update);
+        assert!(inactive.is_none());
+
+        let mut active = Some(Vec::new());
+        capture_replay_update(&mut active, &update);
+        assert_eq!(active, Some(vec![update]));
     }
 }

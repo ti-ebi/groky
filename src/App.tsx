@@ -18,6 +18,7 @@ import "@fontsource-variable/sora/index.css";
 import "./App.css";
 
 type IconName =
+  | "archive"
   | "arrow-right"
   | "arrow-down"
   | "arrow-up"
@@ -39,6 +40,7 @@ type IconName =
   | "sliders"
   | "stop"
   | "terminal"
+  | "trash"
   | "x";
 
 type OnboardingStage =
@@ -169,17 +171,57 @@ interface ConversationMessage {
   error?: string;
 }
 
+interface ConversationTurnPreview {
+  id: string;
+  request: string;
+  response: string;
+}
+
 interface SidebarSessionSummary {
   sessionId: string;
   title: string;
   workspace: string | null;
   running: boolean;
+  updatedAt: number;
+  archived: boolean;
 }
 
 interface SidebarWorkspaceGroup {
   path: string;
   sessions: SidebarSessionSummary[];
 }
+
+interface PersistedSessionSummary {
+  sessionId: string;
+  title: string;
+  workspace: string | null;
+  updatedAt: number;
+  archived: boolean;
+}
+
+interface PersistedWorkspaceSummary {
+  path: string;
+}
+
+interface LoadSessionResult {
+  connection: Connection;
+  updates: SessionUpdate[];
+}
+
+type SidebarMenu =
+  | { kind: "global" }
+  | { kind: "workspace"; path: string }
+  | { kind: "session"; sessionId: string }
+  | null;
+
+interface DeleteConfirmation {
+  sessionId?: string;
+  workspace?: string;
+  title: string;
+  description: string;
+}
+
+type SessionHistoryAction = "archive" | "restore" | "delete";
 
 interface AppUpdateInfo {
   currentVersion: string;
@@ -319,6 +361,7 @@ function storedSidebarCollapsed() {
 
 function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
+    archive: <><path d="M4 7h16" /><path d="M5 7v12h14V7" /><path d="M3 4h18v3H3Z" /><path d="M9 11h6" /></>,
     "arrow-right": <><path d="m9 18 6-6-6-6" /><path d="M5 12h10" /></>,
     "arrow-down": <><path d="m6 9 6 6 6-6" /><path d="M12 5v10" /></>,
     "arrow-up": <><path d="m18 15-6-6-6 6" /><path d="M12 9v10" /></>,
@@ -340,6 +383,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     sliders: <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>,
     stop: <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />,
     terminal: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="m7 9 3 3-3 3M13 15h4" /></>,
+    trash: <><path d="M4 7h16" /><path d="m9 7 .5-3h5l.5 3" /><path d="m6 7 1 13h10l1-13" /><path d="M10 11v5M14 11v5" /></>,
     x: <><path d="m7 7 10 10M17 7 7 17" /></>,
   };
 
@@ -400,6 +444,79 @@ function groupSidebarSessions(sessions: SidebarSessionSummary[]) {
   };
 }
 
+function SidebarSessionRow({
+  session,
+  selected,
+  disabled,
+  menuOpen,
+  subtitle,
+  onSelect,
+  onToggleMenu,
+  onArchive,
+  onRestore,
+  onDelete,
+}: {
+  session: SidebarSessionSummary;
+  selected: boolean;
+  disabled: boolean;
+  menuOpen: boolean;
+  subtitle?: string;
+  onSelect: () => void;
+  onToggleMenu: () => void;
+  onArchive: () => void;
+  onRestore: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className={`session-row ${selected ? "selected" : ""}`} data-sidebar-menu-root>
+      <button
+        className="session-main"
+        type="button"
+        aria-current={selected ? "page" : undefined}
+        disabled={disabled}
+        title={session.title}
+        onClick={onSelect}
+      >
+        <span className="session-copy">
+          <span>{session.title}</span>
+          {subtitle && <small>{subtitle}</small>}
+        </span>
+        {session.running && <span className="task-status" aria-label="Running" />}
+      </button>
+      <button
+        className="session-more"
+        type="button"
+        aria-label={`Session actions for ${session.title}`}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        disabled={disabled}
+        onClick={onToggleMenu}
+      >
+        <Icon name="dots" size={15} />
+      </button>
+      {menuOpen && (
+        <div className="sidebar-context-menu session-context-menu" role="menu">
+          {session.archived ? (
+            <button type="button" role="menuitem" onClick={onRestore}>
+              <Icon name="refresh" size={14} />
+              <span>Restore</span>
+            </button>
+          ) : (
+            <button type="button" role="menuitem" onClick={onArchive}>
+              <Icon name="archive" size={14} />
+              <span>Archive</span>
+            </button>
+          )}
+          <button className="danger-menu-item" type="button" role="menuitem" onClick={onDelete}>
+            <Icon name="trash" size={14} />
+            <span>Delete</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function cleanVersion(version: string | null) {
   return version?.replace(/^grok\s+/, "") ?? "not detected";
 }
@@ -412,6 +529,178 @@ function resizeTextareaToContent(textarea: HTMLTextAreaElement | null) {
   if (!textarea) return;
   textarea.style.height = "auto";
   textarea.style.height = `${textarea.scrollHeight}px`;
+}
+
+function titleFromPrompt(prompt: string) {
+  const normalized = prompt.trim().replace(/\s+/g, " ");
+  const characters = Array.from(normalized);
+  return characters.length > 72 ? `${characters.slice(0, 71).join("")}…` : normalized || "New Grok session";
+}
+
+function messagesFromSessionReplay(sessionId: string, updates: SessionUpdate[]) {
+  const messages: ConversationMessage[] = [];
+  const currentAssistant = () => {
+    const last = messages[messages.length - 1];
+    if (last?.role === "assistant") return last;
+    const assistant: ConversationMessage = {
+      id: makeMessageId("replayed-assistant"),
+      role: "assistant",
+      text: "",
+      state: "complete",
+    };
+    messages.push(assistant);
+    return assistant;
+  };
+
+  updates.filter((update) => update.sessionId === sessionId).forEach((update) => {
+    if (update.kind === "user_message_chunk") {
+      const last = messages[messages.length - 1];
+      if (last?.role === "user") last.text += update.text ?? "";
+      else messages.push({
+        id: makeMessageId("replayed-user"),
+        role: "user",
+        text: update.text ?? "",
+      });
+      return;
+    }
+
+    const assistant = currentAssistant();
+    if (update.kind === "agent_message_chunk") {
+      assistant.text += update.text ?? "";
+    } else if (update.kind === "agent_thought_chunk") {
+      assistant.thought = (assistant.thought ?? "") + (update.text ?? "");
+    } else if (update.kind === "plan") {
+      assistant.plan = update.entries ?? [];
+    } else if (update.kind === "tool_call" || update.kind === "tool_call_update") {
+      const id = update.toolCallId ?? `replayed-tool-${assistant.tools?.length ?? 0}`;
+      const tools = assistant.tools ?? [];
+      const index = tools.findIndex((tool) => tool.id === id);
+      const existing = index >= 0 ? tools[index] : undefined;
+      const tool: ToolActivity = {
+        id,
+        title: update.title ?? existing?.title ?? "Worked with a local tool",
+        kind: update.toolKind ?? existing?.kind ?? undefined,
+        status: update.status ?? existing?.status ?? "completed",
+      };
+      if (index >= 0) tools[index] = tool;
+      else tools.push(tool);
+      assistant.tools = tools;
+    }
+  });
+
+  return messages;
+}
+
+function previewText(text: string, limit: number) {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  const characters = Array.from(normalized);
+  return characters.length > limit ? `${characters.slice(0, limit - 1).join("")}…` : normalized;
+}
+
+function conversationTurnPreviews(messages: ConversationMessage[]) {
+  const turns: ConversationTurnPreview[] = [];
+
+  messages.forEach((message) => {
+    if (message.role === "user") {
+      turns.push({
+        id: message.id,
+        request: previewText(message.text, 96) || "Untitled request",
+        response: "Waiting for Grok's response…",
+      });
+      return;
+    }
+
+    const turn = turns[turns.length - 1];
+    if (!turn) return;
+
+    const response = previewText(message.text, 240);
+    if (response) {
+      turn.response = response;
+    } else if (message.state === "error") {
+      turn.response = "This turn failed before a response was returned.";
+    } else if (message.state === "cancelled") {
+      turn.response = "This turn was cancelled before a response was returned.";
+    } else if (message.state !== "streaming") {
+      turn.response = "No response text was returned for this turn.";
+    }
+  });
+
+  return turns;
+}
+
+function MessageHistoryNav({
+  turns,
+  activeId,
+  onNavigate,
+}: {
+  turns: ConversationTurnPreview[];
+  activeId: string | null;
+  onNavigate: (messageId: string) => void;
+}) {
+  const [previewedId, setPreviewedId] = useState<string | null>(null);
+  const list = useRef<HTMLDivElement | null>(null);
+  const previewedTurn = turns.find((turn) => turn.id === previewedId) ?? null;
+  const previewedTurnNumber = previewedTurn
+    ? String(turns.findIndex((turn) => turn.id === previewedTurn.id) + 1).padStart(2, "0")
+    : null;
+  const turnCount = String(turns.length).padStart(2, "0");
+
+  useEffect(() => {
+    if (previewedId && !previewedTurn) setPreviewedId(null);
+  }, [previewedId, previewedTurn]);
+
+  useEffect(() => {
+    const listElement = list.current;
+    const activeMarker = listElement?.querySelector<HTMLElement>('[aria-current="step"]');
+    if (!listElement || !activeMarker) return;
+
+    const markerTop = activeMarker.offsetTop;
+    const markerBottom = markerTop + activeMarker.offsetHeight;
+    if (markerTop < listElement.scrollTop) {
+      listElement.scrollTop = markerTop;
+    } else if (markerBottom > listElement.scrollTop + listElement.clientHeight) {
+      listElement.scrollTop = markerBottom - listElement.clientHeight;
+    }
+  }, [activeId]);
+
+  if (turns.length < 2) return null;
+
+  return (
+    <nav className="message-history-nav" aria-label="Message history">
+      <div className="message-history-list" ref={list} role="list">
+        {turns.map((turn, index) => {
+          const active = turn.id === activeId;
+          return (
+            <div role="listitem" key={turn.id}>
+              <button
+                className="message-history-marker"
+                type="button"
+                aria-label={`Go to request ${index + 1}: ${turn.request}`}
+                aria-current={active ? "step" : undefined}
+                onClick={() => onNavigate(turn.id)}
+                onFocus={() => setPreviewedId(turn.id)}
+                onBlur={() => setPreviewedId(null)}
+                onMouseEnter={() => setPreviewedId(turn.id)}
+                onMouseLeave={() => setPreviewedId(null)}
+              >
+                <span className="message-history-tick" />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {previewedTurn && (
+        <div className="message-history-preview" aria-hidden="true">
+          <span className="message-history-preview-meta">
+            <i />Turn {previewedTurnNumber} / {turnCount}
+          </span>
+          <strong>{previewedTurn.request}</strong>
+          <span className="message-history-preview-response">{previewedTurn.response}</span>
+        </div>
+      )}
+    </nav>
+  );
 }
 
 async function copyToClipboard(text: string) {
@@ -1007,6 +1296,8 @@ function App() {
   const [deviceAuthCode, setDeviceAuthCode] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [sessionHistory, setSessionHistory] = useState<PersistedSessionSummary[]>([]);
+  const [workspaceHistory, setWorkspaceHistory] = useState<PersistedWorkspaceSummary[]>([]);
   const [draft, setDraft] = useState("");
   const [running, setRunning] = useState(false);
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
@@ -1019,11 +1310,16 @@ function App() {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateCheckNotice, setUpdateCheckNotice] = useState<string | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
+  const [activeHistoryMessageId, setActiveHistoryMessageId] = useState<string | null>(null);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
+  const [historyMutating, setHistoryMutating] = useState(false);
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
   const activeAssistantId = useRef<string | null>(null);
   const autoScrollEnabled = useRef(true);
@@ -1031,24 +1327,33 @@ function App() {
   const composer = useRef<HTMLFormElement | null>(null);
   const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
   const updateCheckInFlight = useRef(false);
+  const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
   const projectMenu = useRef<HTMLDivElement | null>(null);
 
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
+  const messageHistory = useMemo(() => conversationTurnPreviews(messages), [messages]);
   const appUpdating = updatePhase === "downloading";
-  const firstRequest = messages.find((message) => message.role === "user")?.text.trim();
-  const currentSidebarSession: SidebarSessionSummary | null = connection ? {
-    sessionId: connection.sessionId,
-    title: firstRequest || "New Grok session",
-    workspace: connection.workspace,
-    running,
-  } : null;
-  const groupedSidebarSessions = groupSidebarSessions(currentSidebarSession ? [currentSidebarSession] : []);
-  const workspaceGroups: SidebarWorkspaceGroup[] = workspace && !groupedSidebarSessions.workspaceGroups.some((group) => group.path === workspace)
-    ? [{ path: workspace, sessions: [] }, ...groupedSidebarSessions.workspaceGroups]
-    : groupedSidebarSessions.workspaceGroups;
+  const sidebarSessions: SidebarSessionSummary[] = sessionHistory.map((session) => ({
+    ...session,
+    running: running && connection?.sessionId === session.sessionId,
+  }));
+  const activeSidebarSessions = sidebarSessions.filter((session) => !session.archived);
+  const archivedSidebarSessions = sidebarSessions.filter((session) => session.archived);
+  const groupedSidebarSessions = groupSidebarSessions(activeSidebarSessions);
+  const sessionsByWorkspace = new Map(groupedSidebarSessions.workspaceGroups.map((group) => [group.path, group.sessions]));
+  const workspacePaths = workspaceHistory.map((entry) => entry.path);
+  groupedSidebarSessions.workspaceGroups.forEach((group) => {
+    if (!workspacePaths.includes(group.path)) workspacePaths.push(group.path);
+  });
+  if (workspace && !workspacePaths.includes(workspace)) workspacePaths.unshift(workspace);
+  const workspaceGroups: SidebarWorkspaceGroup[] = workspacePaths.map((path) => ({
+    path,
+    sessions: sessionsByWorkspace.get(path) ?? [],
+  }));
   const allWorkspaceGroupsCollapsed = workspaceGroups.length > 0
     && workspaceGroups.every((group) => collapsedWorkspaces.has(group.path));
+  const sidebarActionsDisabled = running || appUpdating || stage === "connecting" || historyMutating;
 
   useEffect(() => {
     if (!overlayTitlebar) return;
@@ -1128,10 +1433,40 @@ function App() {
   }, [projectMenuOpen]);
 
   useEffect(() => {
-    if (running || appUpdating || stage === "connecting" || sidebarCollapsed) {
+    if (!sidebarMenu) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest("[data-sidebar-menu-root]")) {
+        setSidebarMenu(null);
+      }
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarMenu(null);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [sidebarMenu]);
+
+  useEffect(() => {
+    if (running || appUpdating || stage === "connecting" || historyMutating || sidebarCollapsed) {
       setProjectMenuOpen(false);
+      setSidebarMenu(null);
     }
-  }, [appUpdating, running, sidebarCollapsed, stage]);
+  }, [appUpdating, historyMutating, running, sidebarCollapsed, stage]);
+
+  useEffect(() => {
+    if (!deleteConfirmation) return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !historyMutating) setDeleteConfirmation(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [deleteConfirmation, historyMutating]);
 
   function toggleSidebar() {
     if (!sidebarCollapsed) setShowConnection(false);
@@ -1139,6 +1474,7 @@ function App() {
   }
 
   function toggleWorkspaceGroup(path: string) {
+    setSidebarMenu(null);
     setCollapsedWorkspaces((current) => {
       const next = new Set(current);
       if (next.has(path)) next.delete(path);
@@ -1188,6 +1524,20 @@ function App() {
     setSidebarWidth(clampSidebarWidth(nextWidth));
   }
 
+  async function refreshSessionHistory() {
+    if (!isTauri()) return;
+    try {
+      const [sessions, workspaces] = await Promise.all([
+        invoke<PersistedSessionSummary[]>("grok_list_sessions"),
+        invoke<PersistedWorkspaceSummary[]>("grok_list_workspaces"),
+      ]);
+      setSessionHistory(sessions);
+      setWorkspaceHistory(workspaces);
+    } catch (error) {
+      setConnectionNotice(String(error));
+    }
+  }
+
   async function refreshStatus() {
     setSetupError(null);
     if (!isTauri()) {
@@ -1212,6 +1562,7 @@ function App() {
 
   useEffect(() => {
     void refreshStatus();
+    void refreshSessionHistory();
   }, []);
 
   useEffect(() => {
@@ -1310,7 +1661,7 @@ function App() {
         setPermission(payload);
       }),
       listen<ConnectionEvent>("grok://connection", ({ payload }) => {
-        if (payload.status === "disconnected" && connection) {
+        if (payload.status === "disconnected" && connection && !connectionTransitioning.current) {
           setConnectionNotice(payload.message ?? "Grok Build disconnected.");
         }
       }),
@@ -1335,17 +1686,19 @@ function App() {
     if (messages.length === 0) {
       autoScrollEnabled.current = true;
       setShowScrollToLatest(false);
+      setActiveHistoryMessageId(null);
       return;
     }
 
     if (autoScrollEnabled.current) {
       container.scrollTop = container.scrollHeight;
       setShowScrollToLatest(false);
-      return;
+    } else {
+      const hasContentBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 2;
+      setShowScrollToLatest(hasContentBelow);
     }
 
-    const hasContentBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 2;
-    setShowScrollToLatest(hasContentBelow);
+    updateActiveHistoryMessage(container);
   }, [messages, permission]);
 
   useLayoutEffect(() => {
@@ -1383,6 +1736,51 @@ function App() {
     const hasContentBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 2;
     autoScrollEnabled.current = !hasContentBelow;
     setShowScrollToLatest(hasContentBelow);
+    updateActiveHistoryMessage(container);
+  }
+
+  function updateActiveHistoryMessage(container: HTMLElement) {
+    const messageElements = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-history-message-id]"),
+    );
+    if (messageElements.length === 0) {
+      setActiveHistoryMessageId(null);
+      return;
+    }
+
+    const containerBounds = container.getBoundingClientRect();
+    const readingLine = containerBounds.top + Math.min(160, containerBounds.height * 0.28);
+    let activeMessageId = messageElements[0].dataset.historyMessageId ?? null;
+
+    messageElements.forEach((element) => {
+      if (element.getBoundingClientRect().top <= readingLine) {
+        activeMessageId = element.dataset.historyMessageId ?? activeMessageId;
+      }
+    });
+
+    const atLatest = container.scrollHeight - container.scrollTop - container.clientHeight <= 2;
+    if (atLatest) {
+      activeMessageId = messageElements[messageElements.length - 1].dataset.historyMessageId ?? activeMessageId;
+    }
+    setActiveHistoryMessageId(activeMessageId);
+  }
+
+  function scrollToHistoryMessage(messageId: string) {
+    const container = conversation.current;
+    const target = Array.from(
+      container?.querySelectorAll<HTMLElement>("[data-history-message-id]") ?? [],
+    ).find((element) => element.dataset.historyMessageId === messageId);
+    if (!container || !target) return;
+
+    const containerBounds = container.getBoundingClientRect();
+    const targetBounds = target.getBoundingClientRect();
+    const targetTop = container.scrollTop + targetBounds.top - containerBounds.top - 28;
+    autoScrollEnabled.current = false;
+    setActiveHistoryMessageId(messageId);
+    container.scrollTo({
+      top: Math.max(0, targetTop),
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
   }
 
   function scrollToLatest() {
@@ -1470,9 +1868,7 @@ function App() {
     setSetupError(null);
     setConnectionNotice(null);
     try {
-      const selected = await invoke<string | null>("choose_workspace");
-      if (selected) setWorkspace(selected);
-      return selected;
+      return await invoke<string | null>("choose_workspace");
     } catch (error) {
       setSetupError(String(error));
       return null;
@@ -1486,6 +1882,7 @@ function App() {
   ) {
     setSetupError(null);
     setConnectionNotice(null);
+    connectionTransitioning.current = true;
     setStage("connecting");
     try {
       const next = await invoke<Connection>("grok_connect", {
@@ -1498,6 +1895,8 @@ function App() {
       setStatus((current) => current ? { ...current, stage: "connected", cliVersion: next.cliVersion } : current);
       setStage("connected");
       if (clearConversation) setMessages([]);
+      await refreshSessionHistory();
+      connectionTransitioning.current = false;
       return next;
     } catch (error) {
       const message = String(error);
@@ -1506,15 +1905,142 @@ function App() {
       setConnection(null);
       setMessages([]);
       setStage(authRequired ? "needsAuth" : "ready");
+      connectionTransitioning.current = false;
       return null;
     }
   }
 
-  async function chooseAndConnect() {
-    if (running || appUpdating || stage === "connecting") return;
+  async function loadSession(session: PersistedSessionSummary) {
+    setSidebarMenu(null);
+    if (
+      session.sessionId === connection?.sessionId
+      || running
+      || appUpdating
+      || stage === "connecting"
+    ) return;
+
+    setProjectMenuOpen(false);
+    setShowConnection(false);
+    setSetupError(null);
+    setConnectionNotice(null);
+    setPermission(null);
+    setDraft("");
+    activeAssistantId.current = null;
+    connectionTransitioning.current = true;
+    setStage("connecting");
+
+    try {
+      const loaded = await invoke<LoadSessionResult>("grok_load_session", {
+        sessionId: session.sessionId,
+      });
+      setConnection(loaded.connection);
+      setWorkspace(loaded.connection.workspace);
+      setApprovalMode(loaded.connection.approvalMode);
+      setMessages(messagesFromSessionReplay(loaded.connection.sessionId, loaded.updates));
+      setStatus((current) => current ? {
+        ...current,
+        stage: "connected",
+        cliVersion: loaded.connection.cliVersion,
+      } : current);
+      setStage("connected");
+      await refreshSessionHistory();
+      connectionTransitioning.current = false;
+    } catch (error) {
+      await invoke("grok_disconnect").catch(() => undefined);
+      const message = String(error);
+      const authRequired = message.includes(AUTH_REQUIRED_ERROR);
+      setConnection(null);
+      setMessages([]);
+      setApprovalMode("ask");
+      setSetupError(authRequired ? null : message);
+      setStage(authRequired ? "needsAuth" : "ready");
+      connectionTransitioning.current = false;
+    }
+  }
+
+  async function chooseAndAddWorkspace() {
+    if (sidebarActionsDisabled) return;
     setProjectMenuOpen(false);
     const selected = await chooseWorkspace();
-    if (selected) await connect(selected, true);
+    if (!selected) return;
+
+    try {
+      const added = await invoke<PersistedWorkspaceSummary>("grok_add_workspace", {
+        workspace: selected,
+      });
+      setWorkspaceHistory((current) => current.some((entry) => entry.path === added.path)
+        ? current
+        : [...current, added]);
+      setCollapsedWorkspaces((current) => {
+        const next = new Set(current);
+        next.delete(added.path);
+        return next;
+      });
+    } catch (error) {
+      setConnectionNotice(String(error));
+    }
+  }
+
+  async function mutateSessionHistory(
+    action: SessionHistoryAction,
+    target: { sessionId?: string; workspace?: string },
+  ) {
+    if (sidebarActionsDisabled) return;
+    const affectsActive = connection !== null && (
+      target.sessionId === connection.sessionId
+      || (target.workspace !== undefined && target.workspace === connection.workspace)
+    );
+    setSidebarMenu(null);
+    setHistoryMutating(true);
+    setConnectionNotice(null);
+    try {
+      const sessions = await invoke<PersistedSessionSummary[]>("grok_mutate_sessions", {
+        action,
+        sessionId: target.sessionId,
+        workspace: target.workspace,
+      });
+      setSessionHistory(sessions);
+      if (affectsActive && action !== "restore") {
+        setConnection(null);
+        setMessages([]);
+        setPermission(null);
+        setApprovalMode("ask");
+        setStage("ready");
+      }
+    } catch (error) {
+      setConnectionNotice(String(error));
+    } finally {
+      setHistoryMutating(false);
+    }
+  }
+
+  function requestSessionDelete(session: PersistedSessionSummary) {
+    setSidebarMenu(null);
+    setDeleteConfirmation({
+      sessionId: session.sessionId,
+      title: "Delete session?",
+      description: `“${session.title}” will be removed from Groky history. This cannot be undone.`,
+    });
+  }
+
+  function requestWorkspaceDelete(path: string) {
+    const count = sessionHistory.filter((session) => session.workspace === path).length;
+    setSidebarMenu(null);
+    setDeleteConfirmation({
+      workspace: path,
+      title: `Delete all sessions in ${workspaceName(path)}?`,
+      description: `${count} ${count === 1 ? "session" : "sessions"} will be removed from Groky history. This cannot be undone.`,
+    });
+  }
+
+  async function confirmDelete() {
+    const target = deleteConfirmation;
+    if (!target) return;
+    setDeleteConfirmation(null);
+    await mutateSessionHistory("delete", {
+      sessionId: target.sessionId,
+      workspace: target.workspace,
+    });
   }
 
   async function revealWorkingDirectory() {
@@ -1527,9 +2053,17 @@ function App() {
   }
 
   async function startNewTask(targetWorkspace: string | null = workspace) {
-    if (running || appUpdating || stage === "connecting") return;
+    if (sidebarActionsDisabled) return;
     const nextMode: ApprovalMode = "ask";
     setProjectMenuOpen(false);
+    setSidebarMenu(null);
+    if (targetWorkspace) {
+      setCollapsedWorkspaces((current) => {
+        const next = new Set(current);
+        next.delete(targetWorkspace);
+        return next;
+      });
+    }
     setDraft("");
     setMessages([]);
     setPermission(null);
@@ -1537,7 +2071,7 @@ function App() {
     setSetupError(null);
     setConnectionNotice(null);
     setWorkspace(targetWorkspace);
-    if (connection) await connect(targetWorkspace, true, nextMode);
+    if (targetWorkspace || connection) await connect(targetWorkspace, true, nextMode);
   }
 
   async function changeApprovalMode(nextMode: ApprovalMode) {
@@ -1583,6 +2117,16 @@ function App() {
     const activeConnection = connection ?? await connect(workspace);
     if (!activeConnection) return;
 
+    setSessionHistory((current) => current
+      .map((session) => session.sessionId === activeConnection.sessionId
+        ? {
+            ...session,
+            title: session.title === "New Grok session" ? titleFromPrompt(prompt) : session.title,
+            updatedAt: Date.now(),
+          }
+        : session)
+      .sort((left, right) => right.updatedAt - left.updatedAt));
+
     const userMessage: ConversationMessage = {
       id: makeMessageId("user"),
       role: "user",
@@ -1625,6 +2169,7 @@ function App() {
       setRunning(false);
       setPermission(null);
       activeAssistantId.current = null;
+      void refreshSessionHistory();
     }
   }
 
@@ -1748,85 +2293,257 @@ function App() {
         </div>
 
         <nav className="primary-nav" aria-label="Primary">
-          <button type="button" onClick={() => void startNewTask()} disabled={running || appUpdating || stage === "connecting"}>
+          <button type="button" onClick={() => void startNewTask()} disabled={sidebarActionsDisabled}>
             <Icon name="compose" /><span>New session</span>
           </button>
         </nav>
 
         <div className="project-scroll">
-          <div className="project-section-header" ref={projectMenu}>
+          <div
+            className={`project-section-header ${projectMenuOpen || sidebarMenu?.kind === "global" ? "actions-visible" : ""}`}
+            ref={projectMenu}
+            data-sidebar-menu-root
+          >
             <span>Working directories</span>
             <div className="project-section-actions">
               <button
                 type="button"
-                aria-label={allWorkspaceGroupsCollapsed ? "Expand all working directories" : "Collapse all working directories"}
-                disabled={workspaceGroups.length === 0}
-                onClick={toggleAllWorkspaceGroups}
+                aria-label="Working directory actions"
+                aria-haspopup="menu"
+                aria-expanded={sidebarMenu?.kind === "global"}
+                onClick={() => {
+                  setProjectMenuOpen(false);
+                  setSidebarMenu((current) => current?.kind === "global" ? null : { kind: "global" });
+                }}
               >
                 <Icon name="dots" size={15} />
               </button>
               <button
                 type="button"
-                aria-label="New session location"
+                aria-label="Add working directory or standalone session"
                 aria-haspopup="menu"
                 aria-expanded={projectMenuOpen}
-                disabled={running || appUpdating || stage === "connecting"}
-                onClick={() => setProjectMenuOpen((current) => !current)}
+                disabled={sidebarActionsDisabled}
+                onClick={() => {
+                  setSidebarMenu(null);
+                  setProjectMenuOpen((current) => !current);
+                }}
               >
                 <Icon name="plus" size={15} />
               </button>
             </div>
+            {sidebarMenu?.kind === "global" && (
+              <div className="sidebar-context-menu global-context-menu" role="menu" aria-label="Working directory actions">
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={workspaceGroups.length === 0}
+                  onClick={() => {
+                    toggleAllWorkspaceGroups();
+                    setSidebarMenu(null);
+                  }}
+                >
+                  <Icon name={allWorkspaceGroupsCollapsed ? "folder-open" : "folder"} size={14} />
+                  <span>{allWorkspaceGroupsCollapsed ? "Expand all" : "Collapse all"}</span>
+                </button>
+                {archivedSidebarSessions.length > 0 && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setArchivedOpen(true);
+                      setSidebarMenu(null);
+                    }}
+                  >
+                    <Icon name="archive" size={14} />
+                    <span>Show archived ({archivedSidebarSessions.length})</span>
+                  </button>
+                )}
+              </div>
+            )}
             {projectMenuOpen && (
-              <div className="project-create-menu" role="menu" aria-label="Choose where to start the session">
+              <div className="project-create-menu" role="menu" aria-label="Add to the sidebar">
                 <button type="button" role="menuitem" onClick={() => void startNewTask(null)}>
                   <Icon name="plus" size={15} />
                   <span>Start standalone session</span>
                 </button>
-                <button type="button" role="menuitem" onClick={() => void chooseAndConnect()}>
+                <button type="button" role="menuitem" onClick={() => void chooseAndAddWorkspace()}>
                   <Icon name="folder" size={15} />
-                  <span>Use existing folder</span>
+                  <span>Add existing folder</span>
                 </button>
               </div>
             )}
           </div>
+
           {workspaceGroups.map((group) => {
             const expanded = !collapsedWorkspaces.has(group.path);
+            const workspaceMenuOpen = sidebarMenu?.kind === "workspace" && sidebarMenu.path === group.path;
+            const allSessionCount = sessionHistory.filter((session) => session.workspace === group.path).length;
             return (
               <section className="project-group" key={group.path}>
-                <button
-                  className="project-heading"
-                  type="button"
-                  aria-expanded={expanded}
-                  title={group.path}
-                  onClick={() => toggleWorkspaceGroup(group.path)}
+                <div
+                  className={`project-heading-row ${workspaceMenuOpen ? "actions-visible" : ""}`}
+                  data-open={expanded}
+                  data-sidebar-menu-root
                 >
-                  <Icon name="folder" />
-                  <span>{workspaceName(group.path)}</span>
-                  <Icon name="chevron-down" size={14} />
-                </button>
-                {expanded && group.sessions.length > 0 && (
-                  <div className="task-list">
-                    {group.sessions.map((session) => (
-                      <button className="selected" type="button" aria-current="page" key={session.sessionId}>
-                        <span>{session.title}</span>
-                        {session.running && <span className="task-status" aria-label="Running" />}
-                      </button>
-                    ))}
+                  <button
+                    className="project-heading"
+                    type="button"
+                    aria-expanded={expanded}
+                    title={group.path}
+                    onClick={() => toggleWorkspaceGroup(group.path)}
+                  >
+                    <Icon name={expanded ? "folder-open" : "folder"} />
+                    <span>{workspaceName(group.path)}</span>
+                  </button>
+                  <div className="project-row-actions">
+                    <button
+                      className="project-new-session"
+                      type="button"
+                      aria-label={`New session in ${workspaceName(group.path)}`}
+                      title={`New session in ${workspaceName(group.path)}`}
+                      disabled={sidebarActionsDisabled}
+                      onClick={() => void startNewTask(group.path)}
+                    >
+                      <Icon name="plus" size={15} />
+                    </button>
+                    <button
+                      className="project-more"
+                      type="button"
+                      aria-label={`Actions for ${workspaceName(group.path)}`}
+                      aria-haspopup="menu"
+                      aria-expanded={workspaceMenuOpen}
+                      disabled={sidebarActionsDisabled}
+                      onClick={() => setSidebarMenu((current) =>
+                        current?.kind === "workspace" && current.path === group.path
+                          ? null
+                          : { kind: "workspace", path: group.path }
+                      )}
+                    >
+                      <Icon name="dots" size={15} />
+                    </button>
                   </div>
-                )}
+                  {workspaceMenuOpen && (
+                    <div className="sidebar-context-menu workspace-context-menu" role="menu" aria-label={`Actions for ${workspaceName(group.path)}`}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={group.sessions.length === 0}
+                        onClick={() => void mutateSessionHistory("archive", { workspace: group.path })}
+                      >
+                        <Icon name="archive" size={14} />
+                        <span>Archive all</span>
+                      </button>
+                      <button
+                        className="danger-menu-item"
+                        type="button"
+                        role="menuitem"
+                        disabled={allSessionCount === 0}
+                        onClick={() => requestWorkspaceDelete(group.path)}
+                      >
+                        <Icon name="trash" size={14} />
+                        <span>Delete all</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className={`project-session-reveal ${expanded ? "is-open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
+                  <div className="project-session-reveal-inner">
+                    {group.sessions.length > 0 ? (
+                      <div className="task-list" aria-label={`Sessions in ${workspaceName(group.path)}`}>
+                        {group.sessions.map((session) => (
+                          <SidebarSessionRow
+                            key={session.sessionId}
+                            session={session}
+                            selected={connection?.sessionId === session.sessionId}
+                            disabled={sidebarActionsDisabled}
+                            menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
+                            onSelect={() => void loadSession(session)}
+                            onToggleMenu={() => setSidebarMenu((current) =>
+                              current?.kind === "session" && current.sessionId === session.sessionId
+                                ? null
+                                : { kind: "session", sessionId: session.sessionId }
+                            )}
+                            onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
+                            onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
+                            onDelete={() => requestSessionDelete(session)}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="project-empty-state">No sessions yet</p>
+                    )}
+                  </div>
+                </div>
               </section>
             );
           })}
+
           {groupedSidebarSessions.ungrouped.length > 0 && (
             <section className="unassigned-tasks">
-              <p className="section-label">Sessions</p>
+              <p className="section-label">Standalone sessions</p>
               <div className="task-list ungrouped-task-list" aria-label="Standalone sessions">
                 {groupedSidebarSessions.ungrouped.map((session) => (
-                  <button className="selected" type="button" aria-current="page" key={session.sessionId}>
-                    <span>{session.title}</span>
-                    {session.running && <span className="task-status" aria-label="Running" />}
-                  </button>
+                  <SidebarSessionRow
+                    key={session.sessionId}
+                    session={session}
+                    selected={connection?.sessionId === session.sessionId}
+                    disabled={sidebarActionsDisabled}
+                    menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
+                    onSelect={() => void loadSession(session)}
+                    onToggleMenu={() => setSidebarMenu((current) =>
+                      current?.kind === "session" && current.sessionId === session.sessionId
+                        ? null
+                        : { kind: "session", sessionId: session.sessionId }
+                    )}
+                    onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
+                    onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
+                    onDelete={() => requestSessionDelete(session)}
+                  />
                 ))}
+              </div>
+            </section>
+          )}
+
+          {archivedSidebarSessions.length > 0 && (
+            <section className="archived-sessions">
+              <button
+                className="archived-heading"
+                type="button"
+                aria-expanded={archivedOpen}
+                onClick={() => {
+                  setSidebarMenu(null);
+                  setArchivedOpen((current) => !current);
+                }}
+              >
+                <Icon name="archive" size={14} />
+                <span>Archived</span>
+                <small>{archivedSidebarSessions.length}</small>
+              </button>
+              <div className={`archived-session-reveal ${archivedOpen ? "is-open" : ""}`} aria-hidden={!archivedOpen} inert={!archivedOpen}>
+                <div className="project-session-reveal-inner">
+                  <div className="task-list archived-task-list" aria-label="Archived sessions">
+                    {archivedSidebarSessions.map((session) => (
+                      <SidebarSessionRow
+                        key={session.sessionId}
+                        session={session}
+                        selected={false}
+                        disabled={sidebarActionsDisabled}
+                        subtitle={session.workspace ? workspaceName(session.workspace) : "Standalone"}
+                        menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
+                        onSelect={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
+                        onToggleMenu={() => setSidebarMenu((current) =>
+                          current?.kind === "session" && current.sessionId === session.sessionId
+                            ? null
+                            : { kind: "session", sessionId: session.sessionId }
+                        )}
+                        onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
+                        onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
+                        onDelete={() => requestSessionDelete(session)}
+                      />
+                    ))}
+                  </div>
+                </div>
               </div>
             </section>
           )}
@@ -1940,6 +2657,12 @@ function App() {
           </div>
         </section>
 
+        <MessageHistoryNav
+          turns={messageHistory}
+          activeId={activeHistoryMessageId}
+          onNavigate={scrollToHistoryMessage}
+        />
+
         {showScrollToLatest && (
           <button
             className="scroll-to-latest"
@@ -1993,6 +2716,36 @@ function App() {
         </form>
       </main>
       </div>
+      {deleteConfirmation && (
+        <div
+          className="history-confirm-backdrop"
+          role="presentation"
+          onPointerDown={() => {
+            if (!historyMutating) setDeleteConfirmation(null);
+          }}
+        >
+          <div
+            className="history-confirm-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="history-confirm-title"
+            aria-describedby="history-confirm-description"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <span className="history-confirm-icon"><Icon name="trash" size={17} /></span>
+            <div className="history-confirm-copy">
+              <h2 id="history-confirm-title">{deleteConfirmation.title}</h2>
+              <p id="history-confirm-description">{deleteConfirmation.description}</p>
+            </div>
+            <div className="history-confirm-actions">
+              <button type="button" disabled={historyMutating} onClick={() => setDeleteConfirmation(null)}>Cancel</button>
+              <button className="danger-confirm" type="button" disabled={historyMutating} onClick={() => void confirmDelete()}>
+                {historyMutating ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {updateNotice}
     </>
   );
@@ -2031,7 +2784,12 @@ function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active:
 
 function ConversationItem({ message }: { message: ConversationMessage }) {
   if (message.role === "user") {
-    return <div className="user-message"><span className="message-kicker">REQUEST</span>{message.text}</div>;
+    return (
+      <div className="user-message" data-history-message-id={message.id}>
+        <span className="message-kicker">REQUEST</span>
+        {message.text}
+      </div>
+    );
   }
 
   const duration = message.elapsedMs === undefined ? null : formatDuration(message.elapsedMs);

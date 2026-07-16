@@ -29,6 +29,10 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const AUTH_REQUIRED_ERROR: &str = "GROK_AUTH_REQUIRED";
 const DEVICE_AUTH_URL_PREFIX: &str = "https://accounts.x.ai/oauth2/device?user_code=";
 const INSTALL_GUIDE_URL: &str = "https://docs.x.ai/build/overview";
+const SESSION_HISTORY_FILE: &str = "sessions.json";
+const WORKSPACE_HISTORY_FILE: &str = "working-directories.json";
+const DEFAULT_SESSION_TITLE: &str = "New Grok session";
+const MAX_SESSION_TITLE_CHARS: usize = 72;
 static MANAGED_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -38,6 +42,7 @@ struct GrokSession {
     workspace: Option<String>,
     working_directory: String,
     cli_version: String,
+    approval_mode: ApprovalMode,
     models: Option<SessionModelState>,
     prompt_active: Arc<AtomicBool>,
 }
@@ -62,7 +67,7 @@ struct OnboardingStatus {
     message: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectResult {
     session_id: String,
@@ -71,6 +76,75 @@ struct ConnectResult {
     cli_version: String,
     approval_mode: ApprovalMode,
     models: Option<SessionModelState>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadSessionResult {
+    connection: ConnectResult,
+    updates: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedSession {
+    session_id: String,
+    title: String,
+    workspace: Option<String>,
+    working_directory: String,
+    approval_mode: ApprovalMode,
+    created_at: i64,
+    updated_at: i64,
+    #[serde(default)]
+    archived: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSummary {
+    session_id: String,
+    title: String,
+    workspace: Option<String>,
+    updated_at: i64,
+    archived: bool,
+}
+
+impl From<&PersistedSession> for SessionSummary {
+    fn from(session: &PersistedSession) -> Self {
+        Self {
+            session_id: session.session_id.clone(),
+            title: session.title.clone(),
+            workspace: session.workspace.clone(),
+            updated_at: session.updated_at,
+            archived: session.archived,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedWorkspace {
+    path: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSummary {
+    path: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SessionHistoryAction {
+    Archive,
+    Restore,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AgentCapabilities {
+    load_session: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -397,7 +471,7 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
     transport.shutdown().await;
 
     match auth_result {
-        Ok(()) => Ok(OnboardingStatus {
+        Ok(_) => Ok(OnboardingStatus {
             stage: "ready",
             cli_version: Some(cli.version),
             suggested_workspace,
@@ -514,6 +588,95 @@ async fn reveal_working_directory(state: State<'_, GrokRuntime>) -> Result<(), S
 }
 
 #[tauri::command]
+async fn grok_list_sessions(app: AppHandle) -> Result<Vec<SessionSummary>, String> {
+    Ok(read_session_history(&app)
+        .await?
+        .iter()
+        .map(SessionSummary::from)
+        .collect())
+}
+
+#[tauri::command]
+async fn grok_list_workspaces(app: AppHandle) -> Result<Vec<WorkspaceSummary>, String> {
+    let mut workspaces = read_workspace_history(&app).await?;
+    for session in read_session_history(&app).await? {
+        let Some(path) = session.workspace else {
+            continue;
+        };
+        if !workspaces.iter().any(|workspace| workspace.path == path) {
+            workspaces.push(PersistedWorkspace {
+                path,
+                created_at: session.created_at,
+            });
+        }
+    }
+    workspaces.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| WorkspaceSummary {
+            path: workspace.path,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn grok_add_workspace(app: AppHandle, workspace: String) -> Result<WorkspaceSummary, String> {
+    let workspace_path = PathBuf::from(&workspace)
+        .canonicalize()
+        .map_err(|_| "Could not open the selected working directory.".to_string())?;
+    if !workspace_path.is_dir() {
+        return Err("Choose a folder to use as a working directory.".to_string());
+    }
+    let path = workspace_path.to_string_lossy().into_owned();
+    persist_workspace(&app, &path).await?;
+    Ok(WorkspaceSummary { path })
+}
+
+#[tauri::command]
+async fn grok_mutate_sessions(
+    app: AppHandle,
+    state: State<'_, GrokRuntime>,
+    action: SessionHistoryAction,
+    session_id: Option<String>,
+    workspace: Option<String>,
+) -> Result<Vec<SessionSummary>, String> {
+    if session_id.is_some() == workspace.is_some() {
+        return Err("Choose either one session or one working directory.".to_string());
+    }
+
+    let mut sessions = read_session_history(&app).await?;
+    let session_id = session_id.as_deref();
+    let workspace = workspace.as_deref();
+    if !sessions
+        .iter()
+        .any(|session| session_matches_history_target(session, session_id, workspace))
+    {
+        return Err("No matching sessions were found.".to_string());
+    }
+
+    let active = state.session.lock().await.clone();
+    let active_is_affected = active.as_ref().is_some_and(|active| {
+        sessions.iter().any(|session| {
+            session.session_id == active.session_id
+                && session_matches_history_target(session, session_id, workspace)
+        })
+    });
+    if active_is_affected {
+        if active
+            .as_ref()
+            .is_some_and(|active| active.prompt_active.load(Ordering::Acquire))
+        {
+            return Err("Stop the active turn before changing its history.".to_string());
+        }
+        disconnect_runtime(&state).await;
+    }
+
+    apply_session_history_action(&mut sessions, action, session_id, workspace);
+    write_session_history(&app, &sessions).await?;
+    Ok(sessions.iter().map(SessionSummary::from).collect())
+}
+
+#[tauri::command]
 async fn grok_connect(
     app: AppHandle,
     state: State<'_, GrokRuntime>,
@@ -583,9 +746,15 @@ async fn grok_connect(
         workspace: selected_workspace.clone(),
         working_directory: cwd.clone(),
         cli_version: cli.version.clone(),
+        approval_mode,
         models: models.clone(),
         prompt_active: Arc::new(AtomicBool::new(false)),
     };
+
+    if let Err(error) = persist_new_session(&app, &session).await {
+        session.transport.shutdown().await;
+        return Err(error);
+    }
     *state.session.lock().await = Some(session);
 
     let _ = app.emit(
@@ -607,6 +776,101 @@ async fn grok_connect(
 }
 
 #[tauri::command]
+async fn grok_load_session(
+    app: AppHandle,
+    state: State<'_, GrokRuntime>,
+    session_id: String,
+) -> Result<LoadSessionResult, String> {
+    let persisted = read_session_history(&app)
+        .await?
+        .into_iter()
+        .find(|session| session.session_id == session_id)
+        .ok_or_else(|| "That session is no longer in Groky history.".to_string())?;
+    let workspace_path = PathBuf::from(&persisted.working_directory)
+        .canonicalize()
+        .map_err(|_| {
+            "The working directory for that session is no longer available.".to_string()
+        })?;
+    if !workspace_path.is_dir() {
+        return Err("The working directory for that session is no longer available.".to_string());
+    }
+    let cwd = workspace_path.to_string_lossy().into_owned();
+    let cli = resolve_cli().await?;
+
+    disconnect_runtime(&state).await;
+
+    let transport = AcpTransport::spawn(
+        &cli.binary,
+        &workspace_path,
+        persisted.approval_mode,
+        Some(app.clone()),
+    )
+    .await?;
+    let capabilities = match initialize_and_authenticate(&transport).await {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            transport.shutdown().await;
+            return Err(match error {
+                AuthError::NeedsLogin => AUTH_REQUIRED_ERROR.to_string(),
+                AuthError::Transport(message) => message,
+            });
+        }
+    };
+    if !capabilities.load_session {
+        transport.shutdown().await;
+        return Err("This Grok Build version cannot reopen saved sessions.".to_string());
+    }
+
+    let (result, updates) = match transport.load_session(&persisted.session_id, &cwd).await {
+        Ok(result) => result,
+        Err(error) => {
+            transport.shutdown().await;
+            return Err(error);
+        }
+    };
+    let models = match parse_session_models(&result) {
+        Ok(models) => models,
+        Err(error) => {
+            transport.shutdown().await;
+            return Err(error);
+        }
+    };
+
+    let session = GrokSession {
+        transport,
+        session_id: persisted.session_id.clone(),
+        workspace: persisted.workspace.clone(),
+        working_directory: cwd.clone(),
+        cli_version: cli.version.clone(),
+        approval_mode: persisted.approval_mode,
+        models: models.clone(),
+        prompt_active: Arc::new(AtomicBool::new(false)),
+    };
+    touch_persisted_session(&app, &session, None).await?;
+    *state.session.lock().await = Some(session);
+
+    let _ = app.emit(
+        "grok://connection",
+        ConnectionEvent {
+            status: "connected",
+            message: None,
+        },
+    );
+
+    Ok(LoadSessionResult {
+        connection: ConnectResult {
+            session_id: persisted.session_id,
+            workspace: persisted.workspace,
+            working_directory: cwd,
+            cli_version: cli.version,
+            approval_mode: persisted.approval_mode,
+            models,
+        },
+        updates,
+    })
+}
+
+#[tauri::command]
 async fn grok_disconnect(state: State<'_, GrokRuntime>) -> Result<(), String> {
     disconnect_runtime(&state).await;
     Ok(())
@@ -614,6 +878,7 @@ async fn grok_disconnect(state: State<'_, GrokRuntime>) -> Result<(), String> {
 
 #[tauri::command]
 async fn grok_prompt(
+    app: AppHandle,
     state: State<'_, GrokRuntime>,
     prompt: String,
 ) -> Result<PromptResult, String> {
@@ -634,6 +899,11 @@ async fn grok_prompt(
         .is_err()
     {
         return Err("The previous request is still running.".to_string());
+    }
+
+    if let Err(error) = touch_persisted_session(&app, &session, Some(prompt.trim())).await {
+        session.prompt_active.store(false, Ordering::Release);
+        return Err(error);
     }
 
     let result = session
@@ -794,7 +1064,9 @@ enum AuthError {
     Transport(String),
 }
 
-async fn initialize_and_authenticate(transport: &AcpTransport) -> Result<(), AuthError> {
+async fn initialize_and_authenticate(
+    transport: &AcpTransport,
+) -> Result<AgentCapabilities, AuthError> {
     let init = transport
         .request(
             "initialize",
@@ -809,6 +1081,7 @@ async fn initialize_and_authenticate(transport: &AcpTransport) -> Result<(), Aut
         )
         .await
         .map_err(AuthError::Transport)?;
+    let capabilities = agent_capabilities(&init);
 
     let auth_methods = init
         .get("authMethods")
@@ -833,7 +1106,16 @@ async fn initialize_and_authenticate(transport: &AcpTransport) -> Result<(), Aut
         )
         .await
         .map_err(|_| AuthError::NeedsLogin)?;
-    Ok(())
+    Ok(capabilities)
+}
+
+fn agent_capabilities(initialize_result: &Value) -> AgentCapabilities {
+    AgentCapabilities {
+        load_session: initialize_result
+            .pointer("/agentCapabilities/loadSession")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, String> {
@@ -978,6 +1260,257 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn session_history_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join(SESSION_HISTORY_FILE))
+        .map_err(|_| "Could not access Groky application data.".to_string())
+}
+
+fn workspace_history_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|directory| directory.join(WORKSPACE_HISTORY_FILE))
+        .map_err(|_| "Could not access Groky application data.".to_string())
+}
+
+async fn read_session_history(app: &AppHandle) -> Result<Vec<PersistedSession>, String> {
+    let path = session_history_path(app)?;
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("Could not read Groky session history.".to_string()),
+    };
+    let mut sessions = serde_json::from_slice::<Vec<PersistedSession>>(&bytes)
+        .map_err(|_| "Groky session history is damaged and could not be read.".to_string())?;
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(sessions)
+}
+
+async fn write_session_history(
+    app: &AppHandle,
+    sessions: &[PersistedSession],
+) -> Result<(), String> {
+    let path = session_history_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Could not prepare Groky session history.".to_string())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|_| "Could not prepare Groky session history.".to_string())?;
+    let bytes = serde_json::to_vec_pretty(sessions)
+        .map_err(|_| "Could not encode Groky session history.".to_string())?;
+    let temporary_path = path.with_extension("json.tmp");
+    tokio::fs::write(&temporary_path, bytes)
+        .await
+        .map_err(|_| "Could not save Groky session history.".to_string())?;
+
+    #[cfg(target_os = "windows")]
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => return Err("Could not replace Groky session history.".to_string()),
+    }
+
+    tokio::fs::rename(temporary_path, path)
+        .await
+        .map_err(|_| "Could not save Groky session history.".to_string())
+}
+
+async fn read_workspace_history(app: &AppHandle) -> Result<Vec<PersistedWorkspace>, String> {
+    let path = workspace_history_path(app)?;
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("Could not read Groky working directories.".to_string()),
+    };
+    serde_json::from_slice::<Vec<PersistedWorkspace>>(&bytes)
+        .map_err(|_| "Groky working directories are damaged and could not be read.".to_string())
+}
+
+async fn write_workspace_history(
+    app: &AppHandle,
+    workspaces: &[PersistedWorkspace],
+) -> Result<(), String> {
+    let path = workspace_history_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Could not prepare Groky working directories.".to_string())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|_| "Could not prepare Groky working directories.".to_string())?;
+    let bytes = serde_json::to_vec_pretty(workspaces)
+        .map_err(|_| "Could not encode Groky working directories.".to_string())?;
+    let temporary_path = path.with_extension("json.tmp");
+    tokio::fs::write(&temporary_path, bytes)
+        .await
+        .map_err(|_| "Could not save Groky working directories.".to_string())?;
+
+    #[cfg(target_os = "windows")]
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => return Err("Could not replace Groky working directories.".to_string()),
+    }
+
+    tokio::fs::rename(temporary_path, path)
+        .await
+        .map_err(|_| "Could not save Groky working directories.".to_string())
+}
+
+fn upsert_workspace_history(
+    workspaces: &mut Vec<PersistedWorkspace>,
+    workspace: PersistedWorkspace,
+) {
+    if !workspaces
+        .iter()
+        .any(|existing| existing.path == workspace.path)
+    {
+        workspaces.push(workspace);
+        workspaces.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+    }
+}
+
+async fn persist_workspace(app: &AppHandle, path: &str) -> Result<(), String> {
+    let mut workspaces = read_workspace_history(app).await?;
+    upsert_workspace_history(
+        &mut workspaces,
+        PersistedWorkspace {
+            path: path.to_string(),
+            created_at: Local::now().timestamp_millis(),
+        },
+    );
+    write_workspace_history(app, &workspaces).await
+}
+
+fn upsert_session_history(sessions: &mut Vec<PersistedSession>, session: PersistedSession) {
+    if let Some(existing) = sessions
+        .iter_mut()
+        .find(|existing| existing.session_id == session.session_id)
+    {
+        *existing = session;
+    } else {
+        sessions.push(session);
+    }
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+}
+
+fn session_matches_history_target(
+    session: &PersistedSession,
+    session_id: Option<&str>,
+    workspace: Option<&str>,
+) -> bool {
+    session_id.is_some_and(|id| session.session_id == id)
+        || workspace.is_some_and(|path| session.workspace.as_deref() == Some(path))
+}
+
+fn apply_session_history_action(
+    sessions: &mut Vec<PersistedSession>,
+    action: SessionHistoryAction,
+    session_id: Option<&str>,
+    workspace: Option<&str>,
+) {
+    match action {
+        SessionHistoryAction::Archive => sessions
+            .iter_mut()
+            .filter(|session| session_matches_history_target(session, session_id, workspace))
+            .for_each(|session| session.archived = true),
+        SessionHistoryAction::Restore => sessions
+            .iter_mut()
+            .filter(|session| session_matches_history_target(session, session_id, workspace))
+            .for_each(|session| session.archived = false),
+        SessionHistoryAction::Delete => sessions
+            .retain(|session| !session_matches_history_target(session, session_id, workspace)),
+    }
+}
+
+fn title_from_prompt(prompt: &str) -> String {
+    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = normalized.chars();
+    let title = characters
+        .by_ref()
+        .take(MAX_SESSION_TITLE_CHARS)
+        .collect::<String>();
+    if title.is_empty() {
+        DEFAULT_SESSION_TITLE.to_string()
+    } else if characters.next().is_some() {
+        format!(
+            "{}…",
+            title
+                .chars()
+                .take(MAX_SESSION_TITLE_CHARS - 1)
+                .collect::<String>()
+        )
+    } else {
+        title
+    }
+}
+
+async fn persist_new_session(app: &AppHandle, session: &GrokSession) -> Result<(), String> {
+    let now = Local::now().timestamp_millis();
+    let mut sessions = read_session_history(app).await?;
+    upsert_session_history(
+        &mut sessions,
+        PersistedSession {
+            session_id: session.session_id.clone(),
+            title: DEFAULT_SESSION_TITLE.to_string(),
+            workspace: session.workspace.clone(),
+            working_directory: session.working_directory.clone(),
+            approval_mode: session.approval_mode,
+            created_at: now,
+            updated_at: now,
+            archived: false,
+        },
+    );
+    write_session_history(app, &sessions).await?;
+    if let Some(workspace) = session.workspace.as_deref() {
+        persist_workspace(app, workspace).await?;
+    }
+    Ok(())
+}
+
+async fn touch_persisted_session(
+    app: &AppHandle,
+    session: &GrokSession,
+    first_prompt: Option<&str>,
+) -> Result<(), String> {
+    let now = Local::now().timestamp_millis();
+    let mut sessions = read_session_history(app).await?;
+    let existing = sessions
+        .iter()
+        .find(|persisted| persisted.session_id == session.session_id);
+    let title = match (
+        existing.map(|persisted| persisted.title.as_str()),
+        first_prompt,
+    ) {
+        (Some(DEFAULT_SESSION_TITLE), Some(prompt)) | (None, Some(prompt)) => {
+            title_from_prompt(prompt)
+        }
+        (Some(title), _) => title.to_string(),
+        (None, None) => DEFAULT_SESSION_TITLE.to_string(),
+    };
+    let created_at = existing
+        .map(|persisted| persisted.created_at)
+        .unwrap_or(now);
+    let archived = existing
+        .map(|persisted| persisted.archived)
+        .unwrap_or(false);
+    upsert_session_history(
+        &mut sessions,
+        PersistedSession {
+            session_id: session.session_id.clone(),
+            title,
+            workspace: session.workspace.clone(),
+            working_directory: session.working_directory.clone(),
+            approval_mode: session.approval_mode,
+            created_at,
+            updated_at: now,
+            archived,
+        },
+    );
+    write_session_history(app, &sessions).await
+}
+
 async fn create_managed_workspace(app: &AppHandle) -> Result<PathBuf, String> {
     let now = Local::now();
     let parent = app
@@ -1083,7 +1616,12 @@ pub fn run() {
             choose_workspace,
             open_grok_install_guide,
             reveal_working_directory,
+            grok_list_sessions,
+            grok_list_workspaces,
+            grok_add_workspace,
+            grok_mutate_sessions,
             grok_connect,
+            grok_load_session,
             grok_disconnect,
             grok_prompt,
             grok_cancel,
@@ -1098,8 +1636,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_device_auth_code, managed_workspace_name, parse_session_models,
-        reasoning_effort_value,
+        agent_capabilities, apply_session_history_action, extract_device_auth_code,
+        managed_workspace_name, parse_session_models, reasoning_effort_value, title_from_prompt,
+        upsert_session_history, upsert_workspace_history, ApprovalMode, PersistedSession,
+        PersistedWorkspace, SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
     };
     use chrono::{Local, TimeZone};
     use serde_json::json;
@@ -1135,6 +1675,140 @@ mod tests {
 
         assert!(name.starts_with("session-090807-"));
         assert!(name.ends_with("-002a"));
+    }
+
+    #[test]
+    fn creates_a_compact_title_from_the_first_prompt() {
+        assert_eq!(
+            title_from_prompt("  Review\n\nthis   change  "),
+            "Review this change"
+        );
+        let title = title_from_prompt(&"a".repeat(MAX_SESSION_TITLE_CHARS + 4));
+        assert_eq!(title.chars().count(), MAX_SESSION_TITLE_CHARS);
+        assert!(title.ends_with('…'));
+        assert_eq!(title_from_prompt(" \n "), DEFAULT_SESSION_TITLE);
+    }
+
+    #[test]
+    fn session_history_replaces_duplicates_and_sorts_by_recent_activity() {
+        let session = |session_id: &str, title: &str, updated_at: i64| PersistedSession {
+            session_id: session_id.to_string(),
+            title: title.to_string(),
+            workspace: Some("/workspace".to_string()),
+            working_directory: "/workspace".to_string(),
+            approval_mode: ApprovalMode::Ask,
+            created_at: 1,
+            updated_at,
+            archived: false,
+        };
+        let mut sessions = vec![session("older", "Older", 10)];
+        upsert_session_history(&mut sessions, session("newer", "Newer", 20));
+        upsert_session_history(&mut sessions, session("older", "Updated", 30));
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "older");
+        assert_eq!(sessions[0].title, "Updated");
+        assert_eq!(sessions[1].session_id, "newer");
+    }
+
+    #[test]
+    fn legacy_session_history_defaults_to_active() {
+        let session: PersistedSession = serde_json::from_value(json!({
+            "sessionId": "legacy",
+            "title": "Legacy session",
+            "workspace": "/workspace",
+            "workingDirectory": "/workspace",
+            "approvalMode": "ask",
+            "createdAt": 10,
+            "updatedAt": 20
+        }))
+        .expect("legacy session history should remain readable");
+
+        assert!(!session.archived);
+    }
+
+    #[test]
+    fn session_history_actions_support_one_session_or_a_working_directory() {
+        let session = |session_id: &str, workspace: Option<&str>| PersistedSession {
+            session_id: session_id.to_string(),
+            title: session_id.to_string(),
+            workspace: workspace.map(str::to_string),
+            working_directory: workspace.unwrap_or("/standalone").to_string(),
+            approval_mode: ApprovalMode::Ask,
+            created_at: 1,
+            updated_at: 1,
+            archived: false,
+        };
+        let mut sessions = vec![
+            session("first", Some("/workspace")),
+            session("second", Some("/workspace")),
+            session("standalone", None),
+        ];
+
+        apply_session_history_action(
+            &mut sessions,
+            SessionHistoryAction::Archive,
+            None,
+            Some("/workspace"),
+        );
+        assert!(sessions[0].archived);
+        assert!(sessions[1].archived);
+        assert!(!sessions[2].archived);
+
+        apply_session_history_action(
+            &mut sessions,
+            SessionHistoryAction::Restore,
+            Some("first"),
+            None,
+        );
+        assert!(!sessions[0].archived);
+        assert!(sessions[1].archived);
+
+        apply_session_history_action(
+            &mut sessions,
+            SessionHistoryAction::Delete,
+            None,
+            Some("/workspace"),
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "standalone");
+    }
+
+    #[test]
+    fn working_directory_history_keeps_unique_paths_in_added_order() {
+        let mut workspaces = vec![PersistedWorkspace {
+            path: "/workspace/first".to_string(),
+            created_at: 10,
+        }];
+        upsert_workspace_history(
+            &mut workspaces,
+            PersistedWorkspace {
+                path: "/workspace/second".to_string(),
+                created_at: 20,
+            },
+        );
+        upsert_workspace_history(
+            &mut workspaces,
+            PersistedWorkspace {
+                path: "/workspace/first".to_string(),
+                created_at: 30,
+            },
+        );
+
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0].path, "/workspace/first");
+        assert_eq!(workspaces[1].path, "/workspace/second");
+    }
+
+    #[test]
+    fn reads_session_loading_support_from_agent_capabilities() {
+        assert!(
+            agent_capabilities(&json!({
+                "agentCapabilities": { "loadSession": true }
+            }))
+            .load_session
+        );
+        assert!(!agent_capabilities(&json!({ "agentCapabilities": {} })).load_session);
     }
 
     #[test]
