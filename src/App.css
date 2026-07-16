@@ -308,6 +308,13 @@ body.is-resizing-sidebar .app-shell {
   font-size: 12px;
 }
 
+.project-section-header > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .project-section-actions {
   display: flex;
   align-items: center;

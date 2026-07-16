@@ -268,7 +268,7 @@ async fn install_app_update(
 
     let result = async {
         if grok_prompt_active(&grok).await {
-            return Err("Stop the running task before updating.".to_string());
+            return Err("Stop the active turn before updating.".to_string());
         }
 
         let update = state
@@ -318,7 +318,7 @@ async fn install_app_update(
             .map_err(|error| format!("Failed to download the update: {error}"))?;
 
         if grok_prompt_active(&grok).await {
-            return Err("Stop the running task before updating.".to_string());
+            return Err("Stop the active turn before updating.".to_string());
         }
 
         let package_size = bytes.len() as u64;
@@ -488,7 +488,7 @@ async fn grok_logout(state: State<'_, GrokRuntime>) -> Result<(), String> {
 async fn choose_workspace() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new()
-            .set_title("Choose an existing folder for this project")
+            .set_title("Choose a working directory for this session")
             .pick_folder()
             .map(|path| path.to_string_lossy().into_owned())
     })
@@ -509,7 +509,7 @@ async fn reveal_working_directory(state: State<'_, GrokRuntime>) -> Result<(), S
         .await
         .as_ref()
         .map(|session| session.working_directory.clone())
-        .ok_or_else(|| "Start a task first.".to_string())?;
+        .ok_or_else(|| "Start a session first.".to_string())?;
     open_directory(Path::new(&working_directory))
 }
 
@@ -524,9 +524,9 @@ async fn grok_connect(
     let (workspace_path, selected_workspace) = if let Some(workspace) = workspace {
         let workspace_path = PathBuf::from(&workspace)
             .canonicalize()
-            .map_err(|_| "Could not open the selected workspace.".to_string())?;
+            .map_err(|_| "Could not open the selected working directory.".to_string())?;
         if !workspace_path.is_dir() {
-            return Err("Select a folder for the workspace.".to_string());
+            return Err("Choose a folder to use as the working directory.".to_string());
         }
         let selected_workspace = workspace_path.to_string_lossy().into_owned();
         (workspace_path, Some(selected_workspace))
@@ -1007,7 +1007,7 @@ async fn create_managed_workspace(app: &AppHandle) -> Result<PathBuf, String> {
 fn managed_workspace_name(now: &DateTime<Local>, sequence: u64) -> String {
     let millis = now.timestamp_subsec_millis();
     format!(
-        "task-{}-{millis:03}-{sequence:04x}",
+        "session-{}-{millis:03}-{sequence:04x}",
         now.format("%H%M%S"),
         sequence = sequence & 0xffff
     )
@@ -1126,14 +1126,14 @@ mod tests {
     }
 
     #[test]
-    fn creates_a_private_task_directory_name_without_prompt_text() {
+    fn creates_a_private_session_directory_name_without_prompt_text() {
         let now = Local
             .with_ymd_and_hms(2026, 7, 17, 9, 8, 7)
             .single()
             .expect("valid local date");
         let name = managed_workspace_name(&now, 0x2a);
 
-        assert!(name.starts_with("task-090807-"));
+        assert!(name.starts_with("session-090807-"));
         assert!(name.ends_with("-002a"));
     }
 

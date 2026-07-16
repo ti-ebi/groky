@@ -371,7 +371,7 @@ function Brand() {
 }
 
 function workspaceName(path: string | null) {
-  if (!path) return "No workspace";
+  if (!path) return "No working directory";
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts[parts.length - 1] ?? path;
 }
@@ -671,7 +671,7 @@ function AppUpdateNotice({
         disabled={taskRunning || installing}
         onClick={onInstall}
       >
-        {installing ? "Updating…" : taskRunning ? "Finish task first" : "Update & restart"}
+        {installing ? "Updating…" : taskRunning ? "Finish current turn first" : "Update & restart"}
       </button>
       {!installing && (
         <button className="icon-button update-dismiss" type="button" aria-label="Dismiss update" onClick={onDismiss}>
@@ -727,7 +727,7 @@ function ApprovalModeSelector({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`Approval mode: ${selected.label}`}
-        title={locked ? "Start a new task to choose another approval mode" : undefined}
+        title={locked ? "Start a new session to choose another approval mode" : undefined}
         disabled={busy}
         onClick={() => setOpen((current) => !current)}
       >
@@ -772,8 +772,8 @@ function ApprovalModeSelector({
             })}
           </div>
           <div className={`approval-menu-note ${locked ? "locked" : ""}`}>
-            <span>{locked ? "Mode set for this task" : selected.shortDescription}</span>
-            <small>{locked ? "Approval requests may still offer additional choices." : "The approval mode is applied when this task starts."}</small>
+            <span>{locked ? "Mode set for this session" : selected.shortDescription}</span>
+            <small>{locked ? "Approval requests may still offer additional choices." : "The approval mode is applied when this session starts."}</small>
           </div>
         </div>
       )}
@@ -1031,7 +1031,7 @@ function App() {
   const firstRequest = messages.find((message) => message.role === "user")?.text.trim();
   const currentSidebarSession: SidebarSessionSummary | null = connection ? {
     sessionId: connection.sessionId,
-    title: firstRequest || "New Grok task",
+    title: firstRequest || "New Grok session",
     workspace: connection.workspace,
     running,
   } : null;
@@ -1713,17 +1713,17 @@ function App() {
 
         <nav className="primary-nav" aria-label="Primary">
           <button type="button" onClick={() => void startNewTask()} disabled={running || appUpdating || stage === "connecting"}>
-            <Icon name="compose" /><span>New task</span>
+            <Icon name="compose" /><span>New session</span>
           </button>
         </nav>
 
         <div className="project-scroll">
           <div className="project-section-header" ref={projectMenu}>
-            <span>Projects</span>
+            <span>Working directories</span>
             <div className="project-section-actions">
               <button
                 type="button"
-                aria-label={allWorkspaceGroupsCollapsed ? "Expand all projects" : "Collapse all projects"}
+                aria-label={allWorkspaceGroupsCollapsed ? "Expand all working directories" : "Collapse all working directories"}
                 disabled={workspaceGroups.length === 0}
                 onClick={toggleAllWorkspaceGroups}
               >
@@ -1731,7 +1731,7 @@ function App() {
               </button>
               <button
                 type="button"
-                aria-label="New task location"
+                aria-label="New session location"
                 aria-haspopup="menu"
                 aria-expanded={projectMenuOpen}
                 disabled={running || appUpdating || stage === "connecting"}
@@ -1741,10 +1741,10 @@ function App() {
               </button>
             </div>
             {projectMenuOpen && (
-              <div className="project-create-menu" role="menu" aria-label="Choose where to start the task">
+              <div className="project-create-menu" role="menu" aria-label="Choose where to start the session">
                 <button type="button" role="menuitem" onClick={() => void startNewTask(null)}>
                   <Icon name="plus" size={15} />
-                  <span>Start from scratch</span>
+                  <span>Start standalone session</span>
                 </button>
                 <button type="button" role="menuitem" onClick={() => void chooseAndConnect()}>
                   <Icon name="folder" size={15} />
@@ -1783,8 +1783,8 @@ function App() {
           })}
           {groupedSidebarSessions.ungrouped.length > 0 && (
             <section className="unassigned-tasks">
-              <p className="section-label">Tasks</p>
-              <div className="task-list ungrouped-task-list" aria-label="Tasks without a project">
+              <p className="section-label">Sessions</p>
+              <div className="task-list ungrouped-task-list" aria-label="Standalone sessions">
                 {groupedSidebarSessions.ungrouped.map((session) => (
                   <button className="selected" type="button" aria-current="page" key={session.sessionId}>
                     <span>{session.title}</span>
@@ -1811,7 +1811,7 @@ function App() {
               <div><dt>Account</dt><dd>Signed in</dd></div>
               {connection && <div><dt>Approvals</dt><dd>{approvalModeOption(connection.approvalMode).label}</dd></div>}
               {connection && <div><dt>Model</dt><dd>{currentModel(connection.models)?.name ?? "Grok Build default"}</dd></div>}
-              {connection && <div><dt>{connection.workspace ? "Workspace" : "Groky workspace"}</dt><dd title={connection.workingDirectory}>{connection.workingDirectory}</dd></div>}
+              {connection && <div><dt>{connection.workspace ? "Working directory" : "Session directory"}</dt><dd title={connection.workingDirectory}>{connection.workingDirectory}</dd></div>}
               {connection && <div><dt>Transport</dt><dd>ACP stdio</dd></div>}
             </dl>
             <div className="popover-update">
@@ -1856,7 +1856,7 @@ function App() {
               <button className="icon-button sidebar-restore" type="button" aria-label="Show sidebar" title={`Show sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
             )}
             <div className="task-title workspace-context" title={workspace ?? undefined}>
-              <Icon name={workspace ? "folder" : "compose"} /><strong>{workspace ? projectName : "No project"}</strong>
+              <Icon name={workspace ? "folder" : "compose"} /><strong>{workspace ? projectName : "Standalone session"}</strong>
             </div>
           </div>
           <div className="task-actions">
@@ -1878,7 +1878,7 @@ function App() {
           id="task-conversation"
           ref={conversation}
           className={`conversation ${messages.length === 0 ? "empty" : ""}`}
-          aria-label="Task conversation"
+          aria-label="Session conversation"
           onScroll={handleConversationScroll}
         >
           <div className="conversation-inner">
@@ -1887,9 +1887,9 @@ function App() {
                 <span className="empty-orbit"><i /><i /></span>
                 <p className="message-kicker">GROK BUILD / READY</p>
                 <h1>What should we<br />make happen?</h1>
-                <p>{workspace ? "Ask about the codebase, request a change, or start with a review." : "Start without a project, or choose an existing folder when you want Grok to work with a codebase."}</p>
+                <p>{workspace ? "Ask about the codebase, request a change, or start with a review." : "Start a standalone session, or choose an existing folder when you want Grok to work with a codebase."}</p>
                 <div className="suggestion-row">
-                  {["Explain this codebase", "Find the next useful task", "Review the current changes"].map((suggestion) => (
+                  {["Explain this codebase", "Suggest the next improvement", "Review the current changes"].map((suggestion) => (
                     <button key={suggestion} type="button" onClick={() => setDraft(suggestion)}>{suggestion}</button>
                   ))}
                 </div>
@@ -1921,7 +1921,7 @@ function App() {
           <div className="prompt-row">
             <span className="prompt-symbol" aria-hidden="true">❯</span>
             <textarea
-              aria-label="Task prompt"
+              aria-label="Session prompt"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={handleComposerKeyDown}
@@ -1937,7 +1937,7 @@ function App() {
               locked={messages.length > 0}
               onChange={(nextMode) => void changeApprovalMode(nextMode)}
             />
-            <span className="local-chip"><span className="live-dot" />{workspace ? "project" : connection ? "no project" : "on send"}</span>
+            <span className="local-chip"><span className="live-dot" />{workspace ? "cwd" : connection ? "standalone" : "on send"}</span>
             <span className="toolbar-spacer" />
             <ModelSelector
               connected={connection !== null}
