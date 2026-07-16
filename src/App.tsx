@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -16,6 +17,7 @@ import "./App.css";
 type IconName =
   | "arrow-left"
   | "arrow-right"
+  | "arrow-down"
   | "arrow-up"
   | "bolt"
   | "branch"
@@ -152,6 +154,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
     "arrow-left": <><path d="m15 18-6-6 6-6" /><path d="M9 12h10" /></>,
     "arrow-right": <><path d="m9 18 6-6-6-6" /><path d="M5 12h10" /></>,
+    "arrow-down": <><path d="m6 9 6 6 6-6" /><path d="M12 5v10" /></>,
     "arrow-up": <><path d="m18 15-6-6-6 6" /><path d="M12 9v10" /></>,
     bolt: <path d="m13 2-8 12h7l-1 8 8-12h-7l1-8Z" />,
     branch: <><circle cx="6" cy="5" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="6" cy="19" r="2" /><path d="M6 7v10M8 7c3 0 3-1 3-1h5M11 6v7c0 3-3 3-3 3" /></>,
@@ -500,8 +503,10 @@ function App() {
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateCheckNotice, setUpdateCheckNotice] = useState<string | null>(null);
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const activeAssistantId = useRef<string | null>(null);
-  const conversationEnd = useRef<HTMLDivElement | null>(null);
+  const autoScrollEnabled = useRef(true);
+  const conversation = useRef<HTMLElement | null>(null);
   const updateCheckInFlight = useRef(false);
 
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
@@ -635,9 +640,43 @@ function App() {
     };
   }, [connection]);
 
-  useEffect(() => {
-    conversationEnd.current?.scrollIntoView({ behavior: running ? "smooth" : "auto", block: "end" });
-  }, [messages, permission, running]);
+  useLayoutEffect(() => {
+    const container = conversation.current;
+    if (!container) return;
+
+    if (messages.length === 0) {
+      autoScrollEnabled.current = true;
+      setShowScrollToLatest(false);
+      return;
+    }
+
+    if (autoScrollEnabled.current) {
+      container.scrollTop = container.scrollHeight;
+      setShowScrollToLatest(false);
+      return;
+    }
+
+    const hasContentBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 2;
+    setShowScrollToLatest(hasContentBelow);
+  }, [messages, permission]);
+
+  function handleConversationScroll() {
+    const container = conversation.current;
+    if (!container) return;
+
+    const hasContentBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 2;
+    autoScrollEnabled.current = !hasContentBelow;
+    setShowScrollToLatest(hasContentBelow);
+  }
+
+  function scrollToLatest() {
+    const container = conversation.current;
+    if (!container) return;
+
+    autoScrollEnabled.current = true;
+    container.scrollTop = container.scrollHeight;
+    setShowScrollToLatest(false);
+  }
 
   async function openInstallGuide() {
     try {
@@ -1004,7 +1043,13 @@ function App() {
           </div>
         )}
 
-        <section className={`conversation ${messages.length === 0 ? "empty" : ""}`} aria-label="Task conversation">
+        <section
+          id="task-conversation"
+          ref={conversation}
+          className={`conversation ${messages.length === 0 ? "empty" : ""}`}
+          aria-label="Task conversation"
+          onScroll={handleConversationScroll}
+        >
           <div className="conversation-inner">
             {messages.length === 0 ? (
               <div className="empty-conversation">
@@ -1025,9 +1070,21 @@ function App() {
             {permission && (
               <PermissionCard permission={permission} onRespond={(optionId) => void respondToPermission(optionId)} />
             )}
-            <div ref={conversationEnd} />
           </div>
         </section>
+
+        {showScrollToLatest && (
+          <button
+            className="scroll-to-latest"
+            type="button"
+            aria-label="Scroll to latest message"
+            aria-controls="task-conversation"
+            onClick={scrollToLatest}
+          >
+            <Icon name="arrow-down" size={14} />
+            <span>Latest</span>
+          </button>
+        )}
 
         <form className={`composer ${running ? "is-running" : ""}`} onSubmit={submitTask}>
           <div className="prompt-row">
