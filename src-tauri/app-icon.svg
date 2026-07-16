@@ -1,23 +1,40 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <circle cx="256" cy="256" r="216" fill="#101312" stroke="#8fe3c1" stroke-width="18" />
+  <defs>
+    <linearGradient id="tile" x1="74" y1="56" x2="438" y2="464" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" />
+      <stop offset="1" stop-color="#e9efed" />
+    </linearGradient>
+    <radialGradient id="space" cx="34%" cy="18%" r="82%">
+      <stop offset="0" stop-color="#24483d" />
+      <stop offset="0.5" stop-color="#121a17" />
+      <stop offset="1" stop-color="#090b0a" />
+    </radialGradient>
+  </defs>
+  <path
+    d="M144 36H368C429 36 476 83 476 144V368C476 429 429 476 368 476H144C83 476 36 429 36 368V144C36 83 83 36 144 36Z"
+    fill="url(#tile)"
+    stroke="#d4dedb"
+    stroke-width="4"
+  />
+  <circle cx="256" cy="256" r="164" fill="url(#space)" stroke="#8fe3c1" stroke-width="8" />
   <ellipse
     cx="256"
     cy="256"
-    rx="150"
-    ry="78"
+    rx="112"
+    ry="58"
     fill="none"
     stroke="#eff5f2"
-    stroke-width="34"
+    stroke-width="24"
     transform="rotate(32 256 256)"
   />
   <ellipse
     cx="256"
     cy="256"
-    rx="150"
-    ry="78"
+    rx="112"
+    ry="58"
     fill="none"
     stroke="#eff5f2"
-    stroke-width="34"
+    stroke-width="24"
     transform="rotate(-32 256 256)"
   />
 </svg>
