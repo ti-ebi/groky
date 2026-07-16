@@ -1421,7 +1421,7 @@ function Onboarding({
   onLogin: () => void;
 }) {
   const overlayTitlebar = usesOverlayTitlebar();
-  const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "" } : {};
+  const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "deep" } : {};
   const cliReady = !["checking", "missingCli", "webOnly"].includes(stage);
   const authReady = ["ready", "connecting", "connected"].includes(stage);
   const currentStep = stage === "checking" ? "00" : stage === "missingCli" ? "01" : "02";
@@ -1697,7 +1697,7 @@ function SettingsSidebar({
 }) {
   return (
     <aside className="sidebar settings-sidebar">
-      <div className="window-nav settings-window-nav" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
+      <div className="window-nav settings-window-nav" {...(overlayTitlebar ? { "data-tauri-drag-region": "deep" } : {})}>
         <button className="settings-return" type="button" onClick={onBack}>
           <Icon name="arrow-right" size={15} />
           <span>Back to Groky</span>
@@ -1813,7 +1813,7 @@ function SettingsScreen({
 
   return (
     <div className="settings-page">
-      <header className="taskbar settings-taskbar" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
+      <header className="taskbar settings-taskbar" {...(overlayTitlebar ? { "data-tauri-drag-region": "deep" } : {})}>
         <div className="taskbar-leading">
           <div className="task-title"><Icon name="sliders" /><strong>{activeSection.label}</strong></div>
         </div>
@@ -2328,7 +2328,7 @@ function ModelSelector({
 
 function App() {
   const overlayTitlebar = usesOverlayTitlebar();
-  const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "" } : {};
+  const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "deep" } : {};
   const sidebarShortcutLabel = isMacOS() ? "⌘B" : "Ctrl+B";
   const searchShortcutLabel = isMacOS() ? "⌘K" : "Ctrl+K";
   const [stage, setStage] = useState<OnboardingStage>("checking");
