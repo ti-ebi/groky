@@ -4150,11 +4150,6 @@ function App() {
             <dl>
               <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
               <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
-              <div><dt>Account</dt><dd>Signed in</dd></div>
-              {connection && <div><dt>Approvals</dt><dd>{approvalModeOption(connection.approvalMode).label}</dd></div>}
-              {connection && <div><dt>Model</dt><dd>{currentModel(connection.models)?.name ?? "Grok Build default"}</dd></div>}
-              {connection && <div><dt>{connection.workspace ? "Working directory" : "Session directory"}</dt><dd title={connection.workingDirectory}>{connection.workingDirectory}</dd></div>}
-              {connection && <div><dt>Transport</dt><dd>ACP stdio</dd></div>}
             </dl>
             <button
               className="popover-settings-link"
