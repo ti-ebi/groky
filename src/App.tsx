@@ -1106,7 +1106,7 @@ function applySessionUpdateToMessage(
 
 interface SessionReplayProjection {
   messages: ConversationMessage[];
-  availableCommands: AvailableCommand[];
+  availableCommands: AvailableCommand[] | null;
   currentModeId: string | null;
   configOptions: SessionConfigOption[];
   usage: SessionUsage | null;
@@ -1118,7 +1118,7 @@ interface SessionReplayProjection {
 
 function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): SessionReplayProjection {
   const messages: ConversationMessage[] = [];
-  let availableCommands: AvailableCommand[] = [];
+  let availableCommands: AvailableCommand[] | null = null;
   let currentModeId: string | null = null;
   let configOptions: SessionConfigOption[] = [];
   let usage: SessionUsage | null = null;
@@ -2031,12 +2031,12 @@ function SettingsScreen({
 function ApprovalModeSelector({
   mode,
   busy,
-  locked,
+  changing,
   onChange,
 }: {
   mode: ApprovalMode;
   busy: boolean;
-  locked: boolean;
+  changing: boolean;
   onChange: (mode: ApprovalMode) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -2062,19 +2062,19 @@ function ApprovalModeSelector({
   }, [open]);
 
   useEffect(() => {
-    if (busy) setOpen(false);
-  }, [busy]);
+    if (busy || changing) setOpen(false);
+  }, [busy, changing]);
 
   return (
-    <div className={`approval-control mode-${mode}`} ref={root}>
+    <div className={`approval-control mode-${mode} ${changing ? "is-changing" : ""}`} ref={root}>
       <button
         className="approval-button"
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={`Approval mode: ${selected.label}`}
-        title={locked ? "Start a new session to choose another approval mode" : undefined}
-        disabled={busy}
+        aria-label={`Approval mode: ${selected.label}${changing ? ", updating" : ""}`}
+        aria-busy={changing}
+        disabled={busy || changing}
         onClick={() => setOpen((current) => !current)}
       >
         <span className="shield-mark" aria-hidden="true">{selected.glyph}</span>
@@ -2097,7 +2097,7 @@ function ApprovalModeSelector({
                   type="button"
                   role="option"
                   aria-selected={isSelected}
-                  disabled={locked || busy}
+                  disabled={busy || changing}
                   key={option.id}
                   onClick={() => {
                     setOpen(false);
@@ -2117,9 +2117,9 @@ function ApprovalModeSelector({
               );
             })}
           </div>
-          <div className={`approval-menu-note ${locked ? "locked" : ""}`}>
-            <span>{locked ? "Mode set for this session" : selected.shortDescription}</span>
-            <small>{locked ? "Approval requests may still offer additional choices." : "The approval mode is applied when this session starts."}</small>
+          <div className="approval-menu-note">
+            <span>{selected.shortDescription}</span>
+            <small>Changes apply before the next request in this session.</small>
           </div>
         </div>
       )}
@@ -2131,20 +2131,17 @@ function ModelSelector({
   connected,
   models,
   busy,
-  onLoad,
   onChange,
   onReasoningChange,
 }: {
   connected: boolean;
   models: SessionModelState | null;
   busy: boolean;
-  onLoad: () => Promise<boolean>;
   onChange: (modelId: string) => Promise<SessionModelState | null>;
   onReasoningChange: (reasoningEffort: string) => Promise<SessionModelState | null>;
 }) {
   const [open, setOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<"model" | "reasoning" | null>(null);
-  const [loading, setLoading] = useState(false);
   const [changingModelId, setChangingModelId] = useState<string | null>(null);
   const [changingReasoningEffort, setChangingReasoningEffort] = useState<string | null>(null);
   const root = useRef<HTMLDivElement | null>(null);
@@ -2181,16 +2178,10 @@ function ModelSelector({
     if (busy) setOpen(false);
   }, [busy]);
 
-  async function toggleMenu() {
+  function toggleMenu() {
     if (open) {
       setOpen(false);
       return;
-    }
-    if (!connected && !models) {
-      setLoading(true);
-      const loaded = await onLoad();
-      setLoading(false);
-      if (!loaded) return;
     }
     setActiveSection(null);
     setOpen(true);
@@ -2226,10 +2217,10 @@ function ModelSelector({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Model: ${selected?.name ?? "Grok Build default"}${reasoningLabel ? `, reasoning: ${reasoningLabel}` : ""}`}
-        disabled={busy || loading || changing}
-        onClick={() => void toggleMenu()}
+        disabled={busy || changing}
+        onClick={toggleMenu}
       >
-        <span>{loading ? "Starting Grok Build…" : selected?.name ?? "Grok Build"}</span>
+        <span>{selected?.name ?? "Grok Build"}</span>
         <span className="reasoning">· {reasoningLabel ?? (connected ? "ACP" : "default")}</span>
         <Icon name="chevron-down" size={12} />
       </button>
@@ -2345,6 +2336,7 @@ function App() {
   const [sessionViews, setSessionViews] = useState<Record<string, SessionViewState>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(() => new Set());
+  const [approvalModeChangingIds, setApprovalModeChangingIds] = useState<Set<string>>(() => new Set());
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [deviceAuthCode, setDeviceAuthCode] = useState<string | null>(null);
@@ -2352,6 +2344,7 @@ function App() {
   const [sessionHistory, setSessionHistory] = useState<PersistedSessionSummary[]>([]);
   const [workspaceHistory, setWorkspaceHistory] = useState<PersistedWorkspaceSummary[]>([]);
   const [pendingModels, setPendingModels] = useState<SessionModelState | null>(null);
+  const [commandCatalogs, setCommandCatalogs] = useState<Record<string, AvailableCommand[]>>({});
   const [pendingDraft, setPendingDraft] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<FileAttachment[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
@@ -2392,6 +2385,7 @@ function App() {
   const composer = useRef<HTMLFormElement | null>(null);
   const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
   const commandSuggestionsList = useRef<HTMLDivElement | null>(null);
+  const commandCatalogRequests = useRef<Set<string>>(new Set());
   const updateCheckInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
@@ -2405,14 +2399,21 @@ function App() {
   const permission = activeSession?.permissions[0] ?? null;
   const plan = activeSession?.plan ?? [];
   const activeSessionLoading = activeSessionId !== null && loadingSessionIds.has(activeSessionId);
+  const activeApprovalModeChanging = activeSessionId !== null
+    && approvalModeChangingIds.has(activeSessionId);
   const anySessionRunning = Object.values(sessionViews).some((session) => session.running);
   const sessionTransitioning = activeSessionLoading || stage === "connecting";
+  const commandCatalogKey = workspace ?? "__standalone__";
+  const availableCommandsForComposer = activeSession?.availableCommands
+    ?? commandCatalogs[commandCatalogKey]
+    ?? Object.values(sessionViews).find((session) => session.connection.workspace === workspace)?.availableCommands
+    ?? [];
   const commandSuggestions = useMemo(() => {
     if (!commandSuggestionsOpen) return [];
     const match = draft.match(/^\/([^\s]*)$/);
     if (!match) return [];
     const query = match[1].toLocaleLowerCase();
-    return (activeSession?.availableCommands ?? [])
+    return availableCommandsForComposer
       .filter((command) => command.name.toLocaleLowerCase().includes(query))
       .sort((left, right) => {
         if (!query) return 0;
@@ -2421,7 +2422,7 @@ function App() {
         return Number(rightStartsWith) - Number(leftStartsWith);
       })
       .slice(0, 8);
-  }, [activeSession?.availableCommands, commandSuggestionsOpen, draft]);
+  }, [availableCommandsForComposer, commandSuggestionsOpen, draft]);
 
   useEffect(() => {
     setActiveCommandSuggestion(0);
@@ -2526,7 +2527,6 @@ function App() {
     nextConnection: Connection,
     nextMessages?: ConversationMessage[],
     replay?: SessionReplayProjection,
-    initialComposer?: { draft: string; attachments: FileAttachment[] },
   ) {
     if (nextConnection.models) setPendingModels(nextConnection.models);
     const current = sessionViewsRef.current;
@@ -2537,8 +2537,8 @@ function App() {
         connection: nextConnection,
         disconnected: false,
         messages: nextMessages ?? existing?.messages ?? [],
-        draft: existing?.draft ?? initialComposer?.draft ?? "",
-        attachments: existing?.attachments ?? initialComposer?.attachments ?? [],
+        draft: existing?.draft ?? "",
+        attachments: existing?.attachments ?? [],
         running: existing?.running ?? false,
         permissions: replay ? replay.permissions : existing?.permissions ?? [],
         availableCommands: replay?.availableCommands
@@ -2561,7 +2561,10 @@ function App() {
     setActiveSessionId(null);
     setSessionViews({});
     setLoadingSessionIds(new Set());
+    setApprovalModeChangingIds(new Set());
     setPendingModels(null);
+    setCommandCatalogs({});
+    commandCatalogRequests.current.clear();
     setPendingAttachments([]);
   }
 
@@ -3281,12 +3284,7 @@ function App() {
     }
   }
 
-  async function connect(
-    targetWorkspace: string | null = workspace,
-    clearConversation = false,
-    targetApprovalMode: ApprovalMode = approvalMode,
-    initialComposer?: { draft: string; attachments: FileAttachment[] },
-  ) {
+  async function createSessionForSubmission() {
     setSetupError(null);
     setConnectionNotice(null);
     connectionTransitioning.current = true;
@@ -3294,12 +3292,12 @@ function App() {
     try {
       const requestedModel = currentModel(pendingModels);
       const next = await invoke<Connection>("grok_connect", {
-        workspace: targetWorkspace,
-        approvalMode: targetApprovalMode,
+        workspace,
+        approvalMode,
         modelId: pendingModels?.currentModelId,
         reasoningEffort: requestedModel?.metadata?.reasoningEffort,
       });
-      upsertSessionView(next, clearConversation ? [] : undefined, undefined, initialComposer);
+      upsertSessionView(next);
       activateSession(next.sessionId);
       setWorkspace(next.workspace);
       setApprovalMode(next.approvalMode);
@@ -3622,22 +3620,64 @@ function App() {
   }
 
   async function changeApprovalMode(nextMode: ApprovalMode) {
-    if (nextMode === approvalMode || running || appUpdating || stage === "connecting" || messages.length > 0) return;
-    setApprovalMode(nextMode);
-    if (connection) await connect(workspace, false, nextMode);
+    if (
+      nextMode === approvalMode
+      || activeApprovalModeChanging
+      || running
+      || appUpdating
+      || stage === "connecting"
+    ) return;
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) {
+      setApprovalMode(nextMode);
+      return;
+    }
+
+    const activeConnection = connection ?? await reconnectActiveSession();
+    if (!activeConnection || activeConnection.sessionId !== sessionId) return;
+
+    const previousMode = activeConnection.approvalMode;
+    connectionTransitioning.current = true;
+    setApprovalModeChangingIds((current) => new Set(current).add(sessionId));
+    setConnectionNotice(null);
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      connection: { ...session.connection, approvalMode: nextMode },
+    }));
+    if (activeSessionIdRef.current === sessionId) setApprovalMode(nextMode);
+    try {
+      const switched = await invoke<Connection>("grok_set_approval_mode", {
+        sessionId,
+        approvalMode: nextMode,
+      });
+      upsertSessionView(switched);
+      if (activeSessionIdRef.current === sessionId) {
+        setWorkspace(switched.workspace);
+        setApprovalMode(switched.approvalMode);
+      }
+    } catch (error) {
+      updateSessionView(sessionId, (session) => ({
+        ...session,
+        connection: { ...session.connection, approvalMode: previousMode },
+      }));
+      if (activeSessionIdRef.current === sessionId) setApprovalMode(previousMode);
+      setConnectionNotice(String(error));
+    } finally {
+      connectionTransitioning.current = false;
+      setApprovalModeChangingIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+    }
   }
 
-  async function loadModels() {
-    if (pendingModels) return true;
-    const activeConnection = await ensureActiveConnection();
-    return activeConnection !== null;
-  }
-
-  async function ensureActiveConnection() {
+  async function reconnectActiveSession() {
     const currentSession = activeSessionIdRef.current
       ? sessionViewsRef.current[activeSessionIdRef.current]
       : undefined;
-    if (!currentSession?.disconnected) return connection ?? await connect(workspace);
+    if (!currentSession) return null;
+    if (!currentSession.disconnected) return currentSession.connection;
 
     const sessionId = currentSession.connection.sessionId;
     connectionTransitioning.current = true;
@@ -3660,6 +3700,11 @@ function App() {
         return next;
       });
     }
+  }
+
+  async function ensureSessionForSubmission() {
+    if (!activeSessionIdRef.current) return createSessionForSubmission();
+    return reconnectActiveSession();
   }
 
   async function changeModel(modelId: string) {
@@ -3712,9 +3757,15 @@ function App() {
     event.preventDefault();
     const prompt = draft.trim();
     const sentAttachments = attachments;
-    if ((!prompt && sentAttachments.length === 0) || running || appUpdating || sessionTransitioning) return;
+    if (
+      (!prompt && sentAttachments.length === 0)
+      || running
+      || appUpdating
+      || sessionTransitioning
+      || activeApprovalModeChanging
+    ) return;
 
-    const activeConnection = await ensureActiveConnection();
+    const activeConnection = await ensureSessionForSubmission();
     if (!activeConnection) return;
 
     setSessionHistory((current) => current
@@ -3836,21 +3887,32 @@ function App() {
     }
   }
 
+  async function loadCommandCatalogForComposer() {
+    if (!isTauri() || activeSessionIdRef.current) return;
+    const key = workspace ?? "__standalone__";
+    const hasCachedCatalog = commandCatalogs[key] !== undefined
+      || Object.values(sessionViewsRef.current).some((session) => session.connection.workspace === workspace);
+    const requestKey = `${approvalMode}:${key}`;
+    if (hasCachedCatalog || commandCatalogRequests.current.has(requestKey)) return;
+
+    commandCatalogRequests.current.add(requestKey);
+    try {
+      const commands = await invoke<AvailableCommand[]>("grok_list_commands", {
+        workspace,
+        approvalMode,
+      });
+      setCommandCatalogs((current) => ({ ...current, [key]: commands }));
+    } catch (error) {
+      setConnectionNotice(String(error));
+    } finally {
+      commandCatalogRequests.current.delete(requestKey);
+    }
+  }
+
   function handleComposerChange(nextDraft: string) {
     setDraft(nextDraft);
-    const requestsCommandSuggestions = /^\/[^\s]*$/.test(nextDraft);
-    if (
-      requestsCommandSuggestions
-      && !connection
-      && !connectionTransitioning.current
-      && !running
-      && !appUpdating
-      && !activeSessionLoading
-    ) {
-      void connect(workspace, false, approvalMode, {
-        draft: nextDraft,
-        attachments,
-      });
+    if (/^\/[^\s]*$/.test(nextDraft) && !connection) {
+      void loadCommandCatalogForComposer();
     }
   }
 
@@ -4293,7 +4355,9 @@ function App() {
         {appNotice && (
           <div className="connection-banner" role="alert">
             <span>{appNotice}</span>
-            {workspace && <button type="button" onClick={() => void connect()}>Reconnect</button>}
+            {activeSession?.disconnected && (
+              <button type="button" onClick={() => void reconnectActiveSession()}>Reconnect</button>
+            )}
             <button className="icon-button" type="button" aria-label="Dismiss" onClick={() => { setConnectionNotice(null); setSetupError(null); }}><Icon name="x" size={15} /></button>
           </div>
         )}
@@ -4464,7 +4528,7 @@ function App() {
             <ApprovalModeSelector
               mode={approvalMode}
               busy={running || appUpdating || sessionTransitioning}
-              locked={messages.length > 0}
+              changing={activeApprovalModeChanging}
               onChange={(nextMode) => void changeApprovalMode(nextMode)}
             />
             {!sessionLocationEditable && (
@@ -4474,15 +4538,14 @@ function App() {
             <ModelSelector
               connected={connection !== null}
               models={connection?.models ?? pendingModels}
-              busy={running || appUpdating || sessionTransitioning}
-              onLoad={loadModels}
+              busy={running || appUpdating || sessionTransitioning || activeApprovalModeChanging}
               onChange={changeModel}
               onReasoningChange={changeReasoningEffort}
             />
             {running ? (
               <button className="send-button stop-button" type="button" aria-label="Stop" onClick={() => void cancelRun()}><Icon name="stop" size={15} /></button>
             ) : (
-              <button className="send-button" type="submit" aria-label="Send" disabled={(!draft.trim() && attachments.length === 0) || appUpdating || sessionTransitioning}><Icon name="arrow-up" size={17} /></button>
+              <button className="send-button" type="submit" aria-label="Send" disabled={(!draft.trim() && attachments.length === 0) || appUpdating || sessionTransitioning || activeApprovalModeChanging}><Icon name="arrow-up" size={17} /></button>
             )}
           </div>
         </form>

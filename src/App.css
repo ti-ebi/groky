@@ -1988,6 +1988,7 @@ body.is-resizing-sidebar .app-shell {
 }
 
 .shield-mark {
+  position: relative;
   display: grid;
   width: 15px;
   height: 17px;
@@ -2020,6 +2021,25 @@ body.is-resizing-sidebar .app-shell {
 .approval-control .approval-button:disabled {
   cursor: default;
   opacity: 0.64;
+}
+
+.approval-control.is-changing .approval-button {
+  opacity: 0.78;
+}
+
+.approval-control.is-changing .shield-mark::after {
+  position: absolute;
+  inset: -4px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-top-color: color-mix(in srgb, currentColor 76%, transparent);
+  border-right-color: color-mix(in srgb, currentColor 42%, transparent);
+  border-radius: 50%;
+  animation: approval-mode-switch 760ms linear infinite;
+  content: "";
+}
+
+.approval-control.is-changing .approval-button > .icon {
+  opacity: 0.24;
 }
 
 .approval-menu {
@@ -5398,6 +5418,10 @@ body.is-resizing-sidebar .app-shell {
 @keyframes approval-menu-in {
   from { opacity: 0; transform: translateY(6px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes approval-mode-switch {
+  to { transform: rotate(360deg); }
 }
 
 @keyframes update-notice-in {

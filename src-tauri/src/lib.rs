@@ -989,6 +989,34 @@ async fn forget_rejected_session(state: &GrokRuntime, transport: &AcpTransport, 
 }
 
 #[tauri::command]
+async fn grok_list_commands(
+    app: AppHandle,
+    state: State<'_, GrokRuntime>,
+    workspace: Option<String>,
+    approval_mode: Option<ApprovalMode>,
+) -> Result<Vec<SafeAvailableCommand>, String> {
+    let approval_mode = approval_mode.unwrap_or_default();
+    let workspace_path = if let Some(workspace) = workspace {
+        let path = PathBuf::from(workspace)
+            .canonicalize()
+            .map_err(|_| "Could not open the selected working directory.".to_string())?;
+        if !path.is_dir() {
+            return Err("Choose a folder to use as the working directory.".to_string());
+        }
+        path
+    } else {
+        env::temp_dir()
+    };
+    let cwd = workspace_path.to_string_lossy().into_owned();
+    let cli = resolve_cli().await?;
+    let transport = acquire_transport(&app, &state, &cli, &workspace_path, &cwd, approval_mode)
+        .await?
+        .transport;
+
+    Ok(transport.command_catalog(Some(&cwd)).await)
+}
+
+#[tauri::command]
 async fn grok_connect(
     app: AppHandle,
     state: State<'_, GrokRuntime>,
@@ -1335,6 +1363,87 @@ fn is_context_slash_command(prompt: &str) -> bool {
 async fn grok_cancel(state: State<'_, GrokRuntime>, session_id: String) -> Result<(), String> {
     let session = runtime_session(&state, &session_id).await?;
     session.transport.cancel(&session.session_id).await
+}
+
+#[tauri::command]
+async fn grok_set_approval_mode(
+    app: AppHandle,
+    state: State<'_, GrokRuntime>,
+    session_id: String,
+    approval_mode: ApprovalMode,
+) -> Result<ConnectResult, String> {
+    let session = runtime_session(&state, &session_id).await?;
+    if session.approval_mode == approval_mode {
+        return Ok(ConnectResult::from(&session));
+    }
+    if session
+        .prompt_active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(
+            "Wait for the current request to finish before changing approval mode.".to_string(),
+        );
+    }
+    let _prompt_lock = PromptActivityLock(session.prompt_active.clone());
+
+    session
+        .transport
+        .set_approval_mode(&session.session_id, approval_mode)
+        .await?;
+
+    let update_result: Result<ConnectResult, String> = async {
+        let _history = state.history.lock().await;
+        let mut sessions = read_session_history(&app).await?;
+        if !set_session_approval_mode(&mut sessions, &session.session_id, approval_mode) {
+            return Err("That session is no longer in Groky history.".to_string());
+        }
+
+        let switched = {
+            let mut runtime = state.inner.lock().await;
+            match runtime.sessions.get_mut(&session.session_id) {
+                Some(current)
+                    if current.transport.is_same_transport(&session.transport)
+                        && current.approval_mode == session.approval_mode =>
+                {
+                    current.approval_mode = approval_mode;
+                    Some(ConnectResult::from(&*current))
+                }
+                _ => None,
+            }
+        };
+        let switched = switched
+            .ok_or_else(|| "The session changed while selecting approval mode.".to_string())?;
+
+        if let Err(error) = write_session_history(&app, &sessions).await {
+            let mut runtime = state.inner.lock().await;
+            if let Some(current) = runtime.sessions.get_mut(&session.session_id) {
+                if current.transport.is_same_transport(&session.transport)
+                    && current.approval_mode == approval_mode
+                {
+                    current.approval_mode = session.approval_mode;
+                }
+            }
+            return Err(error);
+        }
+
+        Ok(switched)
+    }
+    .await;
+
+    if let Err(error) = update_result.as_ref() {
+        if session
+            .transport
+            .set_approval_mode(&session.session_id, session.approval_mode)
+            .await
+            .is_err()
+        {
+            return Err(format!(
+                "{error} The previous approval mode could not be restored."
+            ));
+        }
+    }
+    update_result
 }
 
 #[tauri::command]
@@ -1871,6 +1980,21 @@ fn set_session_unread(sessions: &mut [PersistedSession], session_id: &str, unrea
     true
 }
 
+fn set_session_approval_mode(
+    sessions: &mut [PersistedSession],
+    session_id: &str,
+    approval_mode: ApprovalMode,
+) -> bool {
+    let Some(session) = sessions
+        .iter_mut()
+        .find(|session| session.session_id == session_id)
+    else {
+        return false;
+    };
+    session.approval_mode = approval_mode;
+    true
+}
+
 async fn update_persisted_session_unread(
     app: &AppHandle,
     session_id: &str,
@@ -1891,6 +2015,14 @@ async fn persist_prompt_completion_unread(
     let _history = state.history.lock().await;
     let unread = state.inner.lock().await.active_session_id.as_deref() != Some(session_id);
     update_persisted_session_unread(app, session_id, unread).await
+}
+
+struct PromptActivityLock(Arc<AtomicBool>);
+
+impl Drop for PromptActivityLock {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 fn session_matches_history_target(
@@ -2121,12 +2253,14 @@ pub fn run() {
             grok_add_workspace,
             grok_remove_workspace,
             grok_mutate_sessions,
+            grok_list_commands,
             grok_connect,
             grok_load_session,
             grok_activate_session,
             grok_deactivate_session,
             grok_prompt,
             grok_cancel,
+            grok_set_approval_mode,
             grok_set_model,
             grok_set_reasoning_effort,
             grok_respond_permission,
@@ -2141,10 +2275,10 @@ mod tests {
         agent_capabilities, apply_session_history_action, attachment_resource_links,
         extract_device_auth_code, inspect_attachment_paths, is_context_slash_command,
         managed_workspace_name, normalize_session_title, parse_session_models,
-        reasoning_effort_value, remove_workspace_history, rename_session_title, set_session_unread,
-        title_from_prompt, upsert_session_history, upsert_workspace_history, ApprovalMode,
-        PersistedSession, PersistedWorkspace, SessionHistoryAction, DEFAULT_SESSION_TITLE,
-        MAX_SESSION_TITLE_CHARS,
+        reasoning_effort_value, remove_workspace_history, rename_session_title,
+        set_session_approval_mode, set_session_unread, title_from_prompt, upsert_session_history,
+        upsert_workspace_history, ApprovalMode, PersistedSession, PersistedWorkspace,
+        SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
     };
     use super::{record_model_selection, resolve_initial_model_selection};
     use chrono::{Local, TimeZone};
@@ -2309,6 +2443,35 @@ mod tests {
 
         assert!(!session.archived);
         assert!(!session.unread);
+    }
+
+    #[test]
+    fn approval_mode_changes_without_reordering_session_history() {
+        let mut sessions = vec![PersistedSession {
+            session_id: "session-1".to_string(),
+            title: "Existing session".to_string(),
+            workspace: Some("/workspace".to_string()),
+            working_directory: "/workspace".to_string(),
+            approval_mode: ApprovalMode::Ask,
+            created_at: 10,
+            updated_at: 20,
+            archived: false,
+            unread: true,
+        }];
+
+        assert!(set_session_approval_mode(
+            &mut sessions,
+            "session-1",
+            ApprovalMode::AlwaysApprove,
+        ));
+        assert_eq!(sessions[0].approval_mode, ApprovalMode::AlwaysApprove);
+        assert_eq!(sessions[0].updated_at, 20);
+        assert!(sessions[0].unread);
+        assert!(!set_session_approval_mode(
+            &mut sessions,
+            "missing",
+            ApprovalMode::Ask,
+        ));
     }
 
     #[test]

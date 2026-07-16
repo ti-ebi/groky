@@ -269,6 +269,7 @@ pub struct AcpTransport {
     permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
     turn_outputs: Arc<Mutex<SessionTurnOutputs>>,
     session_updates: Arc<Mutex<SessionUpdates>>,
+    command_catalog_cache: Arc<Mutex<Option<Vec<SafeAvailableCommand>>>>,
     owned_sessions: Arc<Mutex<HashSet<String>>>,
     event_sink: Option<AppHandle>,
     shutdown_requested: Arc<AtomicBool>,
@@ -347,6 +348,7 @@ impl AcpTransport {
         let permissions = Arc::new(Mutex::new(HashMap::new()));
         let turn_outputs = Arc::new(Mutex::new(HashMap::new()));
         let session_updates = Arc::new(Mutex::new(HashMap::new()));
+        let command_catalog_cache = Arc::new(Mutex::new(None));
         let owned_sessions = Arc::new(Mutex::new(HashSet::new()));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
@@ -359,6 +361,7 @@ impl AcpTransport {
             permissions.clone(),
             turn_outputs.clone(),
             session_updates.clone(),
+            command_catalog_cache.clone(),
             owned_sessions.clone(),
             shutdown_requested.clone(),
             alive.clone(),
@@ -373,6 +376,7 @@ impl AcpTransport {
             permissions,
             turn_outputs,
             session_updates,
+            command_catalog_cache,
             owned_sessions,
             event_sink,
             shutdown_requested,
@@ -537,7 +541,21 @@ impl AcpTransport {
         session_id: &str,
         cwd: Option<&str>,
     ) -> Vec<SafeAvailableCommand> {
-        let fallback = self
+        if let Some(commands) =
+            latest_available_commands(&*self.session_updates.lock().await, session_id)
+        {
+            return commands;
+        }
+
+        self.command_catalog(cwd).await
+    }
+
+    pub async fn command_catalog(&self, cwd: Option<&str>) -> Vec<SafeAvailableCommand> {
+        if let Some(commands) = self.command_catalog_cache.lock().await.clone() {
+            return commands;
+        }
+
+        let pulled = self
             .request_with_timeout(
                 COMMANDS_LIST_METHOD,
                 json!({ "cwd": cwd }),
@@ -545,23 +563,17 @@ impl AcpTransport {
             )
             .await
             .map(|response| safe_available_commands(response.get("commands")))
-            .unwrap_or_default();
-        self.session_updates
-            .lock()
-            .await
-            .get(session_id)
-            .and_then(|updates| {
-                updates
-                    .iter()
-                    .rev()
-                    .find_map(|update| match &update.update {
-                        SessionUpdatePayload::AvailableCommandsUpdate { available_commands } => {
-                            Some(available_commands.clone())
-                        }
-                        _ => None,
-                    })
-            })
-            .unwrap_or(fallback)
+            .ok();
+
+        let mut command_catalog_cache = self.command_catalog_cache.lock().await;
+        if let Some(commands) = command_catalog_cache.as_ref() {
+            return commands.clone();
+        }
+        if let Some(commands) = pulled {
+            *command_catalog_cache = Some(commands.clone());
+            return commands;
+        }
+        Vec::new()
     }
 
     pub async fn context_report(&self, session_id: &str) -> Result<String, String> {
@@ -641,6 +653,19 @@ impl AcpTransport {
         validate_set_model_response(&response, model_id)
     }
 
+    pub async fn set_approval_mode(
+        &self,
+        session_id: &str,
+        approval_mode: ApprovalMode,
+    ) -> Result<(), String> {
+        self.request(
+            "session/prompt",
+            approval_mode_prompt_params(session_id, approval_mode),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn respond_permission(
         &self,
         session_id: &str,
@@ -684,6 +709,7 @@ fn spawn_reader(
     permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
     turn_outputs: Arc<Mutex<SessionTurnOutputs>>,
     session_updates: Arc<Mutex<SessionUpdates>>,
+    command_catalog_cache: Arc<Mutex<Option<Vec<SafeAvailableCommand>>>>,
     owned_sessions: Arc<Mutex<HashSet<String>>>,
     shutdown_requested: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
@@ -715,6 +741,9 @@ fn spawn_reader(
                         _ => None,
                     };
                     if let Some(update) = update {
+                        if let Some(commands) = available_commands_update(&update) {
+                            *command_catalog_cache.lock().await = Some(commands);
+                        }
                         if !owned_sessions.lock().await.contains(update.session_id()) {
                             continue;
                         }
@@ -1030,6 +1059,14 @@ fn permission_decision_update(
 
 fn load_session_params(session_id: &str, cwd: &str) -> Value {
     json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] })
+}
+
+fn approval_mode_prompt_params(session_id: &str, approval_mode: ApprovalMode) -> Value {
+    let command = match approval_mode {
+        ApprovalMode::Ask => "/always-approve off",
+        ApprovalMode::AlwaysApprove => "/always-approve on",
+    };
+    prompt_params(session_id, command, &[])
 }
 
 fn set_model_params(session_id: &str, model_id: &str, reasoning_effort: Option<&str>) -> Value {
@@ -1574,6 +1611,24 @@ fn capture_session_update(updates: &mut SessionUpdates, update: &SessionUpdateEv
     session_updates.push(update.clone());
 }
 
+fn available_commands_update(update: &SessionUpdateEvent) -> Option<Vec<SafeAvailableCommand>> {
+    match &update.update {
+        SessionUpdatePayload::AvailableCommandsUpdate { available_commands } => {
+            Some(available_commands.clone())
+        }
+        _ => None,
+    }
+}
+
+fn latest_available_commands(
+    updates: &SessionUpdates,
+    session_id: &str,
+) -> Option<Vec<SafeAvailableCommand>> {
+    updates
+        .get(session_id)
+        .and_then(|updates| updates.iter().rev().find_map(available_commands_update))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1652,6 +1707,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn reuses_the_latest_advertised_slash_command_catalog() {
+        let first = SessionUpdateEvent::new(
+            "session-1",
+            SessionUpdatePayload::AvailableCommandsUpdate {
+                available_commands: vec![SafeAvailableCommand {
+                    name: "review".to_string(),
+                    description: "Review the current changes".to_string(),
+                    input_hint: None,
+                }],
+            },
+        );
+        let latest = SessionUpdateEvent::new(
+            "session-1",
+            SessionUpdatePayload::AvailableCommandsUpdate {
+                available_commands: vec![SafeAvailableCommand {
+                    name: "compact".to_string(),
+                    description: "Compact the session".to_string(),
+                    input_hint: None,
+                }],
+            },
+        );
+        let mut updates = SessionUpdates::new();
+        capture_session_update(&mut updates, &first);
+        capture_session_update(&mut updates, &latest);
+
+        assert_eq!(
+            latest_available_commands(&updates, "session-1"),
+            available_commands_update(&latest),
+        );
+        assert_eq!(latest_available_commands(&updates, "missing"), None);
     }
 
     #[test]
@@ -1888,6 +1976,24 @@ mod tests {
                         "size": 4096
                     }
                 ]
+            })
+        );
+    }
+
+    #[test]
+    fn approval_mode_control_prompts_are_scoped_to_the_requested_session() {
+        assert_eq!(
+            approval_mode_prompt_params("session-ask", ApprovalMode::Ask),
+            json!({
+                "sessionId": "session-ask",
+                "prompt": [{ "type": "text", "text": "/always-approve off" }]
+            })
+        );
+        assert_eq!(
+            approval_mode_prompt_params("session-approve", ApprovalMode::AlwaysApprove),
+            json!({
+                "sessionId": "session-approve",
+                "prompt": [{ "type": "text", "text": "/always-approve on" }]
             })
         );
     }
