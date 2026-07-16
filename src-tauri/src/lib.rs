@@ -1122,7 +1122,7 @@ async fn grok_load_session(
         let updates = session.transport.session_updates(&session_id).await;
         {
             let _history = state.history.lock().await;
-            touch_persisted_session(&app, &session, None).await?;
+            update_persisted_session_unread(&app, &session_id, false).await?;
         }
         return Ok(LoadSessionResult {
             connection: ConnectResult::from(&session),
@@ -1178,7 +1178,7 @@ async fn grok_load_session(
     };
     {
         let _history = state.history.lock().await;
-        touch_persisted_session(&app, &session, None).await?;
+        update_persisted_session_unread(&app, &persisted.session_id, false).await?;
     }
     {
         let mut runtime = state.inner.lock().await;
@@ -1275,7 +1275,7 @@ async fn grok_prompt(
         } else {
             Some(prompt.as_str())
         };
-        touch_persisted_session(&app, &session, title_source).await
+        record_persisted_session_activity(&app, &session, title_source).await
     };
     if let Err(error) = persisted {
         session.prompt_active.store(false, Ordering::Release);
@@ -1921,7 +1921,7 @@ async fn persist_new_session(app: &AppHandle, session: &GrokSession) -> Result<(
     Ok(())
 }
 
-async fn touch_persisted_session(
+async fn record_persisted_session_activity(
     app: &AppHandle,
     session: &GrokSession,
     first_prompt: Option<&str>,
