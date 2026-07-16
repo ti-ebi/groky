@@ -731,26 +731,6 @@ async fn open_grok_install_guide() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn reveal_working_directory(
-    state: State<'_, GrokRuntime>,
-    session_id: Option<String>,
-) -> Result<(), String> {
-    let working_directory = {
-        let runtime = state.inner.lock().await;
-        let session_id = session_id
-            .as_deref()
-            .or(runtime.active_session_id.as_deref())
-            .ok_or_else(|| "Start a session first.".to_string())?;
-        runtime
-            .sessions
-            .get(session_id)
-            .map(|session| session.working_directory.clone())
-            .ok_or_else(|| "That session is not active.".to_string())?
-    };
-    open_directory(Path::new(&working_directory))
-}
-
-#[tauri::command]
 async fn grok_list_sessions(app: AppHandle) -> Result<Vec<SessionSummary>, String> {
     Ok(read_session_history(&app)
         .await?
@@ -1201,12 +1181,6 @@ async fn grok_load_session(
         connection: ConnectResult::from(&session),
         updates,
     })
-}
-
-#[tauri::command]
-async fn grok_disconnect(state: State<'_, GrokRuntime>) -> Result<(), String> {
-    disconnect_runtime(&state).await;
-    Ok(())
 }
 
 #[tauri::command]
@@ -2026,33 +2000,6 @@ fn open_url(url: &str) -> Result<(), String> {
         .map_err(|_| "Failed to open the installation guide.".to_string())
 }
 
-fn open_directory(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut command = std::process::Command::new("open");
-    #[cfg(target_os = "macos")]
-    command.arg(path);
-
-    #[cfg(target_os = "linux")]
-    let mut command = std::process::Command::new("xdg-open");
-    #[cfg(target_os = "linux")]
-    command.arg(path);
-
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = std::process::Command::new("explorer");
-        command.arg(path);
-        command
-    };
-
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| "Failed to open the working folder.".to_string())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2070,7 +2017,6 @@ pub fn run() {
             choose_attachments,
             inspect_attachments,
             open_grok_install_guide,
-            reveal_working_directory,
             grok_list_sessions,
             grok_rename_session,
             grok_list_workspaces,
@@ -2081,7 +2027,6 @@ pub fn run() {
             grok_load_session,
             grok_activate_session,
             grok_deactivate_session,
-            grok_disconnect,
             grok_prompt,
             grok_cancel,
             grok_set_model,

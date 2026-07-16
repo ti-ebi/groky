@@ -1014,8 +1014,7 @@ body.is-resizing-sidebar .app-shell {
 }
 
 .task-title,
-.task-actions,
-.branch-button {
+.task-actions {
   display: flex;
   align-items: center;
 }
@@ -1067,29 +1066,6 @@ body.is-resizing-sidebar .app-shell {
   border-radius: 50%;
   background: var(--signal);
   box-shadow: 0 0 9px var(--signal-glow);
-}
-
-.branch-button {
-  gap: 6px;
-  height: 34px;
-  margin-right: 3px;
-  padding: 0 9px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--text-soft);
-  font: 11px var(--mono);
-  letter-spacing: -0.01em;
-  transition: background 140ms ease, border-color 140ms ease, transform 80ms ease;
-}
-
-.branch-button:hover {
-  background: var(--surface-hover);
-  border-color: var(--line-strong);
-}
-
-.branch-button:active {
-  transform: scale(0.98);
 }
 
 .conversation {

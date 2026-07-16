@@ -27,7 +27,6 @@ type IconName =
   | "arrow-right"
   | "arrow-down"
   | "arrow-up"
-  | "branch"
   | "check"
   | "chevron-down"
   | "compose"
@@ -536,7 +535,6 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     "arrow-right": <><path d="m9 18 6-6-6-6" /><path d="M5 12h10" /></>,
     "arrow-down": <><path d="m6 9 6 6 6-6" /><path d="M12 5v10" /></>,
     "arrow-up": <><path d="m18 15-6-6-6 6" /><path d="M12 9v10" /></>,
-    branch: <><circle cx="6" cy="5" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="6" cy="19" r="2" /><path d="M6 7v10M8 7c3 0 3-1 3-1h5M11 6v7c0 3-3 3-3 3" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     "chevron-down": <path d="m8 10 4 4 4-4" />,
     compose: <><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z" /></>,
@@ -3552,15 +3550,6 @@ function App() {
     });
   }
 
-  async function revealWorkingDirectory() {
-    setConnectionNotice(null);
-    try {
-      await invoke("reveal_working_directory", { sessionId: connection?.sessionId });
-    } catch (error) {
-      setConnectionNotice(String(error));
-    }
-  }
-
   function selectPendingSessionLocation(targetWorkspace: string | null) {
     if (!sessionLocationEditable) return;
     setWorkspace(targetWorkspace);
@@ -3897,19 +3886,6 @@ function App() {
     }
   }
 
-  async function disconnect() {
-    setShowConnection(false);
-    setActiveView("session");
-    try {
-      await invoke("grok_disconnect");
-    } finally {
-      clearAllSessionViews();
-      setPendingDraft("");
-      setApprovalMode("ask");
-      setStage("ready");
-    }
-  }
-
   const authenticated = ["ready", "connecting", "connected"].includes(stage);
   const appNotice = connectionNotice ?? setupError;
   const updateNotice = appUpdate ? (
@@ -4169,8 +4145,8 @@ function App() {
         </button>
 
         {showConnection && (
-          <div className="connection-popover" role="dialog" aria-label="Grok Build account and connection" data-connection-popover-root>
-            <div className="popover-heading"><span>LOCAL CONNECTION</span><button className="icon-button" type="button" onClick={() => setShowConnection(false)}><Icon name="x" size={15} /></button></div>
+          <div className="connection-popover" role="dialog" aria-label="Grok Build statistics and account" data-connection-popover-root>
+            <div className="popover-heading"><span>STATISTICS</span><button className="icon-button" type="button" onClick={() => setShowConnection(false)}><Icon name="x" size={15} /></button></div>
             <dl>
               <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
               <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
@@ -4202,8 +4178,6 @@ function App() {
               {updateCheckNotice && <small aria-live="polite">{updateCheckNotice}</small>}
             </div>
             <div className="popover-actions">
-              {connection && <button type="button" onClick={() => void revealWorkingDirectory()}><Icon name="external-link" size={14} /> Open folder</button>}
-              {connection && <button type="button" onClick={() => void disconnect()}><Icon name="stop" size={13} /> Disconnect</button>}
               <button className="danger-action" type="button" onClick={() => void signOut()}><Icon name="logout" size={14} /> Sign out</button>
             </div>
           </div>
@@ -4273,7 +4247,6 @@ function App() {
           </div>
           <div className="task-actions">
             <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : sessionTransitioning ? "Loading session" : "Signed in"}</span>
-            {connection && <span className="branch-button"><Icon name="branch" /><span>local</span></span>}
           </div>
         </header>
 
