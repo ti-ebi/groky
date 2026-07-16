@@ -3,11 +3,11 @@
 </h1>
 
 <p align="center">
-  A local desktop workspace for Grok Build.
+  The open-source desktop client for Grok Build.
 </p>
 
 <p align="center">
-  Run Grok Build against local projects through a focused, permission-aware desktop interface.
+  Run multiple Grok Build sessions across your projects, follow their progress, and stay in control.
 </p>
 
 <p align="center">
@@ -29,30 +29,32 @@
 
 ## Why Groky
 
-Grok Build is a powerful coding agent. Groky gives it a dedicated desktop workspace built around local projects, visible agent activity, and explicit control over tool execution.
+Grok Build is a powerful coding agent. Groky turns its local CLI into a persistent desktop workspace for projects, standalone tasks, and concurrent sessions.
 
-- **Project-focused:** Start in an existing folder or use an isolated standalone working directory.
+- **Persistent navigation:** Group sessions by working directory, switch between active runs, reopen saved sessions, and keep archived work out of the main sidebar.
+- **Flexible starting point:** Choose an existing folder or use a managed standalone directory created by Groky.
 - **Local integration:** Groky launches the official Grok Build CLI on your machine and communicates with it over the Agent Client Protocol (ACP).
-- **Human in the loop:** Review permission requests, choose an approval mode, and cancel an active run at any time.
-- **Focused interface:** Follow messages, plans, thoughts, and tool activity without keeping a terminal session open.
+- **Human in the loop:** Review permission requests, choose an approval mode per session, and stop an active turn at any time.
+- **Focused interface:** Follow Markdown responses, thoughts, plans, tool activity, usage, and turn metrics without keeping a terminal open.
 - **Native desktop host:** Process and filesystem access stay behind typed Tauri commands in the Rust host.
 
 ## What works today
 
 | Area | Current support |
 | --- | --- |
-| Onboarding | Grok CLI detection, device-code sign-in, and authentication status |
-| Working directories | Existing local folders and managed standalone directories under `Documents/Groky/YYYY-MM-DD/` |
-| Agent connection | Local ACP sessions powered by `grok agent stdio` |
-| Live activity | Streamed messages, thoughts, plans, tool calls, and completion state |
-| Permissions | Ask-first and always-approved session modes, plus interactive tool permission requests |
+| Onboarding | Grok CLI detection, cached-auth checks, device-code sign-in, and `XAI_API_KEY` support when advertised by the CLI |
+| Session creation | A location, model, reasoning effort, and approval mode can be prepared before the ACP session is created on the first message |
+| Working directories | Tracked local folders and managed standalone directories under `Documents/Groky/YYYY-MM-DD/` |
+| Session history | Local navigation metadata, session reload when supported by Grok Build, rename, archive, restore, delete, unread state, and approval-needed indicators |
+| Multi-session work | Switch between sessions while turns continue in the background and return when a response or permission request needs attention |
+| Search and navigation | Working-directory groups, resizable and collapsible sidebar, and a global session/action search palette |
+| Composer | Text prompts, up to 10 file attachments through the picker or drag and drop, and suggestions for slash commands advertised by Grok Build |
+| Live activity | Streamed GitHub-Flavored Markdown, thoughts, plans, tool calls, permission decisions, completion state, and usage, cost, or turn metrics when reported by Grok Build |
+| Permissions | **Ask** and **Always approve** session modes, plus interactive choices supplied by each tool permission request |
 | Model controls | Model and reasoning-effort selection when advertised by Grok Build |
-| Session controls | Start, cancel, reconnect, disconnect, reveal the working directory, and sign out |
+| Session controls | Start on first send, stop, reconnect, switch, rename, archive, restore, delete, and sign out |
+| Settings | Application version, updater status, CLI and active-session details, account controls, and searchable archived chats |
 | Updates | Signed in-app updates backed by GitHub Releases |
-
-> **Image placeholder — setup and permissions**
->
-> Add two supporting screenshots: the device-auth onboarding flow and an in-session tool permission request. Suggested filenames: `docs/assets/groky-onboarding.png` and `docs/assets/groky-permission.png`.
 
 ## Getting started
 
@@ -83,6 +85,8 @@ pnpm install
 pnpm tauri dev
 ```
 
+Groky checks `GROK_BINARY`, your `PATH`, `~/.local/bin`, and `~/.grok/bin` when locating the CLI. Set `GROK_BINARY` to the executable path if Grok Build is installed somewhere else.
+
 ### 3. Start a session
 
 On first launch, Groky:
@@ -90,12 +94,24 @@ On first launch, Groky:
 1. Detects the local Grok Build CLI.
 2. Checks the CLI's cached authentication state.
 3. Starts the official device-code flow when sign-in is required.
-4. Lets you choose an existing folder or create a standalone session.
-5. Starts Grok Build over ACP when you send the first task.
+4. Restores locally tracked working directories and session navigation metadata.
+5. Lets you choose an existing folder or a standalone location, approval mode, model, and reasoning effort.
+6. Creates the Grok Build ACP session only when you send the first message.
 
 The verification code shown by Groky should match the code shown in the browser. The CLI detects approval automatically; there is no token or code to paste back into Groky.
 
 Groky can also use an existing `XAI_API_KEY` environment variable when the CLI advertises that authentication method. Groky does not persist the key.
+
+Standalone sessions use a unique directory inside `Documents/Groky/YYYY-MM-DD/`. Removing a session from Groky history does not delete the files in that directory.
+
+Session titles start from the first message or attachment name and can be renamed later. Saved sessions can be reopened when the installed Grok Build version advertises ACP session loading.
+
+Useful keyboard controls:
+
+- <kbd>Command</kbd>/<kbd>Ctrl</kbd> + <kbd>K</kbd> searches sessions and common actions.
+- <kbd>Command</kbd>/<kbd>Ctrl</kbd> + <kbd>B</kbd> toggles the sidebar.
+- <kbd>Enter</kbd> sends a message; <kbd>Shift</kbd> + <kbd>Enter</kbd> inserts a new line.
+- Typing `/` opens the command catalog supplied by Grok Build.
 
 ## How it works
 
@@ -111,15 +127,21 @@ Grok Build CLI (`grok agent stdio`)
 
 The React renderer does not start processes or access the filesystem directly. The Rust host owns CLI discovery, authentication commands, working-directory access, ACP transport, permission responses, cancellation, and updates.
 
+ACP events are routed by session, so a turn can continue while another session is open. Groky stores lightweight navigation metadata locally and requests conversation replay from Grok Build when reopening a saved session.
+
 Grok Build itself handles model and network communication. Prompts and project context are processed according to xAI's Grok Build service and data policies; see the official [Grok Build documentation](https://docs.x.ai/build/overview).
 
 ## Privacy and security
 
 - Groky delegates authentication to the official Grok Build CLI.
 - Groky does not read or store the resulting browser-auth token.
-- Groky does not persist prompts, source code, credentials, session data, or raw ACP traffic in application logs.
+- Groky stores session IDs, titles, working-directory paths, approval modes, timestamps, archive state, and unread state in the operating system's application-data directory. The initial title is derived from the first message or attachment name.
+- Groky does not persist full conversation bodies or source-file contents in its own history files, and it does not write prompts, responses, credentials, or raw ACP traffic to application logs.
+- Attached files are not copied into Groky. Their validated local paths and metadata are passed to Grok Build as ACP resource links.
 - Local processes and filesystem access are initiated through the Tauri Rust host, not the renderer.
-- **Always approve** allows Grok Build to execute tool actions without individual permission prompts. Use it only in a working directory you trust.
+- Deleting Groky history does not delete files in the associated working directory.
+- **Always approve** skips individual prompts unless a policy rule still requires approval. Use it only in a working directory you trust.
+- The Grok Build CLI and xAI service may retain their own session data independently of Groky; consult the official documentation for their behavior and policies.
 
 ## Development
 
