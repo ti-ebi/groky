@@ -2832,7 +2832,7 @@ function App() {
             <ModelSelector
               connected={connection !== null}
               models={connection?.models ?? null}
-              busy={running || appUpdating || stage === "connecting" || sessionLocationEditable}
+              busy={running || appUpdating || stage === "connecting"}
               onLoad={loadModels}
               onChange={changeModel}
               onReasoningChange={changeReasoningEffort}
