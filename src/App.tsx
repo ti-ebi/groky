@@ -408,6 +408,12 @@ function makeMessageId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function resizeTextareaToContent(textarea: HTMLTextAreaElement | null) {
+  if (!textarea) return;
+  textarea.style.height = "auto";
+  textarea.style.height = `${textarea.scrollHeight}px`;
+}
+
 async function copyToClipboard(text: string) {
   if (navigator.clipboard?.writeText) {
     try {
@@ -1022,6 +1028,8 @@ function App() {
   const activeAssistantId = useRef<string | null>(null);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
+  const composer = useRef<HTMLFormElement | null>(null);
+  const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
   const updateCheckInFlight = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
   const projectMenu = useRef<HTMLDivElement | null>(null);
@@ -1339,6 +1347,34 @@ function App() {
     const hasContentBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 2;
     setShowScrollToLatest(hasContentBelow);
   }, [messages, permission]);
+
+  useLayoutEffect(() => {
+    resizeTextareaToContent(composerTextarea.current);
+  }, [draft, sidebarCollapsed, sidebarWidth, stage]);
+
+  useLayoutEffect(() => {
+    const composerElement = composer.current;
+    const workspaceElement = composerElement?.parentElement;
+    if (!composerElement || !workspaceElement) return;
+
+    const updateComposerHeight = () => {
+      workspaceElement.style.setProperty("--composer-height", `${composerElement.offsetHeight}px`);
+    };
+    updateComposerHeight();
+
+    const observer = new ResizeObserver(updateComposerHeight);
+    observer.observe(composerElement);
+    return () => {
+      observer.disconnect();
+      workspaceElement.style.removeProperty("--composer-height");
+    };
+  }, [stage]);
+
+  useEffect(() => {
+    const handleWindowResize = () => resizeTextareaToContent(composerTextarea.current);
+    window.addEventListener("resize", handleWindowResize);
+    return () => window.removeEventListener("resize", handleWindowResize);
+  }, []);
 
   function handleConversationScroll() {
     const container = conversation.current;
@@ -1917,10 +1953,11 @@ function App() {
           </button>
         )}
 
-        <form className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
+        <form ref={composer} className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
           <div className="prompt-row">
             <span className="prompt-symbol" aria-hidden="true">❯</span>
             <textarea
+              ref={composerTextarea}
               aria-label="Session prompt"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
