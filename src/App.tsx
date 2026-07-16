@@ -1,3 +1,4 @@
+import "@fontsource-variable/sora/index.css";
 import "./App.css";
 
 function App() {

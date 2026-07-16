@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <style>
+    .disc { fill: #161a18; stroke: #117568; }
+    .orbit { fill: none; stroke: #f6f9f8; }
+
+    @media (prefers-color-scheme: dark) {
+      .disc { fill: #eff5f2; stroke: #8fe3c1; }
+      .orbit { stroke: #090b0a; }
+    }
+  </style>
+  <circle class="disc" cx="32" cy="32" r="28" stroke-width="2" />
+  <ellipse
+    class="orbit"
+    cx="32"
+    cy="32"
+    rx="19"
+    ry="10"
+    stroke-width="4"
+    transform="rotate(32 32 32)"
+  />
+  <ellipse
+    class="orbit"
+    cx="32"
+    cy="32"
+    rx="19"
+    ry="10"
+    stroke-width="4"
+    transform="rotate(-32 32 32)"
+  />
+</svg>
