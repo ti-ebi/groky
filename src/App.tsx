@@ -31,6 +31,7 @@ type IconName =
   | "download"
   | "external-link"
   | "folder"
+  | "folder-x"
   | "folder-open"
   | "logout"
   | "panel"
@@ -209,7 +210,6 @@ interface LoadSessionResult {
 }
 
 type SidebarMenu =
-  | { kind: "global" }
   | { kind: "workspace"; path: string }
   | { kind: "session"; sessionId: string }
   | null;
@@ -374,6 +374,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     download: <><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></>,
     "external-link": <><path d="M14 5h5v5" /><path d="m19 5-8 8" /><path d="M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></>,
     folder: <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
+    "folder-x": <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m10 11 4 4m0-4-4 4" /></>,
     "folder-open": <><path d="M3 9V7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1" /><path d="m3 10 2 9h14l2-9Z" /></>,
     logout: <><path d="M10 5H5v14h5" /><path d="M14 8l4 4-4 4M8 12h10" /></>,
     panel: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M15 4v16" /></>,
@@ -481,36 +482,176 @@ function SidebarSessionRow({
           <span>{session.title}</span>
           {subtitle && <small>{subtitle}</small>}
         </span>
-        {session.running && <span className="task-status" aria-label="Running" />}
+        {session.running && (
+          <span className="session-running-indicator" aria-label="Running">
+            <span className="task-status" aria-hidden="true" />
+          </span>
+        )}
       </button>
-      <button
-        className="session-more"
-        type="button"
-        aria-label={`Session actions for ${session.title}`}
-        aria-haspopup="menu"
-        aria-expanded={menuOpen}
-        disabled={disabled}
-        onClick={onToggleMenu}
-      >
-        <Icon name="dots" size={15} />
-      </button>
+      <div className="session-row-actions">
+        <button
+          className="session-more"
+          type="button"
+          aria-label={`Session actions for ${session.title}`}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          disabled={disabled}
+          onClick={onToggleMenu}
+        >
+          <Icon name="dots" size={15} />
+        </button>
+        <button
+          className="session-archive"
+          type="button"
+          aria-label={`${session.archived ? "Restore" : "Archive"} ${session.title}`}
+          title={session.archived ? "Restore session" : "Archive session"}
+          disabled={disabled}
+          onClick={session.archived ? onRestore : onArchive}
+        >
+          <Icon name={session.archived ? "refresh" : "archive"} size={14} />
+        </button>
+      </div>
       {menuOpen && (
         <div className="sidebar-context-menu session-context-menu" role="menu">
-          {session.archived ? (
-            <button type="button" role="menuitem" onClick={onRestore}>
-              <Icon name="refresh" size={14} />
-              <span>Restore</span>
-            </button>
-          ) : (
-            <button type="button" role="menuitem" onClick={onArchive}>
-              <Icon name="archive" size={14} />
-              <span>Archive</span>
-            </button>
-          )}
           <button className="danger-menu-item" type="button" role="menuitem" onClick={onDelete}>
             <Icon name="trash" size={14} />
             <span>Delete</span>
           </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionLocationSelector({
+  value,
+  workspaces,
+  disabled,
+  onChange,
+  onAddWorkspace,
+}: {
+  value: string | null;
+  workspaces: string[];
+  disabled: boolean;
+  onChange: (workspace: string | null) => void;
+  onAddWorkspace: () => Promise<string | null>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [addingWorkspace, setAddingWorkspace] = useState(false);
+  const root = useRef<HTMLDivElement | null>(null);
+  const searchInput = useRef<HTMLInputElement | null>(null);
+  const label = value ? workspaceName(value) : "Standalone";
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filteredWorkspaces = workspaces.filter((path) =>
+    !normalizedQuery
+    || workspaceName(path).toLocaleLowerCase().includes(normalizedQuery)
+    || path.toLocaleLowerCase().includes(normalizedQuery)
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    const frame = window.requestAnimationFrame(() => searchInput.current?.focus());
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  function select(workspace: string | null) {
+    onChange(workspace);
+    setOpen(false);
+  }
+
+  async function addWorkspace() {
+    setOpen(false);
+    setAddingWorkspace(true);
+    const added = await onAddWorkspace();
+    setAddingWorkspace(false);
+    if (added) onChange(added);
+  }
+
+  return (
+    <div className="session-location-control" ref={root}>
+      <button
+        className="session-location-button"
+        type="button"
+        aria-label={`Session location: ${label}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled || addingWorkspace}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <Icon name={value ? "folder" : "compose"} size={14} />
+        <span>{label}</span>
+        <Icon name="chevron-down" size={12} />
+      </button>
+      {open && (
+        <div className="session-location-menu" role="menu" aria-label="Working directory for this session">
+          <label className="session-location-search">
+            <Icon name="search" size={13} />
+            <input
+              ref={searchInput}
+              type="search"
+              aria-label="Search working directories"
+              placeholder="Search working directories"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <div className="session-location-workspaces">
+            {filteredWorkspaces.map((path) => (
+              <button
+                className="session-location-option"
+                type="button"
+                role="menuitemradio"
+                aria-checked={value === path}
+                key={path}
+                title={path}
+                onClick={() => select(path)}
+              >
+                <Icon name="folder" size={14} />
+                <span>{workspaceName(path)}</span>
+                {value === path && <Icon name="check" size={14} />}
+              </button>
+            ))}
+            {filteredWorkspaces.length === 0 && (
+              <p className="session-location-empty">
+                {workspaces.length === 0 ? "No working directories yet" : "No matching working directories"}
+              </p>
+            )}
+          </div>
+          <div className="session-location-actions">
+            <button className="session-location-action" type="button" role="menuitem" onClick={() => void addWorkspace()}>
+              <Icon name="plus" size={14} />
+              <span>Add working directory</span>
+            </button>
+            <button
+              className="session-location-action"
+              type="button"
+              role="menuitemradio"
+              aria-checked={value === null}
+              onClick={() => select(null)}
+            >
+              <Icon name="compose" size={14} />
+              <span>Standalone</span>
+              {value === null && <Icon name="check" size={14} />}
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1315,7 +1456,6 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
@@ -1329,7 +1469,6 @@ function App() {
   const updateCheckInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
-  const projectMenu = useRef<HTMLDivElement | null>(null);
 
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
   const messageHistory = useMemo(() => conversationTurnPreviews(messages), [messages]);
@@ -1338,22 +1477,22 @@ function App() {
     ...session,
     running: running && connection?.sessionId === session.sessionId,
   }));
-  const activeSidebarSessions = sidebarSessions.filter((session) => !session.archived);
-  const archivedSidebarSessions = sidebarSessions.filter((session) => session.archived);
+  const trackedWorkspacePaths = new Set(workspaceHistory.map((entry) => entry.path));
+  const visibleSidebarSessions = sidebarSessions.filter((session) =>
+    session.workspace === null || trackedWorkspacePaths.has(session.workspace)
+  );
+  const activeSidebarSessions = visibleSidebarSessions.filter((session) => !session.archived);
+  const archivedSidebarSessions = visibleSidebarSessions.filter((session) => session.archived);
   const groupedSidebarSessions = groupSidebarSessions(activeSidebarSessions);
   const sessionsByWorkspace = new Map(groupedSidebarSessions.workspaceGroups.map((group) => [group.path, group.sessions]));
   const workspacePaths = workspaceHistory.map((entry) => entry.path);
-  groupedSidebarSessions.workspaceGroups.forEach((group) => {
-    if (!workspacePaths.includes(group.path)) workspacePaths.push(group.path);
-  });
   if (workspace && !workspacePaths.includes(workspace)) workspacePaths.unshift(workspace);
   const workspaceGroups: SidebarWorkspaceGroup[] = workspacePaths.map((path) => ({
     path,
     sessions: sessionsByWorkspace.get(path) ?? [],
   }));
-  const allWorkspaceGroupsCollapsed = workspaceGroups.length > 0
-    && workspaceGroups.every((group) => collapsedWorkspaces.has(group.path));
   const sidebarActionsDisabled = running || appUpdating || stage === "connecting" || historyMutating;
+  const sessionLocationEditable = connection === null && messages.length === 0 && !running;
 
   useEffect(() => {
     if (!overlayTitlebar) return;
@@ -1415,24 +1554,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!projectMenuOpen) return;
-
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!projectMenu.current?.contains(event.target as Node)) setProjectMenuOpen(false);
-    };
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setProjectMenuOpen(false);
-    };
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [projectMenuOpen]);
-
-  useEffect(() => {
     if (!sidebarMenu) return;
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -1454,7 +1575,6 @@ function App() {
 
   useEffect(() => {
     if (running || appUpdating || stage === "connecting" || historyMutating || sidebarCollapsed) {
-      setProjectMenuOpen(false);
       setSidebarMenu(null);
     }
   }, [appUpdating, historyMutating, running, sidebarCollapsed, stage]);
@@ -1481,12 +1601,6 @@ function App() {
       else next.add(path);
       return next;
     });
-  }
-
-  function toggleAllWorkspaceGroups() {
-    setCollapsedWorkspaces(allWorkspaceGroupsCollapsed
-      ? new Set()
-      : new Set(workspaceGroups.map((group) => group.path)));
   }
 
   function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1919,7 +2033,6 @@ function App() {
       || stage === "connecting"
     ) return;
 
-    setProjectMenuOpen(false);
     setShowConnection(false);
     setSetupError(null);
     setConnectionNotice(null);
@@ -1958,11 +2071,10 @@ function App() {
     }
   }
 
-  async function chooseAndAddWorkspace() {
-    if (sidebarActionsDisabled) return;
-    setProjectMenuOpen(false);
+  async function chooseAndAddWorkspace(): Promise<string | null> {
+    if (sidebarActionsDisabled) return null;
     const selected = await chooseWorkspace();
-    if (!selected) return;
+    if (!selected) return null;
 
     try {
       const added = await invoke<PersistedWorkspaceSummary>("grok_add_workspace", {
@@ -1976,8 +2088,48 @@ function App() {
         next.delete(added.path);
         return next;
       });
+      return added.path;
     } catch (error) {
       setConnectionNotice(String(error));
+      return null;
+    }
+  }
+
+  async function removeWorkspace(path: string) {
+    if (sidebarActionsDisabled) return;
+    const removesCurrentLocation = workspace === path;
+    const disconnectsActiveSession = connection?.workspace === path;
+    setSidebarMenu(null);
+    setHistoryMutating(true);
+    setConnectionNotice(null);
+
+    try {
+      const workspaces = await invoke<PersistedWorkspaceSummary[]>("grok_remove_workspace", {
+        workspace: path,
+      });
+      if (disconnectsActiveSession) {
+        connectionTransitioning.current = true;
+        await invoke("grok_disconnect").catch(() => undefined);
+        connectionTransitioning.current = false;
+        setConnection(null);
+        setMessages([]);
+        setPermission(null);
+        setApprovalMode("ask");
+        setStage("ready");
+      }
+      if (removesCurrentLocation) setWorkspace(null);
+      setWorkspaceHistory(workspaces);
+      setCollapsedWorkspaces((current) => {
+        const next = new Set(current);
+        next.delete(path);
+        return next;
+      });
+      setConnectionNotice(`${workspaceName(path)} was removed from Groky. The folder and session history were kept.`);
+    } catch (error) {
+      connectionTransitioning.current = false;
+      setConnectionNotice(String(error));
+    } finally {
+      setHistoryMutating(false);
     }
   }
 
@@ -2052,11 +2204,27 @@ function App() {
     }
   }
 
+  function selectPendingSessionLocation(targetWorkspace: string | null) {
+    if (!sessionLocationEditable) return;
+    setWorkspace(targetWorkspace);
+    if (targetWorkspace) {
+      setCollapsedWorkspaces((current) => {
+        const next = new Set(current);
+        next.delete(targetWorkspace);
+        return next;
+      });
+    }
+  }
+
   async function startNewTask(targetWorkspace: string | null = workspace) {
     if (sidebarActionsDisabled) return;
     const nextMode: ApprovalMode = "ask";
-    setProjectMenuOpen(false);
     setSidebarMenu(null);
+    if (connection) {
+      connectionTransitioning.current = true;
+      await invoke("grok_disconnect").catch(() => undefined);
+      connectionTransitioning.current = false;
+    }
     if (targetWorkspace) {
       setCollapsedWorkspaces((current) => {
         const next = new Set(current);
@@ -2070,8 +2238,9 @@ function App() {
     setApprovalMode(nextMode);
     setSetupError(null);
     setConnectionNotice(null);
+    setConnection(null);
     setWorkspace(targetWorkspace);
-    if (targetWorkspace || connection) await connect(targetWorkspace, true, nextMode);
+    setStage("ready");
   }
 
   async function changeApprovalMode(nextMode: ApprovalMode) {
@@ -2299,80 +2468,18 @@ function App() {
         </nav>
 
         <div className="project-scroll">
-          <div
-            className={`project-section-header ${projectMenuOpen || sidebarMenu?.kind === "global" ? "actions-visible" : ""}`}
-            ref={projectMenu}
-            data-sidebar-menu-root
-          >
+          <div className="project-section-header">
             <span>Working directories</span>
-            <div className="project-section-actions">
-              <button
-                type="button"
-                aria-label="Working directory actions"
-                aria-haspopup="menu"
-                aria-expanded={sidebarMenu?.kind === "global"}
-                onClick={() => {
-                  setProjectMenuOpen(false);
-                  setSidebarMenu((current) => current?.kind === "global" ? null : { kind: "global" });
-                }}
-              >
-                <Icon name="dots" size={15} />
-              </button>
-              <button
-                type="button"
-                aria-label="Add working directory or standalone session"
-                aria-haspopup="menu"
-                aria-expanded={projectMenuOpen}
-                disabled={sidebarActionsDisabled}
-                onClick={() => {
-                  setSidebarMenu(null);
-                  setProjectMenuOpen((current) => !current);
-                }}
-              >
-                <Icon name="plus" size={15} />
-              </button>
-            </div>
-            {sidebarMenu?.kind === "global" && (
-              <div className="sidebar-context-menu global-context-menu" role="menu" aria-label="Working directory actions">
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={workspaceGroups.length === 0}
-                  onClick={() => {
-                    toggleAllWorkspaceGroups();
-                    setSidebarMenu(null);
-                  }}
-                >
-                  <Icon name={allWorkspaceGroupsCollapsed ? "folder-open" : "folder"} size={14} />
-                  <span>{allWorkspaceGroupsCollapsed ? "Expand all" : "Collapse all"}</span>
-                </button>
-                {archivedSidebarSessions.length > 0 && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setArchivedOpen(true);
-                      setSidebarMenu(null);
-                    }}
-                  >
-                    <Icon name="archive" size={14} />
-                    <span>Show archived ({archivedSidebarSessions.length})</span>
-                  </button>
-                )}
-              </div>
-            )}
-            {projectMenuOpen && (
-              <div className="project-create-menu" role="menu" aria-label="Add to the sidebar">
-                <button type="button" role="menuitem" onClick={() => void startNewTask(null)}>
-                  <Icon name="plus" size={15} />
-                  <span>Start standalone session</span>
-                </button>
-                <button type="button" role="menuitem" onClick={() => void chooseAndAddWorkspace()}>
-                  <Icon name="folder" size={15} />
-                  <span>Add existing folder</span>
-                </button>
-              </div>
-            )}
+            <button
+              className="project-add-workspace"
+              type="button"
+              aria-label="Add working directory"
+              title="Add working directory"
+              disabled={sidebarActionsDisabled}
+              onClick={() => void chooseAndAddWorkspace()}
+            >
+              <Icon name="plus" size={15} />
+            </button>
           </div>
 
           {workspaceGroups.map((group) => {
@@ -2398,16 +2505,6 @@ function App() {
                   </button>
                   <div className="project-row-actions">
                     <button
-                      className="project-new-session"
-                      type="button"
-                      aria-label={`New session in ${workspaceName(group.path)}`}
-                      title={`New session in ${workspaceName(group.path)}`}
-                      disabled={sidebarActionsDisabled}
-                      onClick={() => void startNewTask(group.path)}
-                    >
-                      <Icon name="plus" size={15} />
-                    </button>
-                    <button
                       className="project-more"
                       type="button"
                       aria-label={`Actions for ${workspaceName(group.path)}`}
@@ -2422,6 +2519,16 @@ function App() {
                     >
                       <Icon name="dots" size={15} />
                     </button>
+                    <button
+                      className="project-new-session"
+                      type="button"
+                      aria-label={`New session in ${workspaceName(group.path)}`}
+                      title={`New session in ${workspaceName(group.path)}`}
+                      disabled={sidebarActionsDisabled}
+                      onClick={() => void startNewTask(group.path)}
+                    >
+                      <Icon name="plus" size={15} />
+                    </button>
                   </div>
                   {workspaceMenuOpen && (
                     <div className="sidebar-context-menu workspace-context-menu" role="menu" aria-label={`Actions for ${workspaceName(group.path)}`}>
@@ -2432,7 +2539,7 @@ function App() {
                         onClick={() => void mutateSessionHistory("archive", { workspace: group.path })}
                       >
                         <Icon name="archive" size={14} />
-                        <span>Archive all</span>
+                        <span>Archive all sessions</span>
                       </button>
                       <button
                         className="danger-menu-item"
@@ -2442,7 +2549,16 @@ function App() {
                         onClick={() => requestWorkspaceDelete(group.path)}
                       >
                         <Icon name="trash" size={14} />
-                        <span>Delete all</span>
+                        <span>Delete all sessions</span>
+                      </button>
+                      <button
+                        className="remove-workspace-menu-item"
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void removeWorkspace(group.path)}
+                      >
+                        <Icon name="folder-x" size={14} />
+                        <span>Remove from Groky</span>
                       </button>
                     </div>
                   )}
@@ -2677,6 +2793,18 @@ function App() {
         )}
 
         <form ref={composer} className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
+          {sessionLocationEditable && (
+            <div className="composer-session-context">
+              <SessionLocationSelector
+                value={workspace}
+                workspaces={workspaceGroups.map((group) => group.path)}
+                disabled={sidebarActionsDisabled}
+                onChange={selectPendingSessionLocation}
+                onAddWorkspace={chooseAndAddWorkspace}
+              />
+              <span className="session-location-hint">Change until the first message</span>
+            </div>
+          )}
           <div className="prompt-row">
             <span className="prompt-symbol" aria-hidden="true">❯</span>
             <textarea
@@ -2697,12 +2825,14 @@ function App() {
               locked={messages.length > 0}
               onChange={(nextMode) => void changeApprovalMode(nextMode)}
             />
-            <span className="local-chip"><span className="live-dot" />{workspace ? "cwd" : connection ? "standalone" : "on send"}</span>
+            {!sessionLocationEditable && (
+              <span className="local-chip"><span className="live-dot" />{workspace ? "cwd" : "standalone"}</span>
+            )}
             <span className="toolbar-spacer" />
             <ModelSelector
               connected={connection !== null}
               models={connection?.models ?? null}
-              busy={running || appUpdating || stage === "connecting"}
+              busy={running || appUpdating || stage === "connecting" || sessionLocationEditable}
               onLoad={loadModels}
               onChange={changeModel}
               onReasoningChange={changeReasoningEffort}

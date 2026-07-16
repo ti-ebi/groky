@@ -598,17 +598,24 @@ async fn grok_list_sessions(app: AppHandle) -> Result<Vec<SessionSummary>, Strin
 
 #[tauri::command]
 async fn grok_list_workspaces(app: AppHandle) -> Result<Vec<WorkspaceSummary>, String> {
+    let history_exists = tokio::fs::try_exists(workspace_history_path(&app)?)
+        .await
+        .map_err(|_| "Could not read Groky working directories.".to_string())?;
     let mut workspaces = read_workspace_history(&app).await?;
-    for session in read_session_history(&app).await? {
-        let Some(path) = session.workspace else {
-            continue;
-        };
-        if !workspaces.iter().any(|workspace| workspace.path == path) {
-            workspaces.push(PersistedWorkspace {
-                path,
-                created_at: session.created_at,
-            });
+    if !history_exists {
+        for session in read_session_history(&app).await? {
+            let Some(path) = session.workspace else {
+                continue;
+            };
+            upsert_workspace_history(
+                &mut workspaces,
+                PersistedWorkspace {
+                    path,
+                    created_at: session.created_at,
+                },
+            );
         }
+        write_workspace_history(&app, &workspaces).await?;
     }
     workspaces.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     Ok(workspaces
@@ -630,6 +637,24 @@ async fn grok_add_workspace(app: AppHandle, workspace: String) -> Result<Workspa
     let path = workspace_path.to_string_lossy().into_owned();
     persist_workspace(&app, &path).await?;
     Ok(WorkspaceSummary { path })
+}
+
+#[tauri::command]
+async fn grok_remove_workspace(
+    app: AppHandle,
+    workspace: String,
+) -> Result<Vec<WorkspaceSummary>, String> {
+    let mut workspaces = read_workspace_history(&app).await?;
+    if !remove_workspace_history(&mut workspaces, &workspace) {
+        return Err("This working directory is not in Groky.".to_string());
+    }
+    write_workspace_history(&app, &workspaces).await?;
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| WorkspaceSummary {
+            path: workspace.path,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1371,6 +1396,12 @@ fn upsert_workspace_history(
     }
 }
 
+fn remove_workspace_history(workspaces: &mut Vec<PersistedWorkspace>, path: &str) -> bool {
+    let original_len = workspaces.len();
+    workspaces.retain(|workspace| workspace.path != path);
+    workspaces.len() != original_len
+}
+
 async fn persist_workspace(app: &AppHandle, path: &str) -> Result<(), String> {
     let mut workspaces = read_workspace_history(app).await?;
     upsert_workspace_history(
@@ -1619,6 +1650,7 @@ pub fn run() {
             grok_list_sessions,
             grok_list_workspaces,
             grok_add_workspace,
+            grok_remove_workspace,
             grok_mutate_sessions,
             grok_connect,
             grok_load_session,
@@ -1637,9 +1669,10 @@ pub fn run() {
 mod tests {
     use super::{
         agent_capabilities, apply_session_history_action, extract_device_auth_code,
-        managed_workspace_name, parse_session_models, reasoning_effort_value, title_from_prompt,
-        upsert_session_history, upsert_workspace_history, ApprovalMode, PersistedSession,
-        PersistedWorkspace, SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
+        managed_workspace_name, parse_session_models, reasoning_effort_value,
+        remove_workspace_history, title_from_prompt, upsert_session_history,
+        upsert_workspace_history, ApprovalMode, PersistedSession, PersistedWorkspace,
+        SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
     };
     use chrono::{Local, TimeZone};
     use serde_json::json;
@@ -1798,6 +1831,31 @@ mod tests {
         assert_eq!(workspaces.len(), 2);
         assert_eq!(workspaces[0].path, "/workspace/first");
         assert_eq!(workspaces[1].path, "/workspace/second");
+    }
+
+    #[test]
+    fn working_directory_history_removes_only_the_selected_path() {
+        let mut workspaces = vec![
+            PersistedWorkspace {
+                path: "/workspace/first".to_string(),
+                created_at: 10,
+            },
+            PersistedWorkspace {
+                path: "/workspace/second".to_string(),
+                created_at: 20,
+            },
+        ];
+
+        assert!(remove_workspace_history(
+            &mut workspaces,
+            "/workspace/first"
+        ));
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].path, "/workspace/second");
+        assert!(!remove_workspace_history(
+            &mut workspaces,
+            "/workspace/missing"
+        ));
     }
 
     #[test]
