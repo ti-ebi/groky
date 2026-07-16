@@ -31,6 +31,7 @@
 - Do not access processes or the filesystem directly from the React renderer.
 - Run Grok Build only through the Tauri Rust host and its typed ACP boundary.
 - Do not persist prompts, source code, credentials, session data, or raw ACP traffic in application logs.
+- Write all user-facing UI text and host-provided error or status messages in English.
 
 ## Verification
 

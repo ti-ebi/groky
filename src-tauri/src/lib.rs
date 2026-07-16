@@ -131,15 +131,15 @@ async fn check_app_update(
     state: State<'_, AppUpdateRuntime>,
 ) -> Result<Option<AppUpdateInfo>, String> {
     if state.installing.load(Ordering::Acquire) {
-        return Err("アップデートをインストールしています。".to_string());
+        return Err("An update is already being installed.".to_string());
     }
 
     let update = app
         .updater()
-        .map_err(|error| format!("アップデートを準備できませんでした: {error}"))?
+        .map_err(|error| format!("Failed to prepare the updater: {error}"))?
         .check()
         .await
-        .map_err(|error| format!("アップデートを確認できませんでした: {error}"))?;
+        .map_err(|error| format!("Failed to check for updates: {error}"))?;
     let info = update.as_ref().map(AppUpdateInfo::from);
     *state.pending.lock().await = update;
     Ok(info)
@@ -156,12 +156,12 @@ async fn install_app_update(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return Err("アップデートをインストールしています。".to_string());
+        return Err("An update is already being installed.".to_string());
     }
 
     let result = async {
         if grok_prompt_active(&grok).await {
-            return Err("実行中のタスクを停止してからアップデートしてください。".to_string());
+            return Err("Stop the running task before updating.".to_string());
         }
 
         let update = state
@@ -169,7 +169,7 @@ async fn install_app_update(
             .lock()
             .await
             .clone()
-            .ok_or_else(|| "先にアップデートを確認してください。".to_string())?;
+            .ok_or_else(|| "Check for updates before installing one.".to_string())?;
 
         let _ = app.emit(
             "groky://update-progress",
@@ -208,10 +208,10 @@ async fn install_app_update(
                 },
             )
             .await
-            .map_err(|error| format!("アップデートをダウンロードできませんでした: {error}"))?;
+            .map_err(|error| format!("Failed to download the update: {error}"))?;
 
         if grok_prompt_active(&grok).await {
-            return Err("実行中のタスクを停止してからアップデートしてください。".to_string());
+            return Err("Stop the running task before updating.".to_string());
         }
 
         let package_size = bytes.len() as u64;
@@ -226,7 +226,7 @@ async fn install_app_update(
         disconnect_runtime(&grok).await;
         update
             .install(&bytes)
-            .map_err(|error| format!("アップデートをインストールできませんでした: {error}"))?;
+            .map_err(|error| format!("Failed to install the update: {error}"))?;
         Ok(())
     }
     .await;
@@ -265,7 +265,7 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
                 stage: "missingCli",
                 cli_version: None,
                 suggested_workspace,
-                message: Some("Grok Build CLIが見つかりません。".to_string()),
+                message: Some("Grok Build CLI was not found.".to_string()),
             })
         }
     };
@@ -321,12 +321,12 @@ async fn grok_login(app: AppHandle) -> Result<(), String> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| "Grokのサインインを開始できませんでした。".to_string())?;
+        .map_err(|_| "Failed to start Grok sign-in.".to_string())?;
 
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "Grokの認証案内を確認できませんでした。".to_string())?;
+        .ok_or_else(|| "Failed to read the Grok authentication instructions.".to_string())?;
     let reader = tauri::async_runtime::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         let mut code_emitted = false;
@@ -342,11 +342,11 @@ async fn grok_login(app: AppHandle) -> Result<(), String> {
 
     let result = match timeout(LOGIN_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(_)) => Err("Grokへのサインインが完了しませんでした。".to_string()),
-        Ok(Err(_)) => Err("Grokのサインイン結果を確認できませんでした。".to_string()),
+        Ok(Ok(_)) => Err("Grok sign-in did not complete.".to_string()),
+        Ok(Err(_)) => Err("Failed to read the Grok sign-in result.".to_string()),
         Err(_) => {
             let _ = child.kill().await;
-            Err("サインインがタイムアウトしました。もう一度お試しください。".to_string())
+            Err("Sign-in timed out. Please try again.".to_string())
         }
     };
     reader.abort();
@@ -367,13 +367,13 @@ async fn grok_logout(state: State<'_, GrokRuntime>) -> Result<(), String> {
             .status(),
     )
     .await
-    .map_err(|_| "サインアウトがタイムアウトしました。".to_string())?
-    .map_err(|_| "Grokからサインアウトできませんでした。".to_string())?;
+    .map_err(|_| "Sign-out timed out.".to_string())?
+    .map_err(|_| "Failed to sign out of Grok.".to_string())?;
 
     if status.success() {
         Ok(())
     } else {
-        Err("Grokからサインアウトできませんでした。".to_string())
+        Err("Failed to sign out of Grok.".to_string())
     }
 }
 
@@ -381,12 +381,12 @@ async fn grok_logout(state: State<'_, GrokRuntime>) -> Result<(), String> {
 async fn choose_workspace() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new()
-            .set_title("Grokyで開くワークスペースを選択")
+            .set_title("Select a workspace to open in Groky")
             .pick_folder()
             .map(|path| path.to_string_lossy().into_owned())
     })
     .await
-    .map_err(|_| "フォルダ選択を開けませんでした。".to_string())
+    .map_err(|_| "Failed to open the folder picker.".to_string())
 }
 
 #[tauri::command]
@@ -402,7 +402,7 @@ async fn reveal_working_directory(state: State<'_, GrokRuntime>) -> Result<(), S
         .await
         .as_ref()
         .map(|session| session.working_directory.clone())
-        .ok_or_else(|| "先にタスクを開始してください。".to_string())?;
+        .ok_or_else(|| "Start a task first.".to_string())?;
     open_directory(Path::new(&working_directory))
 }
 
@@ -415,9 +415,9 @@ async fn grok_connect(
     let (workspace_path, selected_workspace) = if let Some(workspace) = workspace {
         let workspace_path = PathBuf::from(&workspace)
             .canonicalize()
-            .map_err(|_| "選択したワークスペースを開けません。".to_string())?;
+            .map_err(|_| "Could not open the selected workspace.".to_string())?;
         if !workspace_path.is_dir() {
-            return Err("ワークスペースにはフォルダを選択してください。".to_string());
+            return Err("Select a folder for the workspace.".to_string());
         }
         let selected_workspace = workspace_path.to_string_lossy().into_owned();
         (workspace_path, Some(selected_workspace))
@@ -452,7 +452,7 @@ async fn grok_connect(
     let session_id = result
         .get("sessionId")
         .and_then(Value::as_str)
-        .ok_or_else(|| "Grok BuildがセッションIDを返しませんでした。".to_string())?
+        .ok_or_else(|| "Grok Build did not return a session ID.".to_string())?
         .to_string();
 
     let session = GrokSession {
@@ -493,7 +493,7 @@ async fn grok_prompt(
     prompt: String,
 ) -> Result<PromptResult, String> {
     if prompt.trim().is_empty() {
-        return Err("メッセージを入力してください。".to_string());
+        return Err("Enter a message.".to_string());
     }
 
     let session = state
@@ -501,14 +501,14 @@ async fn grok_prompt(
         .lock()
         .await
         .clone()
-        .ok_or_else(|| "Grok Buildに接続されていません。".to_string())?;
+        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
 
     if session
         .prompt_active
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return Err("前のリクエストがまだ実行中です。".to_string());
+        return Err("The previous request is still running.".to_string());
     }
 
     let result = session
@@ -535,7 +535,7 @@ async fn grok_cancel(state: State<'_, GrokRuntime>) -> Result<(), String> {
         .lock()
         .await
         .clone()
-        .ok_or_else(|| "Grok Buildに接続されていません。".to_string())?;
+        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
     session.transport.cancel(&session.session_id).await
 }
 
@@ -550,7 +550,7 @@ async fn grok_respond_permission(
         .lock()
         .await
         .clone()
-        .ok_or_else(|| "Grok Buildに接続されていません。".to_string())?;
+        .ok_or_else(|| "Not connected to Grok Build.".to_string())?;
     session
         .transport
         .respond_permission(&request_id, option_id.as_deref())
@@ -694,7 +694,7 @@ async fn resolve_cli() -> Result<CliInfo, String> {
         }
     }
 
-    Err("Grok Build CLIが見つかりません。".to_string())
+    Err("Grok Build CLI was not found.".to_string())
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -708,13 +708,13 @@ async fn create_managed_workspace(app: &AppHandle) -> Result<PathBuf, String> {
     let parent = app
         .path()
         .document_dir()
-        .map_err(|_| "Documentsフォルダを開けませんでした。".to_string())?
+        .map_err(|_| "Could not access the Documents folder.".to_string())?
         .join("Groky")
         .join(now.format("%Y-%m-%d").to_string());
 
     tokio::fs::create_dir_all(&parent)
         .await
-        .map_err(|_| "Grokyの作業ディレクトリを準備できません。".to_string())?;
+        .map_err(|_| "Failed to prepare the Groky working directory.".to_string())?;
 
     for _ in 0..100 {
         let sequence = MANAGED_WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -722,11 +722,11 @@ async fn create_managed_workspace(app: &AppHandle) -> Result<PathBuf, String> {
         match tokio::fs::create_dir(&candidate).await {
             Ok(()) => return Ok(candidate),
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err("Grokyの作業ディレクトリを準備できません。".to_string()),
+            Err(_) => return Err("Failed to prepare the Groky working directory.".to_string()),
         }
     }
 
-    Err("Grokyの作業ディレクトリを準備できません。".to_string())
+    Err("Failed to prepare the Groky working directory.".to_string())
 }
 
 fn managed_workspace_name(now: &DateTime<Local>, sequence: u64) -> String {
@@ -762,7 +762,7 @@ fn open_url(url: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|_| "インストールガイドを開けませんでした。".to_string())
+        .map_err(|_| "Failed to open the installation guide.".to_string())
 }
 
 fn open_directory(path: &Path) -> Result<(), String> {
@@ -789,7 +789,7 @@ fn open_directory(path: &Path) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|_| "作業フォルダを開けませんでした。".to_string())
+        .map_err(|_| "Failed to open the working folder.".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
