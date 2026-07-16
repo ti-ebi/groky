@@ -19,6 +19,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@fontsource-variable/sora/index.css";
 import "./App.css";
+import { MarkdownContent } from "./MarkdownContent";
+import { GlobalSearchDialog } from "./GlobalSearchDialog";
 
 type IconName =
   | "archive"
@@ -72,6 +74,7 @@ interface Connection {
   cliVersion: string;
   approvalMode: ApprovalMode;
   models: SessionModelState | null;
+  availableCommands: AvailableCommand[];
 }
 
 interface SessionModelState {
@@ -221,11 +224,32 @@ interface PlanEntry {
 }
 
 interface PermissionDecision {
+  requestId: string;
   toolCallId: string;
   title: string;
   label: string;
   outcome: "allowed" | "rejected" | "dismissed";
 }
+
+type TurnTimelineItem =
+  | {
+      id: string;
+      kind: "thought";
+      text: string;
+      open: boolean;
+      startedAt?: number;
+      elapsedMs?: number;
+    }
+  | { id: string; kind: "response"; text: string }
+  | { id: string; kind: "tool"; tool: ToolActivity }
+  | {
+      id: string;
+      kind: "permission";
+      requestId: string;
+      toolCallId: string;
+      title: string;
+      decision?: PermissionDecision;
+    };
 
 interface MessageAttachment {
   name: string;
@@ -243,14 +267,8 @@ interface ConversationMessage {
   text: string;
   startedAt?: number;
   elapsedMs?: number;
-  thought?: string;
-  thoughtActive?: boolean;
-  thoughtStartedAt?: number;
-  thoughtElapsedMs?: number;
-  tools?: ToolActivity[];
-  plan?: PlanEntry[];
+  timeline?: TurnTimelineItem[];
   attachments?: MessageAttachment[];
-  permissionDecisions?: PermissionDecision[];
   metrics?: TurnMetrics;
   stopReason?: StopReason;
   state?: ConversationState;
@@ -269,6 +287,7 @@ interface SessionViewState {
   currentModeId: string | null;
   configOptions: SessionConfigOption[];
   usage: SessionUsage | null;
+  plan: PlanEntry[];
 }
 
 interface ConversationTurnPreview {
@@ -285,6 +304,7 @@ interface SidebarSessionSummary {
   needsAttention: boolean;
   updatedAt: number;
   archived: boolean;
+  unread: boolean;
 }
 
 interface SidebarWorkspaceGroup {
@@ -298,6 +318,7 @@ interface PersistedSessionSummary {
   workspace: string | null;
   updatedAt: number;
   archived: boolean;
+  unread: boolean;
 }
 
 interface PersistedWorkspaceSummary {
@@ -331,16 +352,62 @@ interface AppUpdateInfo {
 }
 
 function finishThought(message: ConversationMessage, endedAt: number) {
-  if (!message.thoughtActive || message.thoughtStartedAt === undefined) {
-    return { ...message, thoughtActive: false, thoughtStartedAt: undefined };
-  }
-
+  const timeline = message.timeline?.flatMap((item) => {
+    if (item.kind !== "thought" || !item.open) return [item];
+    if (!item.text.trim()) return [];
+    return [{
+      ...item,
+      open: false,
+      startedAt: undefined,
+      elapsedMs: item.startedAt === undefined
+        ? item.elapsedMs
+        : (item.elapsedMs ?? 0) + Math.max(0, endedAt - item.startedAt),
+    }];
+  });
   return {
     ...message,
-    thoughtActive: false,
-    thoughtStartedAt: undefined,
-    thoughtElapsedMs: (message.thoughtElapsedMs ?? 0) + Math.max(0, endedAt - message.thoughtStartedAt),
+    timeline,
   };
+}
+
+function addFallbackThought(message: ConversationMessage, thought: string) {
+  if (!thought || message.timeline?.some((item) => item.kind === "thought")) return message;
+  return {
+    ...message,
+    timeline: [
+      { id: makeMessageId("thought"), kind: "thought" as const, text: thought, open: false },
+      ...(message.timeline ?? []),
+    ],
+  };
+}
+
+function reconcileFallbackResponse(message: ConversationMessage, text: string) {
+  const resolvedText = text || message.text;
+  if (!resolvedText) return message;
+
+  const timeline = [...(message.timeline ?? [])];
+  const responseIndexes = timeline.flatMap((item, index) => item.kind === "response" ? [index] : []);
+  if (responseIndexes.length === 0) {
+    timeline.push({ id: makeMessageId("response"), kind: "response", text: resolvedText });
+  } else if (resolvedText.startsWith(message.text) && resolvedText.length > message.text.length) {
+    const index = responseIndexes[responseIndexes.length - 1];
+    const response = timeline[index];
+    if (response.kind === "response") {
+      timeline[index] = { ...response, text: response.text + resolvedText.slice(message.text.length) };
+    }
+  }
+  return { ...message, text: resolvedText, timeline };
+}
+
+function cancelActiveTimelineTools(timeline: TurnTimelineItem[] | undefined) {
+  return timeline?.map((item) => item.kind === "tool"
+    ? {
+        ...item,
+        tool: item.tool.status === "pending" || item.tool.status === "in_progress"
+          ? { ...item.tool, status: "cancelled" as const }
+          : item.tool,
+      }
+    : item);
 }
 
 function finishRun(message: ConversationMessage, endedAt: number) {
@@ -383,6 +450,7 @@ type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "error
 type ApprovalMode = "ask" | "alwaysApprove";
 type AppView = "session" | "settings";
 type SettingsSection = "application" | "grok" | "account" | "archived";
+type ArchivedSessionSort = "updated-desc" | "updated-asc" | "title-asc" | "workspace-asc";
 
 interface ApprovalModeOption {
   id: ApprovalMode;
@@ -525,6 +593,18 @@ function workspaceName(path: string | null) {
   return parts[parts.length - 1] ?? path;
 }
 
+function sidebarSessionPriority(session: SidebarSessionSummary) {
+  if (session.needsAttention) return 0;
+  if (session.unread) return 1;
+  if (session.running) return 2;
+  return 3;
+}
+
+function compareSidebarSessions(left: SidebarSessionSummary, right: SidebarSessionSummary) {
+  return sidebarSessionPriority(left) - sidebarSessionPriority(right)
+    || right.updatedAt - left.updatedAt;
+}
+
 function groupSidebarSessions(sessions: SidebarSessionSummary[]) {
   const groups = new Map<string, SidebarSessionSummary[]>();
   const ungrouped: SidebarSessionSummary[] = [];
@@ -602,7 +682,7 @@ function SidebarSessionRow({
 
   return (
     <div
-      className={`session-row ${selected ? "selected" : ""} ${editing ? "editing" : ""}`}
+      className={`session-row ${selected ? "selected" : ""} ${editing ? "editing" : ""} ${session.unread ? "unread" : ""}`}
       data-sidebar-menu-root
       {...(editing ? { "data-session-rename-root": "" } : {})}
     >
@@ -646,6 +726,9 @@ function SidebarSessionRow({
             )}
             {session.needsAttention && (
               <span className="session-attention-indicator" aria-label="Needs approval">!</span>
+            )}
+            {session.unread && !session.needsAttention && !session.running && (
+              <span className="session-unread-indicator" aria-label="Unread" />
             )}
           </button>
           <div className="session-row-actions">
@@ -879,26 +962,43 @@ function applySessionUpdateToMessage(
   now: number,
 ): ConversationMessage {
   switch (update.kind) {
-    case "agent_message_chunk":
-      return { ...finishThought(message, now), text: message.text + update.text };
+    case "agent_message_chunk": {
+      const finished = finishThought(message, now);
+      const timeline = [...(finished.timeline ?? [])];
+      const last = timeline[timeline.length - 1];
+      if (last?.kind === "response") {
+        timeline[timeline.length - 1] = { ...last, text: last.text + update.text };
+      } else if (update.text) {
+        timeline.push({ id: makeMessageId("response"), kind: "response", text: update.text });
+      }
+      return { ...finished, text: message.text + update.text, timeline };
+    }
     case "agent_thought_chunk": {
-      const active = message.state === "streaming";
+      const timeline = [...(message.timeline ?? [])];
+      const last = timeline[timeline.length - 1];
+      if (last?.kind === "thought" && last.open) {
+        timeline[timeline.length - 1] = { ...last, text: last.text + update.text };
+      } else {
+        timeline.push({
+          id: makeMessageId("thought"),
+          kind: "thought",
+          text: update.text,
+          open: true,
+          startedAt: message.state === "streaming" ? now : undefined,
+        });
+      }
       return {
         ...message,
-        thought: (message.thought ?? "") + update.text,
-        thoughtActive: active,
-        thoughtStartedAt: active
-          ? message.thoughtActive ? message.thoughtStartedAt ?? now : now
-          : undefined,
+        timeline,
       };
     }
-    case "plan":
-      return { ...finishThought(message, now), plan: update.entries };
     case "tool_call":
     case "tool_call_update": {
-      const tools = [...(message.tools ?? [])];
-      const index = tools.findIndex((tool) => tool.id === update.toolCallId);
-      const existing = index >= 0 ? tools[index] : undefined;
+      const finished = finishThought(message, now);
+      const timeline = [...(finished.timeline ?? [])];
+      const toolIndex = timeline.findIndex((item) => item.kind === "tool" && item.tool.id === update.toolCallId);
+      const existingItem = toolIndex >= 0 ? timeline[toolIndex] : undefined;
+      const existing = existingItem?.kind === "tool" ? existingItem.tool : undefined;
       const nextTool: ToolActivity = {
         id: update.toolCallId,
         title: update.title ?? existing?.title ?? "Working with a local tool",
@@ -906,9 +1006,12 @@ function applySessionUpdateToMessage(
         status: update.status ?? existing?.status ?? "in_progress",
         locations: update.locations ?? existing?.locations ?? [],
       };
-      if (index >= 0) tools[index] = nextTool;
-      else tools.push(nextTool);
-      return { ...finishThought(message, now), tools };
+      if (toolIndex >= 0 && existingItem?.kind === "tool") {
+        timeline[toolIndex] = { ...existingItem, tool: nextTool };
+      } else {
+        timeline.push({ id: makeMessageId("tool"), kind: "tool", tool: nextTool });
+      }
+      return { ...finished, timeline };
     }
     case "turn_completed": {
       if (update.stopReason === "unknown") {
@@ -926,14 +1029,51 @@ function applySessionUpdateToMessage(
         error: state === "error" ? "Grok Build ended the turn for an unknown reason." : message.error,
       };
     }
-    case "permission_decision":
+    case "permission_requested": {
+      const finished = finishThought(message, now);
+      if (finished.timeline?.some((item) => item.kind === "permission" && item.requestId === update.requestId)) {
+        return finished;
+      }
       return {
-        ...message,
-        permissionDecisions: [
-          ...(message.permissionDecisions ?? []),
-          { toolCallId: update.toolCallId, title: update.title, label: update.label, outcome: update.outcome },
+        ...finished,
+        timeline: [
+          ...(finished.timeline ?? []),
+          {
+            id: makeMessageId("permission"),
+            kind: "permission",
+            requestId: update.requestId,
+            toolCallId: update.toolCallId,
+            title: update.title,
+          },
         ],
       };
+    }
+    case "permission_decision": {
+      const finished = finishThought(message, now);
+      const timeline = [...(finished.timeline ?? [])];
+      const decision: PermissionDecision = {
+        requestId: update.requestId,
+        toolCallId: update.toolCallId,
+        title: update.title,
+        label: update.label,
+        outcome: update.outcome,
+      };
+      const index = timeline.findIndex((item) => item.kind === "permission" && item.requestId === update.requestId);
+      if (index >= 0) {
+        const permission = timeline[index];
+        if (permission.kind === "permission") timeline[index] = { ...permission, decision };
+      } else {
+        timeline.push({
+          id: makeMessageId("permission"),
+          kind: "permission",
+          requestId: update.requestId,
+          toolCallId: update.toolCallId,
+          title: update.title,
+          decision,
+        });
+      }
+      return { ...finished, timeline };
+    }
     default:
       return message;
   }
@@ -948,6 +1088,7 @@ interface SessionReplayProjection {
   title: string | null;
   updatedAt: number | null;
   permissions: PermissionRequest[];
+  plan: PlanEntry[];
 }
 
 function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): SessionReplayProjection {
@@ -959,6 +1100,7 @@ function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): S
   let title: string | null = null;
   let updatedAt: number | null = null;
   let permissions: PermissionRequest[] = [];
+  let plan: PlanEntry[] = [];
   const currentAssistant = () => {
     const last = messages[messages.length - 1];
     if (last?.role === "assistant") return last;
@@ -1004,6 +1146,10 @@ function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): S
       usage = { used: update.used, size: update.size, cost: update.cost };
       return;
     }
+    if (update.kind === "plan") {
+      plan = update.entries;
+      return;
+    }
     if (update.kind === "session_info_update") {
       if (update.title) title = update.title;
       if (update.updatedAt) {
@@ -1025,6 +1171,8 @@ function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): S
         ...permissions.filter((entry) => entry.requestId !== permission.requestId),
         permission,
       ];
+      const assistant = currentAssistant();
+      Object.assign(assistant, applySessionUpdateToMessage(assistant, update, Date.now()));
       return;
     }
     if (update.kind === "permission_decision") {
@@ -1038,7 +1186,7 @@ function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): S
     Object.assign(assistant, applySessionUpdateToMessage(assistant, update, Date.now()));
   });
 
-  return { messages, availableCommands, currentModeId, configOptions, usage, title, updatedAt, permissions };
+  return { messages, availableCommands, currentModeId, configOptions, usage, title, updatedAt, permissions, plan };
 }
 
 function previewText(text: string, limit: number) {
@@ -1179,6 +1327,51 @@ async function copyToClipboard(text: string) {
     textarea.remove();
     activeElement?.focus({ preventScroll: true });
   }
+}
+
+function MessageCopyButton({ text, subject }: { text: string; subject: "request" | "response" }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const resetTimer = useRef<number | null>(null);
+  const buttonLabel = copyState === "copied"
+    ? `${subject === "request" ? "Request" : "Response"} copied`
+    : copyState === "error"
+      ? `Retry copying ${subject}`
+      : `Copy ${subject}`;
+
+  useEffect(() => {
+    setCopyState("idle");
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+    return () => {
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+    };
+  }, [text]);
+
+  async function copyMessage() {
+    try {
+      await copyToClipboard(text);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+
+    if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+    resetTimer.current = window.setTimeout(() => setCopyState("idle"), 2200);
+  }
+
+  return (
+    <button
+      className={`message-copy-button ${copyState}`}
+      type="button"
+      aria-label={buttonLabel}
+      title={buttonLabel}
+      onClick={() => void copyMessage()}
+    >
+      <Icon name={copyState === "copied" ? "check" : "copy"} size={12} />
+      <span className="message-copy-status" aria-live="polite">
+        {copyState === "copied" ? "Copied" : copyState === "error" ? "Copy failed" : ""}
+      </span>
+    </button>
+  );
 }
 
 function Onboarding({
@@ -1439,6 +1632,33 @@ const SETTINGS_SECTIONS: Array<{
   { id: "archived", label: "Archived chats", description: "Restore or delete archived chats" },
 ];
 
+const ARCHIVED_SESSION_COLLATOR = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
+
+function normalizeArchivedSearchValue(value: string) {
+  return value.normalize("NFKC").toLocaleLowerCase();
+}
+
+function archivedSessionSearchText(session: SidebarSessionSummary) {
+  return normalizeArchivedSearchValue([
+    session.title,
+    session.workspace ? workspaceName(session.workspace) : "Standalone",
+    session.workspace ?? "No working directory",
+  ].join(" "));
+}
+
+function formatArchivedUpdatedAt(timestamp: number) {
+  const date = new Date(timestamp);
+  const includeYear = date.getFullYear() !== new Date().getFullYear();
+  return `Updated ${new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    ...(includeYear ? { year: "numeric" } : {}),
+  }).format(date)}`;
+}
+
 function SettingsSidebar({
   overlayTitlebar,
   section,
@@ -1527,9 +1747,39 @@ function SettingsScreen({
   onRestoreArchived: (sessionId: string) => void;
   onDeleteArchived: (session: SidebarSessionSummary) => void;
 }) {
+  const [archivedQuery, setArchivedQuery] = useState("");
+  const [archivedSort, setArchivedSort] = useState<ArchivedSessionSort>("updated-desc");
   const checkingForUpdates = updatePhase === "checking";
   const updating = updatePhase === "downloading";
   const activeSection = SETTINGS_SECTIONS.find((option) => option.id === section) ?? SETTINGS_SECTIONS[0];
+  const visibleArchivedSessions = useMemo(() => {
+    const tokens = normalizeArchivedSearchValue(archivedQuery).trim().split(/\s+/).filter(Boolean);
+    const matchingSessions = archivedSessions.filter((session) => {
+      if (tokens.length === 0) return true;
+      const searchable = archivedSessionSearchText(session);
+      return tokens.every((token) => searchable.includes(token));
+    });
+
+    return [...matchingSessions].sort((left, right) => {
+      const titleOrder = ARCHIVED_SESSION_COLLATOR.compare(left.title, right.title);
+      const leftWorkspace = left.workspace ? workspaceName(left.workspace) : "Standalone";
+      const rightWorkspace = right.workspace ? workspaceName(right.workspace) : "Standalone";
+
+      switch (archivedSort) {
+        case "updated-asc":
+          return left.updatedAt - right.updatedAt || titleOrder;
+        case "title-asc":
+          return titleOrder || right.updatedAt - left.updatedAt;
+        case "workspace-asc":
+          return ARCHIVED_SESSION_COLLATOR.compare(leftWorkspace, rightWorkspace)
+            || titleOrder
+            || right.updatedAt - left.updatedAt;
+        case "updated-desc":
+        default:
+          return right.updatedAt - left.updatedAt || titleOrder;
+      }
+    });
+  }, [archivedQuery, archivedSessions, archivedSort]);
   const updateButtonLabel = checkingForUpdates
     ? "Checking…"
     : updating
@@ -1655,35 +1905,89 @@ function SettingsScreen({
               </div>
             </header>
             {archivedSessions.length > 0 ? (
-              <div className="archived-settings-list">
-                {archivedSessions.map((session) => (
-                  <div className="archived-settings-row" key={session.sessionId}>
-                    <span className="archived-settings-icon"><Icon name="archive" size={14} /></span>
-                    <span className="archived-settings-copy">
-                      <strong>{session.title}</strong>
-                      <small>{session.workspace ? workspaceName(session.workspace) : "Standalone"}</small>
-                    </span>
-                    <span className="archived-settings-actions">
-                      <button
-                        type="button"
-                        disabled={archivedActionsDisabled}
-                        onClick={() => onRestoreArchived(session.sessionId)}
-                      >
-                        <Icon name="refresh" size={13} />
-                        Restore
+              <div className="archived-settings-browser">
+                <div className="archived-settings-controls">
+                  <div className="archived-settings-search">
+                    <Icon name="search" size={14} />
+                    <input
+                      type="search"
+                      value={archivedQuery}
+                      aria-label="Search archived chats"
+                      placeholder="Search archived chats"
+                      onChange={(event) => setArchivedQuery(event.target.value)}
+                    />
+                    {archivedQuery && (
+                      <button type="button" aria-label="Clear archived chat search" onClick={() => setArchivedQuery("")}>
+                        <Icon name="x" size={12} />
                       </button>
-                      <button
-                        className="archived-delete"
-                        type="button"
-                        aria-label={`Delete ${session.title}`}
-                        disabled={archivedActionsDisabled}
-                        onClick={() => onDeleteArchived(session)}
-                      >
-                        <Icon name="trash" size={13} />
-                      </button>
-                    </span>
+                    )}
                   </div>
-                ))}
+                  <label className="archived-settings-sort">
+                    <Icon name="sliders" size={13} />
+                    <select
+                      aria-label="Sort archived chats"
+                      value={archivedSort}
+                      onChange={(event) => setArchivedSort(event.target.value as ArchivedSessionSort)}
+                    >
+                      <option value="updated-desc">Recently updated</option>
+                      <option value="updated-asc">Least recently updated</option>
+                      <option value="title-asc">Title A–Z</option>
+                      <option value="workspace-asc">Workspace A–Z</option>
+                    </select>
+                    <Icon name="chevron-down" size={11} />
+                  </label>
+                  <span className="archived-settings-count" role="status" aria-live="polite">
+                    {archivedQuery.trim()
+                      ? `${visibleArchivedSessions.length} of ${archivedSessions.length} chats`
+                      : `${archivedSessions.length} ${archivedSessions.length === 1 ? "chat" : "chats"}`}
+                  </span>
+                </div>
+
+                {visibleArchivedSessions.length > 0 ? (
+                  <div className="archived-settings-list">
+                    {visibleArchivedSessions.map((session) => (
+                      <div className="archived-settings-row" key={session.sessionId}>
+                        <span className="archived-settings-icon"><Icon name="archive" size={14} /></span>
+                        <span className="archived-settings-copy">
+                          <strong>{session.title}</strong>
+                          <small>
+                            <span title={session.workspace ?? "No working directory"}>
+                              {session.workspace ? workspaceName(session.workspace) : "Standalone"}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <time dateTime={new Date(session.updatedAt).toISOString()}>{formatArchivedUpdatedAt(session.updatedAt)}</time>
+                          </small>
+                        </span>
+                        <span className="archived-settings-actions">
+                          <button
+                            type="button"
+                            disabled={archivedActionsDisabled}
+                            onClick={() => onRestoreArchived(session.sessionId)}
+                          >
+                            <Icon name="refresh" size={13} />
+                            Restore
+                          </button>
+                          <button
+                            className="archived-delete"
+                            type="button"
+                            aria-label={`Delete ${session.title}`}
+                            disabled={archivedActionsDisabled}
+                            onClick={() => onDeleteArchived(session)}
+                          >
+                            <Icon name="trash" size={13} />
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="archived-settings-empty archived-settings-no-results">
+                    <Icon name="search" size={17} />
+                    <strong>No matching chats</strong>
+                    <p>Try a title, workspace name, or working directory.</p>
+                    <button type="button" onClick={() => setArchivedQuery("")}>Clear search</button>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="archived-settings-empty">
@@ -2010,6 +2314,7 @@ function App() {
   const overlayTitlebar = usesOverlayTitlebar();
   const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "" } : {};
   const sidebarShortcutLabel = isMacOS() ? "⌘B" : "Ctrl+B";
+  const searchShortcutLabel = isMacOS() ? "⌘K" : "Ctrl+K";
   const [stage, setStage] = useState<OnboardingStage>("checking");
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [sessionViews, setSessionViews] = useState<Record<string, SessionViewState>>({});
@@ -2042,6 +2347,7 @@ function App() {
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -2049,6 +2355,9 @@ function App() {
   const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
   const [historyMutating, setHistoryMutating] = useState(false);
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
+  const [commandSuggestionsOpen, setCommandSuggestionsOpen] = useState(true);
+  const [activeCommandSuggestion, setActiveCommandSuggestion] = useState(0);
+  const commandSuggestionsId = useId();
   const activeSessionIdRef = useRef<string | null>(null);
   const activeAssistantIds = useRef<Map<string, string>>(new Map());
   const sessionViewsRef = useRef(sessionViews);
@@ -2056,6 +2365,7 @@ function App() {
   const conversation = useRef<HTMLElement | null>(null);
   const composer = useRef<HTMLFormElement | null>(null);
   const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
+  const commandSuggestionsList = useRef<HTMLDivElement | null>(null);
   const updateCheckInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
@@ -2067,17 +2377,41 @@ function App() {
   const attachments = activeSession?.attachments ?? pendingAttachments;
   const running = activeSession?.running ?? false;
   const permission = activeSession?.permissions[0] ?? null;
+  const plan = activeSession?.plan ?? [];
   const activeSessionLoading = activeSessionId !== null && loadingSessionIds.has(activeSessionId);
   const anySessionRunning = Object.values(sessionViews).some((session) => session.running);
   const sessionTransitioning = activeSessionLoading || stage === "connecting";
   const commandSuggestions = useMemo(() => {
+    if (!commandSuggestionsOpen) return [];
     const match = draft.match(/^\/([^\s]*)$/);
     if (!match) return [];
     const query = match[1].toLocaleLowerCase();
     return (activeSession?.availableCommands ?? [])
       .filter((command) => command.name.toLocaleLowerCase().includes(query))
-      .slice(0, 6);
-  }, [activeSession?.availableCommands, draft]);
+      .sort((left, right) => {
+        if (!query) return 0;
+        const leftStartsWith = left.name.toLocaleLowerCase().startsWith(query);
+        const rightStartsWith = right.name.toLocaleLowerCase().startsWith(query);
+        return Number(rightStartsWith) - Number(leftStartsWith);
+      })
+      .slice(0, 8);
+  }, [activeSession?.availableCommands, commandSuggestionsOpen, draft]);
+
+  useEffect(() => {
+    setActiveCommandSuggestion(0);
+  }, [activeSessionId, draft]);
+
+  useEffect(() => {
+    setCommandSuggestionsOpen(true);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (commandSuggestions.length === 0) return;
+    const selected = commandSuggestionsList.current?.querySelector<HTMLElement>(
+      `[data-command-index="${activeCommandSuggestion}"]`,
+    );
+    selected?.scrollIntoView({ block: "nearest" });
+  }, [activeCommandSuggestion, commandSuggestions.length]);
 
   function updateSessionView(
     sessionId: string,
@@ -2128,6 +2462,7 @@ function App() {
   }
 
   function setDraft(next: string) {
+    setCommandSuggestionsOpen(true);
     const sessionId = activeSessionIdRef.current;
     if (sessionId) {
       updateSessionView(sessionId, (session) => ({ ...session, draft: next }));
@@ -2147,6 +2482,13 @@ function App() {
 
   function activateSession(sessionId: string | null) {
     activeSessionIdRef.current = sessionId;
+    if (sessionId) {
+      setSessionHistory((current) => current.map((session) =>
+        session.sessionId === sessionId && session.unread
+          ? { ...session, unread: false }
+          : session
+      ));
+    }
     setSessionViews(sessionViewsRef.current);
     setActiveSessionId(sessionId);
     if (isTauri()) {
@@ -2158,6 +2500,7 @@ function App() {
     nextConnection: Connection,
     nextMessages?: ConversationMessage[],
     replay?: SessionReplayProjection,
+    initialComposer?: { draft: string; attachments: FileAttachment[] },
   ) {
     const current = sessionViewsRef.current;
     const existing = current[nextConnection.sessionId];
@@ -2167,14 +2510,17 @@ function App() {
         connection: nextConnection,
         disconnected: false,
         messages: nextMessages ?? existing?.messages ?? [],
-        draft: existing?.draft ?? "",
-        attachments: existing?.attachments ?? [],
+        draft: existing?.draft ?? initialComposer?.draft ?? "",
+        attachments: existing?.attachments ?? initialComposer?.attachments ?? [],
         running: existing?.running ?? false,
         permissions: replay ? replay.permissions : existing?.permissions ?? [],
-        availableCommands: replay?.availableCommands ?? existing?.availableCommands ?? [],
+        availableCommands: replay?.availableCommands
+          ?? existing?.availableCommands
+          ?? nextConnection.availableCommands,
         currentModeId: replay?.currentModeId ?? existing?.currentModeId ?? null,
         configOptions: replay?.configOptions ?? existing?.configOptions ?? [],
         usage: replay?.usage ?? existing?.usage ?? null,
+        plan: replay?.plan ?? existing?.plan ?? [],
       },
     };
     sessionViewsRef.current = next;
@@ -2198,7 +2544,7 @@ function App() {
     ...session,
     running: sessionViews[session.sessionId]?.running ?? false,
     needsAttention: (sessionViews[session.sessionId]?.permissions.length ?? 0) > 0,
-  }));
+  })).sort(compareSidebarSessions);
   const trackedWorkspacePaths = new Set(workspaceHistory.map((entry) => entry.path));
   const visibleSidebarSessions = sidebarSessions.filter((session) =>
     session.workspace === null || trackedWorkspacePaths.has(session.workspace)
@@ -2348,6 +2694,31 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const handleSearchShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "k") return;
+      event.preventDefault();
+      if (globalSearchOpen) {
+        setGlobalSearchOpen(false);
+        return;
+      }
+      if ((stage !== "ready" && stage !== "connected") || deleteConfirmation) return;
+      setShowConnection(false);
+      setSidebarMenu(null);
+      setEditingSessionId(null);
+      setGlobalSearchOpen(true);
+    };
+
+    window.addEventListener("keydown", handleSearchShortcut);
+    return () => window.removeEventListener("keydown", handleSearchShortcut);
+  }, [deleteConfirmation, globalSearchOpen, stage]);
+
+  useEffect(() => {
+    if ((stage !== "ready" && stage !== "connected") || deleteConfirmation) {
+      setGlobalSearchOpen(false);
+    }
+  }, [deleteConfirmation, stage]);
+
+  useEffect(() => {
     if (!sidebarMenu) return;
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -2439,6 +2810,14 @@ function App() {
   function toggleSidebar() {
     if (!sidebarCollapsed) setShowConnection(false);
     setSidebarCollapsed((current) => !current);
+  }
+
+  function openGlobalSearch() {
+    if ((stage !== "ready" && stage !== "connected") || deleteConfirmation) return;
+    setShowConnection(false);
+    setSidebarMenu(null);
+    setEditingSessionId(null);
+    setGlobalSearchOpen(true);
   }
 
   function toggleWorkspaceGroup(path: string) {
@@ -2596,6 +2975,11 @@ function App() {
           updateSessionView(payload.sessionId, (session) => ({
             ...session,
             usage: { used: payload.used, size: payload.size, cost: payload.cost },
+          }));
+        } else if (payload.kind === "plan") {
+          updateSessionView(payload.sessionId, (session) => ({
+            ...session,
+            plan: payload.entries,
           }));
         } else if (payload.kind === "session_info_update") {
           const parsedUpdatedAt = payload.updatedAt ? Date.parse(payload.updatedAt) : Number.NaN;
@@ -2873,6 +3257,7 @@ function App() {
     targetWorkspace: string | null = workspace,
     clearConversation = false,
     targetApprovalMode: ApprovalMode = approvalMode,
+    initialComposer?: { draft: string; attachments: FileAttachment[] },
   ) {
     setSetupError(null);
     setConnectionNotice(null);
@@ -2883,7 +3268,7 @@ function App() {
         workspace: targetWorkspace,
         approvalMode: targetApprovalMode,
       });
-      upsertSessionView(next, clearConversation ? [] : undefined);
+      upsertSessionView(next, clearConversation ? [] : undefined, undefined, initialComposer);
       activateSession(next.sessionId);
       setWorkspace(next.workspace);
       setApprovalMode(next.approvalMode);
@@ -3305,6 +3690,7 @@ function App() {
               ? titleFromPrompt(prompt || sentAttachments[0].name)
               : session.title,
             updatedAt: Date.now(),
+            unread: false,
           }
         : session)
       .sort((left, right) => right.updatedAt - left.updatedAt));
@@ -3315,11 +3701,19 @@ function App() {
       text: prompt,
       attachments: sentAttachments.map(({ name, size, mimeType }) => ({ name, size, mimeType })),
     };
+    const startedAt = Date.now();
     const assistantMessage: ConversationMessage = {
       id: makeMessageId("assistant"),
       role: "assistant",
       text: "",
-      startedAt: Date.now(),
+      startedAt,
+      timeline: [{
+        id: makeMessageId("thought"),
+        kind: "thought",
+        text: "",
+        open: true,
+        startedAt,
+      }],
       state: "streaming",
     };
     const sessionId = activeConnection.sessionId;
@@ -3342,10 +3736,12 @@ function App() {
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === assistantMessage.id ? (() => {
           const state = stateFromStopReason(result.stopReason);
+          const finished = reconcileFallbackResponse(
+            addFallbackThought(finishRun(message, endedAt), result.thought),
+            result.text,
+          );
           return {
-            ...finishRun(message, endedAt),
-            text: result.text || message.text,
-            thought: result.thought || message.thought,
+            ...finished,
             state,
             stopReason: result.stopReason,
             error: state === "error" ? "Grok Build ended the turn for an unknown reason." : message.error,
@@ -3362,6 +3758,10 @@ function App() {
     } finally {
       setSessionRunning(sessionId, false);
       activeAssistantIds.current.delete(sessionId);
+      const unread = activeSessionIdRef.current !== sessionId;
+      setSessionHistory((current) => current.map((session) => session.sessionId === sessionId
+        ? { ...session, unread }
+        : session));
       void refreshSessionHistory();
     }
   }
@@ -3369,15 +3769,65 @@ function App() {
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
 
+    if (commandSuggestions.length > 0) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        setActiveCommandSuggestion((current) => (
+          current + direction + commandSuggestions.length
+        ) % commandSuggestions.length);
+        return;
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        setActiveCommandSuggestion(event.key === "Home" ? 0 : commandSuggestions.length - 1);
+        return;
+      }
+      if ((event.key === "Enter" && !event.shiftKey) || (event.key === "Tab" && !event.shiftKey)) {
+        event.preventDefault();
+        selectAvailableCommand(commandSuggestions[activeCommandSuggestion] ?? commandSuggestions[0]);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setCommandSuggestionsOpen(false);
+        return;
+      }
+    }
+
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
   }
 
+  function handleComposerChange(nextDraft: string) {
+    setDraft(nextDraft);
+    const requestsCommandSuggestions = /^\/[^\s]*$/.test(nextDraft);
+    if (
+      requestsCommandSuggestions
+      && !connection
+      && !connectionTransitioning.current
+      && !running
+      && !appUpdating
+      && !activeSessionLoading
+    ) {
+      void connect(workspace, false, approvalMode, {
+        draft: nextDraft,
+        attachments,
+      });
+    }
+  }
+
   function selectAvailableCommand(command: AvailableCommand) {
-    setDraft(`/${command.name} `);
-    window.requestAnimationFrame(() => composerTextarea.current?.focus());
+    const nextDraft = `/${command.name}${command.inputHint ? " " : ""}`;
+    setDraft(nextDraft);
+    setCommandSuggestionsOpen(false);
+    window.requestAnimationFrame(() => {
+      const textarea = composerTextarea.current;
+      textarea?.focus();
+      textarea?.setSelectionRange(nextDraft.length, nextDraft.length);
+    });
   }
 
   async function cancelRun() {
@@ -3389,14 +3839,15 @@ function App() {
       const endedAt = Date.now();
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === messageId
-          ? {
-              ...finishRun(message, endedAt),
-              state: "cancelled",
-              stopReason: "cancelled",
-              tools: message.tools?.map((tool) => tool.status === "pending" || tool.status === "in_progress"
-                ? { ...tool, status: "cancelled" }
-                : tool),
-            }
+          ? (() => {
+              const finished = finishRun(message, endedAt);
+              return {
+                ...finished,
+                state: "cancelled" as const,
+                stopReason: "cancelled" as const,
+                timeline: cancelActiveTimelineTools(finished.timeline),
+              };
+            })()
           : message
       ));
     } catch (error) {
@@ -3496,6 +3947,7 @@ function App() {
     <>
       <div
         className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${activeView === "settings" ? "settings-open" : ""} ${activeView === "session" && sidebarCollapsed ? "sidebar-collapsed" : ""}`}
+        inert={globalSearchOpen}
         style={{
           "--sidebar-width": `${sidebarWidth}px`,
           ...(overlayTitlebar && nativeTitlebarHeight !== null
@@ -3518,7 +3970,17 @@ function App() {
 
         <div className="brand-row">
           <Brand />
-          <button className="icon-button dimmed" type="button" aria-label="Search" disabled><Icon name="search" size={18} /></button>
+          <button
+            className="icon-button brand-search"
+            type="button"
+            aria-label="Search sessions and actions"
+            aria-haspopup="dialog"
+            aria-expanded={globalSearchOpen}
+            title={`Search sessions and actions (${searchShortcutLabel})`}
+            onClick={openGlobalSearch}
+          >
+            <Icon name="search" size={18} />
+          </button>
         </div>
 
         <nav className="primary-nav" aria-label="Primary">
@@ -3812,17 +4274,6 @@ function App() {
           <div className="task-actions">
             <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : sessionTransitioning ? "Loading session" : "Signed in"}</span>
             {connection && <span className="branch-button"><Icon name="branch" /><span>local</span></span>}
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Connection settings"
-              aria-haspopup="dialog"
-              aria-expanded={showConnection}
-              data-connection-popover-root
-              onClick={() => setShowConnection((current) => !current)}
-            >
-              <Icon name="sliders" />
-            </button>
           </div>
         </header>
 
@@ -3895,6 +4346,7 @@ function App() {
         )}
 
         <form ref={composer} className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
+          {plan.length > 0 && <PlanBlock entries={plan} active={running} />}
           {sessionLocationEditable && (
             <div className="composer-session-context">
               <SessionLocationSelector
@@ -3929,13 +4381,28 @@ function App() {
             </div>
           )}
           {commandSuggestions.length > 0 && (
-            <div className="command-suggestions" role="menu" aria-label="Available Grok commands">
-              <span className="command-suggestions-label">COMMANDS</span>
-              {commandSuggestions.map((command) => (
+            <div
+              ref={commandSuggestionsList}
+              className="command-suggestions"
+              id={commandSuggestionsId}
+              role="listbox"
+              aria-label="Available Grok commands"
+            >
+              <div className="command-suggestions-heading">
+                <span className="command-suggestions-label">COMMANDS</span>
+                <small>{commandSuggestions.length} available</small>
+              </div>
+              {commandSuggestions.map((command, index) => (
                 <button
                   type="button"
-                  role="menuitem"
+                  role="option"
+                  id={`${commandSuggestionsId}-option-${index}`}
                   key={command.name}
+                  data-command-index={index}
+                  aria-selected={index === activeCommandSuggestion}
+                  tabIndex={-1}
+                  onPointerMove={() => setActiveCommandSuggestion(index)}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() => selectAvailableCommand(command)}
                 >
                   <code>/{command.name}</code>
@@ -3943,6 +4410,11 @@ function App() {
                   {command.inputHint && <small>{command.inputHint}</small>}
                 </button>
               ))}
+              <div className="command-suggestions-help" aria-hidden="true">
+                <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+                <span><kbd>Enter</kbd> choose</span>
+                <span><kbd>Esc</kbd> close</span>
+              </div>
             </div>
           )}
           <div className="prompt-row">
@@ -3951,8 +4423,14 @@ function App() {
               ref={composerTextarea}
               aria-label="Session prompt"
               value={draft}
-              onChange={(event) => setDraft(event.target.value)}
+              onChange={(event) => handleComposerChange(event.target.value)}
               onKeyDown={handleComposerKeyDown}
+              aria-autocomplete="list"
+              aria-controls={commandSuggestions.length > 0 ? commandSuggestionsId : undefined}
+              aria-expanded={commandSuggestions.length > 0}
+              aria-activedescendant={commandSuggestions.length > 0
+                ? `${commandSuggestionsId}-option-${activeCommandSuggestion}`
+                : undefined}
               placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : sessionTransitioning ? "Loading session…" : "Ask Groky to build, debug, or review"}
               rows={2}
               disabled={running || appUpdating || sessionTransitioning}
@@ -3999,6 +4477,29 @@ function App() {
         )}
       </main>
       </div>
+      <GlobalSearchDialog
+        open={globalSearchOpen}
+        sessions={activeSidebarSessions}
+        activeSessionId={activeSessionId}
+        archivedCount={archivedSidebarSessions.length}
+        actionsDisabled={sidebarActionsDisabled}
+        shortcutLabel={searchShortcutLabel}
+        onClose={() => setGlobalSearchOpen(false)}
+        onSelectSession={(sessionId) => {
+          const session = sessionHistory.find((entry) => entry.sessionId === sessionId);
+          if (session) void loadSession(session);
+        }}
+        onNewSession={() => void startNewTask()}
+        onAddWorkspace={() => void chooseAndAddWorkspace()}
+        onOpenSettings={() => {
+          setActiveSettingsSection("application");
+          setActiveView("settings");
+        }}
+        onOpenArchived={() => {
+          setActiveSettingsSection("archived");
+          setActiveView("settings");
+        }}
+      />
       {deleteConfirmation && (
         <div
           className="history-confirm-backdrop"
@@ -4035,7 +4536,7 @@ function App() {
 }
 
 function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active: boolean; elapsedMs?: number }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(active);
   const contentId = useId();
   const label = active
     ? "Thinking…"
@@ -4043,8 +4544,14 @@ function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active:
       ? "Thought"
       : `Thought for ${formatThoughtDuration(elapsedMs)}`;
 
+  useEffect(() => {
+    setOpen(active);
+  }, [active]);
+
+  if (!active && !thought.trim()) return null;
+
   return (
-    <div className="thought-block" data-open={open}>
+    <div className="thought-block" data-active={active} data-open={open}>
       <button
         className="thought-heading"
         type="button"
@@ -4055,14 +4562,14 @@ function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active:
         <span className="thought-label"><Icon name="chevron-down" size={13} /><span>{label}</span></span>
       </button>
       <div className="thought-content" id={contentId} aria-hidden={!open}>
-        <div><p>{thought}</p></div>
+        <div>{thought && <p>{thought}</p>}</div>
       </div>
     </div>
   );
 }
 
 function PlanBlock({ entries, active }: { entries: PlanEntry[]; active: boolean }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(active);
   const contentId = useId();
   const current = entries.find((entry) => entry.status === "in_progress")
     ?? entries.find((entry) => entry.status === "pending");
@@ -4070,6 +4577,11 @@ function PlanBlock({ entries, active }: { entries: PlanEntry[]; active: boolean 
   const summary = active && current
     ? current.content
     : `${completed}/${entries.length} plan steps complete`;
+
+  useEffect(() => {
+    if (active) setOpen(true);
+    else if (completed === entries.length) setOpen(false);
+  }, [active, completed, entries.length]);
 
   return (
     <div className="progress-disclosure plan-disclosure" data-open={open}>
@@ -4100,76 +4612,205 @@ function formatTokenCount(value: number) {
   return new Intl.NumberFormat("en", { notation: value >= 10_000 ? "compact" : "standard" }).format(value);
 }
 
-function ActivityBlock({
-  tools,
-  active,
-  metrics,
-  elapsedMs,
-}: {
+type ToolVerbGroupKind = "file" | "skill" | "pattern" | "dir" | "web_fetch" | "web_search" | "memory" | "integration";
+
+type ProjectedTimelineItem = TurnTimelineItem | {
+  id: string;
+  kind: "tool_group";
   tools: ToolActivity[];
-  active: boolean;
-  metrics?: TurnMetrics;
-  elapsedMs?: number;
-}) {
+};
+
+type ResponseTimelineItem = Extract<ProjectedTimelineItem, { kind: "response" }>;
+type TraceTimelineItem = Exclude<ProjectedTimelineItem, ResponseTimelineItem>;
+type TimelineSection =
+  | { id: string; kind: "response"; item: ResponseTimelineItem }
+  | { id: string; kind: "trace"; items: TraceTimelineItem[] };
+
+function toolVerbGroupKind(tool: ToolActivity): ToolVerbGroupKind | null {
+  const title = tool.title.toLocaleLowerCase();
+  if (tool.kind === "read") return /(?:^|[\\/])skills?(?:[\\/]|$)|skill\.md/.test(title) ? "skill" : "file";
+  if (tool.kind === "fetch") return "web_fetch";
+  if (tool.kind === "search") return /\b(web|x)\s*search\b|search(?:ing)? the web/.test(title) ? "web_search" : "pattern";
+  if (/\b(list[_ -]?dir|list directory|listing directory)\b/.test(title)) return "dir";
+  if (/\b(memory[_ -]?search|search(?:ing)? memor)/.test(title)) return "memory";
+  if (/\b(search[_ -]?tool|integration search|search(?:ing)? mcp)/.test(title)) return "integration";
+  if (/\b(skill|skill\.md)\b/.test(title)) return "skill";
+  return null;
+}
+
+function projectTimeline(timeline: TurnTimelineItem[]): ProjectedTimelineItem[] {
+  const projected: ProjectedTimelineItem[] = [];
+  timeline.forEach((item) => {
+    if (item.kind !== "tool" || toolVerbGroupKind(item.tool) === null) {
+      projected.push(item);
+      return;
+    }
+    const last = projected[projected.length - 1];
+    if (last?.kind === "tool_group") {
+      last.tools.push(item.tool);
+      return;
+    }
+    projected.push({ id: `tool-group-${item.id}`, kind: "tool_group", tools: [item.tool] });
+  });
+  return projected;
+}
+
+function sectionTimeline(timeline: ProjectedTimelineItem[]): TimelineSection[] {
+  const sections: TimelineSection[] = [];
+  timeline.forEach((item) => {
+    if (item.kind === "response") {
+      sections.push({ id: item.id, kind: "response", item });
+      return;
+    }
+    const last = sections[sections.length - 1];
+    if (last?.kind === "trace") {
+      last.items.push(item);
+      return;
+    }
+    sections.push({ id: `trace-${item.id}`, kind: "trace", items: [item] });
+  });
+  return sections;
+}
+
+const TOOL_GROUP_WORDS: Record<ToolVerbGroupKind, { past: string; present: string; one: string; many: string }> = {
+  file: { past: "Read", present: "Reading", one: "file", many: "files" },
+  skill: { past: "Read", present: "Reading", one: "skill", many: "skills" },
+  pattern: { past: "Searched", present: "Searching", one: "pattern", many: "patterns" },
+  dir: { past: "Listed", present: "Listing", one: "dir", many: "dirs" },
+  web_fetch: { past: "Fetched", present: "Fetching", one: "website", many: "websites" },
+  web_search: { past: "Searched", present: "Searching", one: "website", many: "websites" },
+  memory: { past: "Searched", present: "Searching", one: "memory", many: "memories" },
+  integration: { past: "Searched", present: "Searching", one: "MCP tool", many: "MCP tools" },
+};
+
+function toolGroupSummary(tools: ToolActivity[]) {
+  const running = tools.some((tool) => tool.status === "pending" || tool.status === "in_progress");
+  const buckets = new Map<ToolVerbGroupKind, number>();
+  tools.forEach((tool) => {
+    const kind = toolVerbGroupKind(tool);
+    if (kind) buckets.set(kind, (buckets.get(kind) ?? 0) + 1);
+  });
+  const summary = Array.from(buckets, ([kind, count]) => {
+    const words = TOOL_GROUP_WORDS[kind];
+    return `${running ? words.present : words.past} ${count} ${count === 1 ? words.one : words.many}`;
+  });
+  const failed = tools.filter((tool) => tool.status === "failed").length;
+  const cancelled = tools.filter((tool) => tool.status === "cancelled").length;
+  if (failed) summary.push(`${failed} failed`);
+  if (cancelled) summary.push(`${cancelled} cancelled`);
+  return summary.join(", ");
+}
+
+function ToolDetailRow({ tool }: { tool: ToolActivity }) {
+  return (
+    <div className={`activity-row ${tool.status}`}>
+      <span className="activity-icon">
+        {tool.status === "completed"
+          ? <Icon name="check" size={13} />
+          : tool.status === "failed" || tool.status === "cancelled"
+            ? <Icon name="x" size={13} />
+            : <Icon name="terminal" size={13} />}
+      </span>
+      <span className="activity-copy">
+        <strong>{tool.title}</strong>
+        {tool.locations && tool.locations.length > 0 && (
+          <small>{tool.locations.map((location) => fileNameFromPath(location.path)).join(", ")}</small>
+        )}
+      </span>
+      <span className="activity-detail">{tool.status.replace(/_/g, " ")}</span>
+    </div>
+  );
+}
+
+function ToolGroupBlock({ tools }: { tools: ToolActivity[] }) {
   const failed = tools.filter((tool) => tool.status === "failed");
   const cancelled = tools.filter((tool) => tool.status === "cancelled");
   const interrupted = failed.length + cancelled.length;
   const [open, setOpen] = useState(interrupted > 0);
   const contentId = useId();
-  const locations = Array.from(new Set(tools.flatMap((tool) => tool.locations?.map((location) => location.path) ?? [])));
-  const latest = [...tools].reverse().find((tool) => tool.status === "in_progress" || tool.status === "pending")
-    ?? tools[tools.length - 1];
 
   useEffect(() => {
     if (interrupted > 0) setOpen(true);
   }, [interrupted]);
 
-  const summaryParts = active && latest
-    ? [latest.title, tools.length > 1 ? `${tools.length} actions` : null]
-    : [
-        tools.length > 0 ? `${tools.length} ${tools.length === 1 ? "action" : "actions"}` : null,
-        locations.length > 0 ? `${locations.length} ${locations.length === 1 ? "file" : "files"}` : null,
-        failed.length > 0 ? `${failed.length} failed` : null,
-        cancelled.length > 0 ? `${cancelled.length} cancelled` : null,
-      ];
-  const metadata = [
-    metrics?.totalTokens !== undefined && metrics.totalTokens !== null
-      ? `${formatTokenCount(metrics.totalTokens)} tokens`
-      : null,
-    metrics?.modelCalls !== undefined && metrics.modelCalls !== null
-      ? `${metrics.modelCalls} ${metrics.modelCalls === 1 ? "model call" : "model calls"}`
-      : null,
-    metrics?.apiDurationMs !== undefined && metrics.apiDurationMs !== null
-      ? `${formatDuration(metrics.apiDurationMs)} API time`
-      : null,
-  ].filter(Boolean).join(" · ");
-
   return (
-    <div className={`progress-disclosure activity-disclosure ${interrupted > 0 ? "has-failure" : ""}`} data-open={open}>
+    <div className={`progress-disclosure tool-group-disclosure ${interrupted > 0 ? "has-failure" : ""}`} data-open={open}>
       <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
-        <span className="progress-disclosure-label"><Icon name="chevron-down" size={13} /> ACTIVITY</span>
-        <span className="progress-disclosure-summary">{summaryParts.filter(Boolean).join(" · ") || "Turn details"}</span>
-        {elapsedMs !== undefined && <small>{formatDuration(elapsedMs)}</small>}
+        <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
+        <span className="progress-disclosure-summary">{toolGroupSummary(tools)}</span>
       </button>
       <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
         <div>
-          {tools.map((tool) => (
-            <div className={`activity-row ${tool.status}`} key={tool.id}>
-              <span className="activity-icon">
-                {tool.status === "completed" ? <Icon name="check" size={13} /> : <Icon name="terminal" size={13} />}
-              </span>
-              <span className="activity-copy">
-                <strong>{tool.title}</strong>
-                {tool.locations && tool.locations.length > 0 && (
-                  <small>{tool.locations.map((location) => fileNameFromPath(location.path)).join(", ")}</small>
-                )}
-              </span>
-              <span className="activity-detail">{tool.status.replace(/_/g, " ")}</span>
-            </div>
-          ))}
-          {metadata && <p className="activity-metadata">{metadata}</p>}
+          {tools.map((tool) => <ToolDetailRow tool={tool} key={tool.id} />)}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ToolBlock({ tool }: { tool: ToolActivity }) {
+  const interrupted = tool.status === "failed" || tool.status === "cancelled";
+  const [open, setOpen] = useState(interrupted);
+  const contentId = useId();
+  const statusLabel = tool.status.replace(/_/g, " ");
+
+  useEffect(() => {
+    if (interrupted) setOpen(true);
+  }, [interrupted]);
+
+  return (
+    <div
+      className={`progress-disclosure tool-call-disclosure ${tool.status}`}
+      data-open={open}
+    >
+      <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
+        <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
+        <span className="progress-disclosure-summary">{tool.title}</span>
+        <span className="trace-status" aria-label={statusLabel} title={statusLabel}>
+          {tool.status === "completed"
+            ? <Icon name="check" size={12} />
+            : interrupted
+              ? <Icon name="x" size={12} />
+              : <span className="trace-status-pulse" />}
+        </span>
+      </button>
+      <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
+        <div className="tool-call-detail">
+          <code>{tool.title}</code>
+          <div>
+            <span>{statusLabel}</span>
+            {tool.locations && tool.locations.length > 0 && (
+              <small>{tool.locations.map((location) => fileNameFromPath(location.path)).join(", ")}</small>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TurnStatusBlock({ message }: { message: ConversationMessage }) {
+  if (!message.state || message.state === "streaming") return null;
+  const duration = message.elapsedMs === undefined ? null : formatDuration(message.elapsedMs);
+  const status = message.state === "cancelled"
+    ? duration ? `Turn cancelled by user in ${duration}.` : "Turn cancelled by user."
+    : message.state === "refused"
+      ? "Grok declined this request."
+      : message.state === "limited"
+        ? message.stopReason === "max_tokens" ? "Stopped at the token limit." : "Stopped at the turn limit."
+        : message.state === "error"
+          ? message.error ?? (duration ? `Turn failed in ${duration}.` : "Turn failed.")
+          : duration ? `Worked for ${duration}.` : "Turn completed.";
+  const metadata = [
+    message.metrics?.totalTokens != null ? `${formatTokenCount(message.metrics.totalTokens)} tokens` : null,
+    message.metrics?.modelCalls != null
+      ? `${message.metrics.modelCalls} ${message.metrics.modelCalls === 1 ? "model call" : "model calls"}`
+      : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <div className={`turn-status ${message.state}`}>
+      <span>{status}</span>
+      {metadata && <small>{metadata}</small>}
     </div>
   );
 }
@@ -4178,7 +4819,10 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
   if (message.role === "user") {
     return (
       <div className="user-message" data-history-message-id={message.id}>
-        <span className="message-kicker">REQUEST</span>
+        <div className="user-message-heading">
+          <span className="message-kicker">REQUEST</span>
+          {message.text && <MessageCopyButton text={message.text} subject="request" />}
+        </div>
         {message.text && <div className="user-message-copy">{message.text}</div>}
         {message.attachments && message.attachments.length > 0 && (
           <div className="message-attachments" aria-label="Attached files">
@@ -4195,69 +4839,68 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
     );
   }
 
-  const duration = message.elapsedMs === undefined ? null : formatDuration(message.elapsedMs);
-  const runStatus = message.state === "streaming"
-    ? "Working…"
-    : message.state === "cancelled"
-      ? duration ? `Turn cancelled by user in ${duration}.` : "Turn cancelled by user."
-      : message.state === "refused"
-        ? "Grok declined this request."
-        : message.state === "limited"
-          ? message.stopReason === "max_tokens" ? "Stopped at the token limit." : "Stopped at the turn limit."
-      : message.state === "error"
-        ? duration ? `Turn failed in ${duration}.` : "Turn failed."
-        : message.state === "historical" ? "Recorded turn." : "Turn completed.";
-  const showRunHeading = message.state === "streaming"
-    || message.state === "cancelled"
-    || message.state === "refused"
-    || message.state === "limited"
-    || message.state === "error";
-  const hasActivity = Boolean(message.tools?.length);
+  const sourceTimeline = message.timeline ?? [];
+  const timeline = sourceTimeline.some((item) => item.kind === "response") || !message.text
+    ? sourceTimeline
+    : [...sourceTimeline, { id: `${message.id}-response`, kind: "response" as const, text: message.text }];
+  const projectedTimeline = projectTimeline(timeline);
+  const timelineSections = sectionTimeline(projectedTimeline);
+  const lastResponseId = [...timeline].reverse().find((item) => item.kind === "response")?.id;
 
   return (
     <article className={`assistant-turn ${message.state ?? "complete"}`}>
-      {showRunHeading && (
-        <div className="run-heading">
-          <span className="run-diamond">◆</span>
-          <span>{runStatus}</span>
-          <span className="run-line" />
-        </div>
-      )}
+      {timelineSections.map((section) => {
+        if (section.kind === "response") {
+          const item = section.item;
+          return (
+            <div className="assistant-response" key={item.id}>
+              <div className="response-copy"><MarkdownContent>{item.text}</MarkdownContent></div>
+              {item.id === lastResponseId && (
+                <div className="assistant-message-actions">
+                  <MessageCopyButton text={message.text || item.text} subject="response" />
+                </div>
+              )}
+            </div>
+          );
+        }
+        const items = section.items.filter((item) => {
+          if (item.kind === "thought") {
+            return Boolean(item.text.trim()) || (message.state === "streaming" && item.open);
+          }
+          return item.kind !== "permission" || item.decision !== undefined;
+        });
+        if (items.length === 0) return null;
+        return (
+          <div className="turn-trace" role="group" aria-label="Execution trace" key={section.id}>
+            {items.map((item) => {
+              if (item.kind === "thought") {
+                return (
+                  <ThoughtBlock
+                    key={item.id}
+                    thought={item.text}
+                    active={message.state === "streaming" && item.open}
+                    elapsedMs={item.elapsedMs}
+                  />
+                );
+              }
+              if (item.kind === "tool_group") {
+                return <ToolGroupBlock key={item.id} tools={item.tools} />;
+              }
+              if (item.kind === "tool") return <ToolBlock key={item.id} tool={item.tool} />;
+              if (!item.decision) return null;
+              return (
+                <div className={`permission-decision ${item.decision.outcome}`} key={item.id}>
+                  <Icon name={item.decision.outcome === "allowed" ? "check" : "x"} size={13} />
+                  <span>{item.decision.label}</span>
+                  <small>{item.decision.title}</small>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
 
-      {message.state !== "streaming" && message.text && <div className="response-copy">{message.text}</div>}
-
-      {message.thought && (
-        <ThoughtBlock
-          thought={message.thought}
-          active={message.thoughtActive === true}
-          elapsedMs={message.thoughtElapsedMs}
-        />
-      )}
-
-      {message.plan && message.plan.length > 0 && (
-        <PlanBlock entries={message.plan} active={message.state === "streaming"} />
-      )}
-
-      {hasActivity && (
-        <ActivityBlock
-          tools={message.tools ?? []}
-          active={message.state === "streaming"}
-          metrics={message.metrics}
-          elapsedMs={message.elapsedMs}
-        />
-      )}
-
-      {message.permissionDecisions?.map((decision, index) => (
-        <div className={`permission-decision ${decision.outcome}`} key={`${decision.title}-${index}`}>
-          <Icon name={decision.outcome === "allowed" ? "check" : "x"} size={13} />
-          <span>{decision.label}</span>
-          <small>{decision.title}</small>
-        </div>
-      ))}
-
-      {message.state === "streaming" && message.text && <div className="response-copy">{message.text}</div>}
-      {message.state === "streaming" && !message.text && <div className="response-skeleton"><i /><i /><i /></div>}
-      {message.error && <p className="message-error">{message.error}</p>}
+      <TurnStatusBlock message={message} />
     </article>
   );
 }

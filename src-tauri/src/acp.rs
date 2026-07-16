@@ -23,6 +23,8 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_SESSION_ID_CHARS: usize = 256;
 const MAX_TOOL_CALL_ID_CHARS: usize = 256;
 const MAX_PERMISSION_OPTION_ID_CHARS: usize = 160;
+const COMMANDS_LIST_METHOD: &str = "_x.ai/commands/list";
+const SESSION_INFO_METHOD: &str = "_x.ai/session/info";
 
 type PendingResponse = oneshot::Sender<Result<Value, String>>;
 type PendingResponses = HashMap<u64, PendingResponse>;
@@ -155,7 +157,7 @@ struct SafePlanEntry {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct SafeAvailableCommand {
+pub(crate) struct SafeAvailableCommand {
     name: String,
     description: String,
     input_hint: Option<String>,
@@ -528,6 +530,51 @@ impl AcpTransport {
             .get(session_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub async fn available_commands(
+        &self,
+        session_id: &str,
+        cwd: Option<&str>,
+    ) -> Vec<SafeAvailableCommand> {
+        let fallback = self
+            .request_with_timeout(
+                COMMANDS_LIST_METHOD,
+                json!({ "cwd": cwd }),
+                Duration::from_secs(5),
+            )
+            .await
+            .map(|response| safe_available_commands(response.get("commands")))
+            .unwrap_or_default();
+        self.session_updates
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|updates| {
+                updates
+                    .iter()
+                    .rev()
+                    .find_map(|update| match &update.update {
+                        SessionUpdatePayload::AvailableCommandsUpdate { available_commands } => {
+                            Some(available_commands.clone())
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap_or(fallback)
+    }
+
+    pub async fn context_report(&self, session_id: &str) -> Result<String, String> {
+        let response = self
+            .request_with_timeout(
+                SESSION_INFO_METHOD,
+                json!({ "sessionId": session_id }),
+                Duration::from_secs(5),
+            )
+            .await?;
+
+        format_context_report(&response)
+            .ok_or_else(|| "Grok Build did not return context information.".to_string())
     }
 
     async fn request_with_timeout(
@@ -1127,28 +1174,7 @@ fn sanitize_session_update(params: &Value) -> Option<SessionUpdateEvent> {
                 .unwrap_or_default(),
         },
         "available_commands_update" => SessionUpdatePayload::AvailableCommandsUpdate {
-            available_commands: update
-                .get("availableCommands")
-                .and_then(Value::as_array)
-                .map(|commands| {
-                    commands
-                        .iter()
-                        .filter_map(|command| {
-                            Some(SafeAvailableCommand {
-                                name: limited_required_string(command.get("name")?, 120)?,
-                                description: limited_required_string(
-                                    command.get("description")?,
-                                    500,
-                                )?,
-                                input_hint: limited_optional_string(
-                                    command.get("input").and_then(|input| input.get("hint")),
-                                    240,
-                                ),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            available_commands: safe_available_commands(update.get("availableCommands")),
         },
         "current_mode_update" => SessionUpdatePayload::CurrentModeUpdate {
             current_mode_id: limited_required_string(update.get("currentModeId")?, 120)?,
@@ -1173,6 +1199,27 @@ fn sanitize_session_update(params: &Value) -> Option<SessionUpdateEvent> {
     };
 
     Some(SessionUpdateEvent::new(&session_id, payload))
+}
+
+fn safe_available_commands(value: Option<&Value>) -> Vec<SafeAvailableCommand> {
+    value
+        .and_then(Value::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| {
+                    Some(SafeAvailableCommand {
+                        name: limited_required_string(command.get("name")?, 120)?,
+                        description: limited_required_string(command.get("description")?, 500)?,
+                        input_hint: limited_optional_string(
+                            command.get("input").and_then(|input| input.get("hint")),
+                            240,
+                        ),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn sanitize_grok_session_update(params: &Value) -> Option<SessionUpdateEvent> {
@@ -1370,6 +1417,77 @@ fn metric_u64(value: &Value, camel_case: &str, snake_case: &str) -> Option<u64> 
         .and_then(Value::as_u64)
 }
 
+fn grouped_number(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(character);
+    }
+    grouped
+}
+
+fn format_context_report(response: &Value) -> Option<String> {
+    let session_info = response.get("result").unwrap_or(response);
+    let context = session_info.get("context")?;
+    if !context.is_object() {
+        return None;
+    }
+
+    let used = metric_u64(context, "used", "used").unwrap_or_default();
+    let total = metric_u64(context, "total", "total").unwrap_or_default();
+    let usage_pct = metric_u64(context, "usagePct", "usage_pct")
+        .unwrap_or_else(|| {
+            if total == 0 {
+                0
+            } else {
+                ((u128::from(used) * 100) / u128::from(total)) as u64
+            }
+        })
+        .min(100);
+    let free_tokens = metric_u64(context, "freeTokens", "free_tokens")
+        .unwrap_or_else(|| total.saturating_sub(used));
+    let system_prompt_tokens =
+        metric_u64(context, "systemPromptTokens", "system_prompt_tokens").unwrap_or_default();
+    let tool_definitions_count =
+        metric_u64(context, "toolDefinitionsCount", "tool_definitions_count").unwrap_or_default();
+    let tool_definitions_tokens =
+        metric_u64(context, "toolDefinitionsTokens", "tool_definitions_tokens").unwrap_or_default();
+    let message_count = metric_u64(context, "messageCount", "message_count").unwrap_or_default();
+    let message_tokens = metric_u64(context, "messageTokens", "message_tokens").unwrap_or_default();
+    let turn_count = metric_u64(context, "turnCount", "turn_count").unwrap_or_default();
+    let tool_call_count =
+        metric_u64(context, "toolCallCount", "tool_call_count").unwrap_or_default();
+    let compaction_count =
+        metric_u64(context, "compactionCount", "compaction_count").unwrap_or_default();
+    let auto_compact_threshold = metric_u64(
+        context,
+        "autoCompactThresholdPercent",
+        "auto_compact_threshold_percent",
+    )
+    .unwrap_or(85)
+    .min(100);
+
+    Some(format!(
+        "## Context\n\n**{} / {} tokens used ({}%)**\n\n- Remaining: ~{} tokens\n- System prompt: {} tokens\n- Tool definitions: {} tokens across {} tools\n- Conversation: {} tokens across {} messages\n- Turns: {}\n- Tool calls: {}\n- Compactions: {}\n- Auto-compact threshold: {}%",
+        grouped_number(used),
+        grouped_number(total),
+        usage_pct,
+        grouped_number(free_tokens),
+        grouped_number(system_prompt_tokens),
+        grouped_number(tool_definitions_tokens),
+        grouped_number(tool_definitions_count),
+        grouped_number(message_tokens),
+        grouped_number(message_count),
+        grouped_number(turn_count),
+        grouped_number(tool_call_count),
+        grouped_number(compaction_count),
+        auto_compact_threshold,
+    ))
+}
+
 pub(crate) fn normalize_stop_reason(value: &str) -> String {
     match value {
         "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" => {
@@ -1459,6 +1577,82 @@ fn capture_session_update(updates: &mut SessionUpdates, update: &SessionUpdateEv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_extension_methods_use_the_acp_wire_prefix() {
+        assert_eq!(COMMANDS_LIST_METHOD, "_x.ai/commands/list");
+        assert_eq!(SESSION_INFO_METHOD, "_x.ai/session/info");
+    }
+
+    #[test]
+    fn formats_context_info_extension_response_for_the_chat() {
+        let response = json!({
+            "result": {
+                "sessionId": "session-1",
+                "cwd": "/workspace",
+                "context": {
+                    "used": 12345,
+                    "total": 256000,
+                    "systemPromptTokens": 1500,
+                    "toolDefinitionsCount": 21,
+                    "toolDefinitionsTokens": 4300,
+                    "compactionCount": 2,
+                    "turnCount": 7,
+                    "toolCallCount": 11,
+                    "messageCount": 18,
+                    "messageTokens": 6545,
+                    "freeTokens": 243655,
+                    "usagePct": 5,
+                    "autoCompactThresholdPercent": 85
+                }
+            }
+        });
+
+        assert_eq!(
+            format_context_report(&response).as_deref(),
+            Some(
+                "## Context\n\n**12,345 / 256,000 tokens used (5%)**\n\n- Remaining: ~243,655 tokens\n- System prompt: 1,500 tokens\n- Tool definitions: 4,300 tokens across 21 tools\n- Conversation: 6,545 tokens across 18 messages\n- Turns: 7\n- Tool calls: 11\n- Compactions: 2\n- Auto-compact threshold: 85%"
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_context_info_without_a_context_payload() {
+        assert!(format_context_report(&json!({ "result": {} })).is_none());
+        assert!(format_context_report(&json!({
+            "result": { "context": "malformed" }
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn sanitizes_pulled_slash_command_catalog() {
+        let payload = json!([
+            {
+                "name": "review",
+                "description": "Review the current changes",
+                "input": { "hint": "optional focus" }
+            },
+            { "name": "compact", "description": "Compact the session" },
+            { "name": 42, "description": "invalid" }
+        ]);
+
+        assert_eq!(
+            safe_available_commands(Some(&payload)),
+            vec![
+                SafeAvailableCommand {
+                    name: "review".to_string(),
+                    description: "Review the current changes".to_string(),
+                    input_hint: Some("optional focus".to_string()),
+                },
+                SafeAvailableCommand {
+                    name: "compact".to_string(),
+                    description: "Compact the session".to_string(),
+                    input_hint: None,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn approval_modes_build_explicit_session_arguments() {

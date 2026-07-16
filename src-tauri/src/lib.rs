@@ -1,7 +1,8 @@
 mod acp;
 
 use acp::{
-    normalize_stop_reason, AcpTransport, ApprovalMode, PromptResourceLink, SessionUpdateEvent,
+    normalize_stop_reason, AcpTransport, ApprovalMode, PromptResourceLink, SafeAvailableCommand,
+    SessionUpdateEvent,
 };
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,7 @@ struct GrokSession {
     cli_version: String,
     approval_mode: ApprovalMode,
     models: Option<SessionModelState>,
+    available_commands: Vec<SafeAvailableCommand>,
     prompt_active: Arc<AtomicBool>,
 }
 
@@ -101,6 +103,7 @@ struct ConnectResult {
     cli_version: String,
     approval_mode: ApprovalMode,
     models: Option<SessionModelState>,
+    available_commands: Vec<SafeAvailableCommand>,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +122,7 @@ impl From<&GrokSession> for ConnectResult {
             cli_version: session.cli_version.clone(),
             approval_mode: session.approval_mode,
             models: session.models.clone(),
+            available_commands: session.available_commands.clone(),
         }
     }
 }
@@ -135,6 +139,8 @@ struct PersistedSession {
     updated_at: i64,
     #[serde(default)]
     archived: bool,
+    #[serde(default)]
+    unread: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +151,7 @@ struct SessionSummary {
     workspace: Option<String>,
     updated_at: i64,
     archived: bool,
+    unread: bool,
 }
 
 impl From<&PersistedSession> for SessionSummary {
@@ -155,6 +162,7 @@ impl From<&PersistedSession> for SessionSummary {
             workspace: session.workspace.clone(),
             updated_at: session.updated_at,
             archived: session.archived,
+            unread: session.unread,
         }
     }
 }
@@ -1039,6 +1047,7 @@ async fn grok_connect(
             return Err(error);
         }
     };
+    let available_commands = transport.available_commands(&session_id, Some(&cwd)).await;
 
     let session = GrokSession {
         transport,
@@ -1048,6 +1057,7 @@ async fn grok_connect(
         cli_version: cli.version.clone(),
         approval_mode,
         models: models.clone(),
+        available_commands,
         prompt_active: Arc::new(AtomicBool::new(false)),
     };
 
@@ -1152,6 +1162,9 @@ async fn grok_load_session(
     let (result, updates) = transport.load_session(&persisted.session_id, &cwd).await?;
     let models = parse_session_models(&result)?;
 
+    let available_commands = transport
+        .available_commands(&persisted.session_id, Some(&cwd))
+        .await;
     let session = GrokSession {
         transport,
         session_id: persisted.session_id.clone(),
@@ -1160,6 +1173,7 @@ async fn grok_load_session(
         cli_version: cli.version.clone(),
         approval_mode: persisted.approval_mode,
         models: models.clone(),
+        available_commands,
         prompt_active: Arc::new(AtomicBool::new(false)),
     };
     {
@@ -1212,10 +1226,18 @@ async fn grok_deactivate_session(
 
 #[tauri::command]
 async fn grok_activate_session(
+    app: AppHandle,
     state: State<'_, GrokRuntime>,
     session_id: Option<String>,
 ) -> Result<(), String> {
-    state.inner.lock().await.active_session_id = session_id;
+    let Some(session_id) = session_id else {
+        state.inner.lock().await.active_session_id = None;
+        return Ok(());
+    };
+
+    let _history = state.history.lock().await;
+    state.inner.lock().await.active_session_id = Some(session_id.clone());
+    update_persisted_session_unread(&app, &session_id, false).await?;
     Ok(())
 }
 
@@ -1264,9 +1286,22 @@ async fn grok_prompt(
         .transport
         .prompt(&session.session_id, &prompt, &resources)
         .await;
+    let context_report = if result
+        .as_ref()
+        .is_ok_and(|(_, output)| output.text.trim().is_empty())
+        && is_context_slash_command(&prompt)
+    {
+        Some(session.transport.context_report(&session.session_id).await)
+    } else {
+        None
+    };
     session.prompt_active.store(false, Ordering::Release);
+    let _ = persist_prompt_completion_unread(&app, &state, &session_id).await;
 
-    let (result, output) = result?;
+    let (result, mut output) = result?;
+    if let Some(context_report) = context_report {
+        output.text = context_report?;
+    }
     Ok(PromptResult {
         stop_reason: normalize_stop_reason(
             result
@@ -1277,6 +1312,13 @@ async fn grok_prompt(
         text: output.text,
         thought: output.thought,
     })
+}
+
+fn is_context_slash_command(prompt: &str) -> bool {
+    prompt
+        .strip_prefix('/')
+        .and_then(|command| command.split_whitespace().next())
+        == Some("context")
 }
 
 #[tauri::command]
@@ -1743,6 +1785,42 @@ fn upsert_session_history(sessions: &mut Vec<PersistedSession>, session: Persist
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 }
 
+fn set_session_unread(sessions: &mut [PersistedSession], session_id: &str, unread: bool) -> bool {
+    let Some(session) = sessions
+        .iter_mut()
+        .find(|session| session.session_id == session_id)
+    else {
+        return false;
+    };
+    if session.unread == unread {
+        return false;
+    }
+    session.unread = unread;
+    true
+}
+
+async fn update_persisted_session_unread(
+    app: &AppHandle,
+    session_id: &str,
+    unread: bool,
+) -> Result<(), String> {
+    let mut sessions = read_session_history(app).await?;
+    if set_session_unread(&mut sessions, session_id, unread) {
+        write_session_history(app, &sessions).await?;
+    }
+    Ok(())
+}
+
+async fn persist_prompt_completion_unread(
+    app: &AppHandle,
+    state: &GrokRuntime,
+    session_id: &str,
+) -> Result<(), String> {
+    let _history = state.history.lock().await;
+    let unread = state.inner.lock().await.active_session_id.as_deref() != Some(session_id);
+    update_persisted_session_unread(app, session_id, unread).await
+}
+
 fn session_matches_history_target(
     session: &PersistedSession,
     session_id: Option<&str>,
@@ -1833,6 +1911,7 @@ async fn persist_new_session(app: &AppHandle, session: &GrokSession) -> Result<(
             created_at: now,
             updated_at: now,
             archived: false,
+            unread: false,
         },
     );
     write_session_history(app, &sessions).await?;
@@ -1879,6 +1958,7 @@ async fn touch_persisted_session(
             created_at,
             updated_at: now,
             archived,
+            unread: false,
         },
     );
     write_session_history(app, &sessions).await
@@ -2016,14 +2096,26 @@ pub fn run() {
 mod tests {
     use super::{
         agent_capabilities, apply_session_history_action, attachment_resource_links,
-        extract_device_auth_code, inspect_attachment_paths, managed_workspace_name,
-        normalize_session_title, parse_session_models, reasoning_effort_value,
-        remove_workspace_history, rename_session_title, title_from_prompt, upsert_session_history,
-        upsert_workspace_history, ApprovalMode, PersistedSession, PersistedWorkspace,
-        SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
+        extract_device_auth_code, inspect_attachment_paths, is_context_slash_command,
+        managed_workspace_name, normalize_session_title, parse_session_models,
+        reasoning_effort_value, remove_workspace_history, rename_session_title, set_session_unread,
+        title_from_prompt, upsert_session_history, upsert_workspace_history, ApprovalMode,
+        PersistedSession, PersistedWorkspace, SessionHistoryAction, DEFAULT_SESSION_TITLE,
+        MAX_SESSION_TITLE_CHARS,
     };
     use chrono::{Local, TimeZone};
     use serde_json::json;
+
+    #[test]
+    fn recognizes_only_the_context_slash_command() {
+        assert!(is_context_slash_command("/context"));
+        assert!(is_context_slash_command("/context   "));
+        assert!(is_context_slash_command("/context　"));
+        assert!(is_context_slash_command("/context details"));
+        assert!(!is_context_slash_command("context"));
+        assert!(!is_context_slash_command("/contextual"));
+        assert!(!is_context_slash_command("/Context"));
+    }
 
     #[test]
     fn extracts_the_device_code_from_the_official_xai_url() {
@@ -2119,6 +2211,7 @@ mod tests {
             created_at: 1,
             updated_at,
             archived: false,
+            unread: false,
         };
         let mut sessions = vec![
             session("first", "First", 20),
@@ -2145,6 +2238,7 @@ mod tests {
             created_at: 1,
             updated_at,
             archived: false,
+            unread: false,
         };
         let mut sessions = vec![session("older", "Older", 10)];
         upsert_session_history(&mut sessions, session("newer", "Newer", 20));
@@ -2157,7 +2251,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_session_history_defaults_to_active() {
+    fn legacy_session_history_defaults_status_flags() {
         let session: PersistedSession = serde_json::from_value(json!({
             "sessionId": "legacy",
             "title": "Legacy session",
@@ -2170,6 +2264,41 @@ mod tests {
         .expect("legacy session history should remain readable");
 
         assert!(!session.archived);
+        assert!(!session.unread);
+    }
+
+    #[test]
+    fn unread_status_changes_without_reordering_activity() {
+        let mut sessions = vec![
+            PersistedSession {
+                session_id: "newer".to_string(),
+                title: "Newer".to_string(),
+                workspace: Some("/workspace".to_string()),
+                working_directory: "/workspace".to_string(),
+                approval_mode: ApprovalMode::Ask,
+                created_at: 1,
+                updated_at: 20,
+                archived: false,
+                unread: false,
+            },
+            PersistedSession {
+                session_id: "older".to_string(),
+                title: "Older".to_string(),
+                workspace: Some("/workspace".to_string()),
+                working_directory: "/workspace".to_string(),
+                approval_mode: ApprovalMode::Ask,
+                created_at: 1,
+                updated_at: 10,
+                archived: false,
+                unread: false,
+            },
+        ];
+
+        assert!(set_session_unread(&mut sessions, "older", true));
+        assert!(sessions[1].unread);
+        assert_eq!(sessions[1].updated_at, 10);
+        assert_eq!(sessions[0].session_id, "newer");
+        assert!(!set_session_unread(&mut sessions, "older", true));
     }
 
     #[test]
@@ -2183,6 +2312,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             archived: false,
+            unread: false,
         };
         let mut sessions = vec![
             session("first", Some("/workspace")),
