@@ -488,7 +488,7 @@ async fn grok_logout(state: State<'_, GrokRuntime>) -> Result<(), String> {
 async fn choose_workspace() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         rfd::FileDialog::new()
-            .set_title("Select a workspace to open in Groky")
+            .set_title("Choose an existing folder for this project")
             .pick_folder()
             .map(|path| path.to_string_lossy().into_owned())
     })

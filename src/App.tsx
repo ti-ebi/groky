@@ -33,6 +33,7 @@ type IconName =
   | "folder-open"
   | "logout"
   | "panel"
+  | "plus"
   | "refresh"
   | "search"
   | "sliders"
@@ -274,13 +275,6 @@ function currentModel(models: SessionModelState | null) {
   return models.availableModels.find((model) => model.modelId === models.currentModelId) ?? null;
 }
 
-function compactTokenCount(tokens: number | null | undefined) {
-  if (!tokens) return null;
-  if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(1))}m`;
-  if (tokens >= 1_000) return `${Number((tokens / 1_000).toFixed(0))}k`;
-  return String(tokens);
-}
-
 function enablesAlwaysApprove(option: PermissionOption | undefined) {
   if (!option || option.kind !== "allow_always") return false;
 
@@ -340,6 +334,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     "folder-open": <><path d="M3 9V7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1" /><path d="m3 10 2 9h14l2-9Z" /></>,
     logout: <><path d="M10 5H5v14h5" /><path d="M14 8l4 4-4 4M8 12h10" /></>,
     panel: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M15 4v16" /></>,
+    plus: <><path d="M12 5v14" /><path d="M5 12h14" /></>,
     refresh: <><path d="M20 6v5h-5" /><path d="M4 18v-5h5" /><path d="M18 9a7 7 0 0 0-12-2L4 11M6 15a7 7 0 0 0 12 2l2-4" /></>,
     search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
     sliders: <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>,
@@ -802,6 +797,7 @@ function ModelSelector({
   onReasoningChange: (reasoningEffort: string) => Promise<SessionModelState | null>;
 }) {
   const [open, setOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState<"model" | "reasoning" | null>(null);
   const [loading, setLoading] = useState(false);
   const [changingModelId, setChangingModelId] = useState<string | null>(null);
   const [changingReasoningEffort, setChangingReasoningEffort] = useState<string | null>(null);
@@ -815,7 +811,6 @@ function ModelSelector({
     effort.id === reasoningEffort || effort.value === reasoningEffort
   );
   const reasoningLabel = selectedReasoning?.label.replace(/\s+Effort$/i, "") ?? reasoningEffort;
-  const contextTokens = compactTokenCount(selected?._meta?.totalContextTokens);
   const changing = changingModelId !== null || changingReasoningEffort !== null;
 
   useEffect(() => {
@@ -851,6 +846,7 @@ function ModelSelector({
       setLoading(false);
       if (!loaded) return;
     }
+    setActiveSection(null);
     setOpen(true);
   }
 
@@ -866,7 +862,10 @@ function ModelSelector({
   }
 
   async function selectReasoningEffort(effort: ReasoningEffortInfo) {
-    if (effort.value === reasoningEffort || effort.id === reasoningEffort) return;
+    if (effort.value === reasoningEffort || effort.id === reasoningEffort) {
+      setOpen(false);
+      return;
+    }
     setChangingReasoningEffort(effort.value);
     const nextModels = await onReasoningChange(effort.value);
     setChangingReasoningEffort(null);
@@ -878,7 +877,7 @@ function ModelSelector({
       <button
         className="model-button"
         type="button"
-        aria-haspopup="dialog"
+        aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Model: ${selected?.name ?? "Grok Build default"}${reasoningLabel ? `, reasoning: ${reasoningLabel}` : ""}`}
         disabled={busy || loading || changing}
@@ -890,79 +889,100 @@ function ModelSelector({
       </button>
 
       {open && (
-        <div className="approval-menu model-menu" role="dialog" aria-label="Grok Build model and reasoning settings">
-          <div className="approval-menu-heading">
-            <span>SESSION MODEL</span>
-            <small>Provided by Grok Build</small>
-          </div>
-          <div className="approval-menu-options" role="listbox" aria-label="Session model">
-            {models?.availableModels.map((model) => {
-              const isSelected = model.modelId === models.currentModelId;
-              const modelContext = compactTokenCount(model._meta?.totalContextTokens);
-              const modelEffort = model._meta?.reasoningEffort;
-              const metadata = [
-                modelEffort ? `${modelEffort} reasoning` : null,
-                modelContext ? `${modelContext} context` : null,
-              ].filter(Boolean).join(" · ");
-              return (
-                <button
-                  className="approval-option model-option"
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  disabled={changing}
-                  key={model.modelId}
-                  onClick={() => void selectModel(model.modelId)}
-                >
-                  <span className="approval-option-copy">
-                    <span><strong>{model.name}</strong>{isSelected && <em>Current</em>}</span>
-                    <small>{changingModelId === model.modelId ? "Switching model…" : model.description ?? model.modelId}</small>
-                    {metadata && <small className="model-metadata">{metadata}</small>}
-                  </span>
-                  {isSelected && <Icon name="check" size={15} />}
-                </button>
-              );
-            })}
-            {!models && (
-              <div className="model-unavailable">
-                <span><strong>Using Grok Build defaults</strong><small>This CLI session did not advertise model controls over ACP.</small></span>
+        <div className="approval-menu model-menu" role="menu" aria-label="Grok Build model and reasoning settings">
+          <div
+            className="model-settings-item"
+            role="none"
+            onPointerLeave={() => setActiveSection((current) => current === "model" ? null : current)}
+          >
+            <button
+              className={`model-settings-row ${activeSection === "model" ? "active" : ""}`}
+              type="button"
+              role="menuitem"
+              aria-haspopup="menu"
+              aria-expanded={activeSection === "model"}
+              disabled={!models || changing}
+              onPointerEnter={() => setActiveSection("model")}
+              onFocus={() => setActiveSection("model")}
+              onClick={() => setActiveSection("model")}
+            >
+              <span>Model</span>
+              <span className="model-settings-value">{selected?.name ?? "Grok Build"}</span>
+              {models && <span className="model-settings-chevron" aria-hidden="true">›</span>}
+            </button>
+
+            {models && activeSection === "model" && (
+              <div className="model-submenu" role="menu" aria-label="Session model">
+                {models.availableModels.map((model) => {
+                  const isSelected = model.modelId === models.currentModelId;
+                  return (
+                    <button
+                      className="model-submenu-option"
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={isSelected}
+                      disabled={changing}
+                      key={model.modelId}
+                      onClick={() => void selectModel(model.modelId)}
+                    >
+                      <span>{changingModelId === model.modelId ? "Switching…" : model.name}</span>
+                      {isSelected && <Icon name="check" size={14} />}
+                    </button>
+                  );
+                })}
+                {selected?.description && <div className="model-submenu-note">{selected.description}</div>}
               </div>
             )}
           </div>
           {reasoningEfforts.length > 0 && (
-            <>
-              <div className="model-section-heading">
-                <span>REASONING EFFORT</span>
-                <small>Quality and speed</small>
-              </div>
-              <div className="approval-menu-options reasoning-options" role="listbox" aria-label="Reasoning effort">
-                {reasoningEfforts.map((effort) => {
-                  const isSelected = effort.id === reasoningEffort || effort.value === reasoningEffort;
-                  return (
-                    <button
-                      className="approval-option reasoning-option"
-                      type="button"
-                      role="option"
-                      aria-selected={isSelected}
-                      disabled={changing}
-                      key={effort.id}
-                      onClick={() => void selectReasoningEffort(effort)}
-                    >
-                      <span className="approval-option-copy">
-                        <span><strong>{effort.label}</strong>{effort.default && <em>Default</em>}</span>
-                        <small>{changingReasoningEffort === effort.value ? "Changing reasoning effort…" : effort.description ?? effort.value}</small>
-                      </span>
-                      {isSelected && <Icon name="check" size={15} />}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
+            <div
+              className="model-settings-item"
+              role="none"
+              onPointerLeave={() => setActiveSection((current) => current === "reasoning" ? null : current)}
+            >
+              <button
+                className={`model-settings-row ${activeSection === "reasoning" ? "active" : ""}`}
+                type="button"
+                role="menuitem"
+                aria-haspopup="menu"
+                aria-expanded={activeSection === "reasoning"}
+                disabled={changing}
+                onPointerEnter={() => setActiveSection("reasoning")}
+                onFocus={() => setActiveSection("reasoning")}
+                onClick={() => setActiveSection("reasoning")}
+              >
+                <span>Reasoning</span>
+                <span className="model-settings-value">{reasoningLabel ?? "Default"}</span>
+                <span className="model-settings-chevron" aria-hidden="true">›</span>
+              </button>
+
+              {activeSection === "reasoning" && (
+                <div className="model-submenu" role="menu" aria-label="Reasoning effort">
+                  {reasoningEfforts.map((effort) => {
+                    const isSelected = effort.id === reasoningEffort || effort.value === reasoningEffort;
+                    return (
+                      <button
+                        className="model-submenu-option"
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={isSelected}
+                        disabled={changing}
+                        key={effort.id}
+                        onClick={() => void selectReasoningEffort(effort)}
+                      >
+                        <span>{changingReasoningEffort === effort.value ? "Changing…" : effort.label.replace(/\s+Effort$/i, "")}</span>
+                        {isSelected && <Icon name="check" size={14} />}
+                      </button>
+                    );
+                  })}
+                  {selectedReasoning?.description && <div className="model-submenu-note">{selectedReasoning.description}</div>}
+                </div>
+              )}
+            </div>
           )}
-          <div className="approval-menu-note">
-            <span>{selected?.modelId ?? "Grok Build decides the model"}</span>
-            <small>{selected ? [reasoningLabel && `${reasoningLabel} reasoning`, contextTokens && `${contextTokens} token context`].filter(Boolean).join(" · ") : "Availability follows your Grok account and local configuration."}</small>
-          </div>
+          {!models && (
+            <div className="model-settings-note">This Grok Build session uses its default model.</div>
+          )}
         </div>
       )}
     </div>
@@ -997,12 +1017,14 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
   const activeAssistantId = useRef<string | null>(null);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
   const updateCheckInFlight = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
+  const projectMenu = useRef<HTMLDivElement | null>(null);
 
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
   const appUpdating = updatePhase === "downloading";
@@ -1017,6 +1039,8 @@ function App() {
   const workspaceGroups: SidebarWorkspaceGroup[] = workspace && !groupedSidebarSessions.workspaceGroups.some((group) => group.path === workspace)
     ? [{ path: workspace, sessions: [] }, ...groupedSidebarSessions.workspaceGroups]
     : groupedSidebarSessions.workspaceGroups;
+  const allWorkspaceGroupsCollapsed = workspaceGroups.length > 0
+    && workspaceGroups.every((group) => collapsedWorkspaces.has(group.path));
 
   useEffect(() => {
     if (!overlayTitlebar) return;
@@ -1077,6 +1101,30 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!projectMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!projectMenu.current?.contains(event.target as Node)) setProjectMenuOpen(false);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setProjectMenuOpen(false);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [projectMenuOpen]);
+
+  useEffect(() => {
+    if (running || appUpdating || stage === "connecting" || sidebarCollapsed) {
+      setProjectMenuOpen(false);
+    }
+  }, [appUpdating, running, sidebarCollapsed, stage]);
+
   function toggleSidebar() {
     if (!sidebarCollapsed) setShowConnection(false);
     setSidebarCollapsed((current) => !current);
@@ -1089,6 +1137,12 @@ function App() {
       else next.add(path);
       return next;
     });
+  }
+
+  function toggleAllWorkspaceGroups() {
+    setCollapsedWorkspaces(allWorkspaceGroupsCollapsed
+      ? new Set()
+      : new Set(workspaceGroups.map((group) => group.path)));
   }
 
   function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1422,6 +1476,7 @@ function App() {
 
   async function chooseAndConnect() {
     if (running || appUpdating || stage === "connecting") return;
+    setProjectMenuOpen(false);
     const selected = await chooseWorkspace();
     if (selected) await connect(selected, true);
   }
@@ -1435,16 +1490,18 @@ function App() {
     }
   }
 
-  async function startNewTask() {
-    if (appUpdating) return;
+  async function startNewTask(targetWorkspace: string | null = workspace) {
+    if (running || appUpdating || stage === "connecting") return;
     const nextMode: ApprovalMode = "ask";
+    setProjectMenuOpen(false);
     setDraft("");
     setMessages([]);
     setPermission(null);
     setApprovalMode(nextMode);
     setSetupError(null);
     setConnectionNotice(null);
-    if (connection) await connect(workspace, true, nextMode);
+    setWorkspace(targetWorkspace);
+    if (connection) await connect(targetWorkspace, true, nextMode);
   }
 
   async function changeApprovalMode(nextMode: ApprovalMode) {
@@ -1658,13 +1715,44 @@ function App() {
           <button type="button" onClick={() => void startNewTask()} disabled={running || appUpdating || stage === "connecting"}>
             <Icon name="compose" /><span>New task</span>
           </button>
-          <button type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"}>
-            <Icon name="folder-open" /><span>Open workspace</span>
-          </button>
         </nav>
 
         <div className="project-scroll">
-          {workspaceGroups.length > 0 && <p className="section-label">Workspaces</p>}
+          <div className="project-section-header" ref={projectMenu}>
+            <span>Projects</span>
+            <div className="project-section-actions">
+              <button
+                type="button"
+                aria-label={allWorkspaceGroupsCollapsed ? "Expand all projects" : "Collapse all projects"}
+                disabled={workspaceGroups.length === 0}
+                onClick={toggleAllWorkspaceGroups}
+              >
+                <Icon name="dots" size={15} />
+              </button>
+              <button
+                type="button"
+                aria-label="New task location"
+                aria-haspopup="menu"
+                aria-expanded={projectMenuOpen}
+                disabled={running || appUpdating || stage === "connecting"}
+                onClick={() => setProjectMenuOpen((current) => !current)}
+              >
+                <Icon name="plus" size={15} />
+              </button>
+            </div>
+            {projectMenuOpen && (
+              <div className="project-create-menu" role="menu" aria-label="Choose where to start the task">
+                <button type="button" role="menuitem" onClick={() => void startNewTask(null)}>
+                  <Icon name="plus" size={15} />
+                  <span>Start from scratch</span>
+                </button>
+                <button type="button" role="menuitem" onClick={() => void chooseAndConnect()}>
+                  <Icon name="folder" size={15} />
+                  <span>Use existing folder</span>
+                </button>
+              </div>
+            )}
+          </div>
           {workspaceGroups.map((group) => {
             const expanded = !collapsedWorkspaces.has(group.path);
             return (
@@ -1694,14 +1782,17 @@ function App() {
             );
           })}
           {groupedSidebarSessions.ungrouped.length > 0 && (
-            <div className={`task-list ungrouped-task-list ${workspaceGroups.length > 0 ? "after-workspaces" : ""}`} aria-label="Sessions without a workspace">
-              {groupedSidebarSessions.ungrouped.map((session) => (
-                <button className="selected" type="button" aria-current="page" key={session.sessionId}>
-                  <span>{session.title}</span>
-                  {session.running && <span className="task-status" aria-label="Running" />}
-                </button>
-              ))}
-            </div>
+            <section className="unassigned-tasks">
+              <p className="section-label">Tasks</p>
+              <div className="task-list ungrouped-task-list" aria-label="Tasks without a project">
+                {groupedSidebarSessions.ungrouped.map((session) => (
+                  <button className="selected" type="button" aria-current="page" key={session.sessionId}>
+                    <span>{session.title}</span>
+                    {session.running && <span className="task-status" aria-label="Running" />}
+                  </button>
+                ))}
+              </div>
+            </section>
           )}
         </div>
 
@@ -1764,9 +1855,9 @@ function App() {
             {sidebarCollapsed && (
               <button className="icon-button sidebar-restore" type="button" aria-label="Show sidebar" title={`Show sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
             )}
-            <button className="task-title workspace-switcher" type="button" onClick={() => void chooseAndConnect()} disabled={running || appUpdating || stage === "connecting"} aria-label="Open workspace">
-              <Icon name={workspace ? "folder" : "folder-open"} /><strong>{workspace ? projectName : "Open workspace"}</strong><Icon name="chevron-down" size={13} />
-            </button>
+            <div className="task-title workspace-context" title={workspace ?? undefined}>
+              <Icon name={workspace ? "folder" : "compose"} /><strong>{workspace ? projectName : "No project"}</strong>
+            </div>
           </div>
           <div className="task-actions">
             <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : stage === "connecting" ? "Connecting" : "Signed in"}</span>
@@ -1796,7 +1887,7 @@ function App() {
                 <span className="empty-orbit"><i /><i /></span>
                 <p className="message-kicker">GROK BUILD / READY</p>
                 <h1>What should we<br />make happen?</h1>
-                <p>{workspace ? "Ask about the codebase, request a change, or start with a review." : "Start in a private Groky workspace, or open a workspace when you want Grok to work with an existing codebase."}</p>
+                <p>{workspace ? "Ask about the codebase, request a change, or start with a review." : "Start without a project, or choose an existing folder when you want Grok to work with a codebase."}</p>
                 <div className="suggestion-row">
                   {["Explain this codebase", "Find the next useful task", "Review the current changes"].map((suggestion) => (
                     <button key={suggestion} type="button" onClick={() => setDraft(suggestion)}>{suggestion}</button>
@@ -1846,7 +1937,7 @@ function App() {
               locked={messages.length > 0}
               onChange={(nextMode) => void changeApprovalMode(nextMode)}
             />
-            <span className="local-chip"><span className="live-dot" />{workspace ? "workspace" : connection ? "Groky workspace" : "on send"}</span>
+            <span className="local-chip"><span className="live-dot" />{workspace ? "project" : connection ? "no project" : "on send"}</span>
             <span className="toolbar-spacer" />
             <ModelSelector
               connected={connection !== null}
