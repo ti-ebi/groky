@@ -994,6 +994,8 @@ async fn grok_connect(
     state: State<'_, GrokRuntime>,
     workspace: Option<String>,
     approval_mode: Option<ApprovalMode>,
+    model_id: Option<String>,
+    reasoning_effort: Option<String>,
 ) -> Result<ConnectResult, String> {
     let approval_mode = approval_mode.unwrap_or_default();
     let (workspace_path, selected_workspace) = if let Some(workspace) = workspace {
@@ -1020,13 +1022,47 @@ async fn grok_connect(
         return Err("Grok Build did not return a session ID.".to_string());
     };
     let session_id = session_id.to_string();
-    let models = match parse_session_models(&result) {
+    let mut models = match parse_session_models(&result) {
         Ok(models) => models,
         Err(error) => {
             forget_rejected_session(&state, &transport, &session_id).await;
             return Err(error);
         }
     };
+    let initial_model_selection = match resolve_initial_model_selection(
+        models.as_ref(),
+        model_id.as_deref(),
+        reasoning_effort.as_deref(),
+    ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            forget_rejected_session(&state, &transport, &session_id).await;
+            return Err(error);
+        }
+    };
+    if let Some((selected_model_id, selected_reasoning_effort)) = initial_model_selection {
+        let selection_changed = models.as_ref().is_some_and(|models| {
+            models.current_model_id != selected_model_id
+                || selected_reasoning_effort.as_deref()
+                    != model_reasoning_effort(models, &selected_model_id)
+        });
+        if selection_changed {
+            if let Err(error) = transport
+                .set_model(
+                    &session_id,
+                    &selected_model_id,
+                    selected_reasoning_effort.as_deref(),
+                )
+                .await
+            {
+                forget_rejected_session(&state, &transport, &session_id).await;
+                return Err(error);
+            }
+        }
+        if let Some(models) = models.as_mut() {
+            record_model_selection(models, selected_model_id, selected_reasoning_effort);
+        }
+    }
     let available_commands = transport.available_commands(&session_id, Some(&cwd)).await;
 
     let session = GrokSession {
@@ -1509,6 +1545,68 @@ fn reasoning_effort_value(
         .find(|effort| effort.id == requested_effort || effort.value == requested_effort)
         .map(|effort| effort.value.clone())
         .ok_or_else(|| "Choose a reasoning effort advertised by Grok Build.".to_string())
+}
+
+fn resolve_initial_model_selection(
+    models: Option<&SessionModelState>,
+    requested_model_id: Option<&str>,
+    requested_reasoning_effort: Option<&str>,
+) -> Result<Option<(String, Option<String>)>, String> {
+    if requested_model_id.is_none() && requested_reasoning_effort.is_none() {
+        return Ok(None);
+    }
+
+    let models = models.ok_or_else(|| {
+        "Grok Build did not advertise model selection for this session.".to_string()
+    })?;
+    let selected_model_id = requested_model_id
+        .unwrap_or(&models.current_model_id)
+        .to_string();
+    if !models
+        .available_models
+        .iter()
+        .any(|model| model.model_id == selected_model_id)
+    {
+        return Err("The selected model is no longer available in Grok Build.".to_string());
+    }
+
+    let selected_reasoning_effort = if let Some(requested_effort) = requested_reasoning_effort {
+        let mut selected_models = models.clone();
+        selected_models.current_model_id = selected_model_id.clone();
+        Some(reasoning_effort_value(&selected_models, requested_effort)?)
+    } else {
+        None
+    };
+
+    Ok(Some((selected_model_id, selected_reasoning_effort)))
+}
+
+fn model_reasoning_effort<'a>(models: &'a SessionModelState, model_id: &str) -> Option<&'a str> {
+    models
+        .available_models
+        .iter()
+        .find(|model| model.model_id == model_id)
+        .and_then(|model| model.metadata.as_ref())
+        .and_then(|metadata| metadata.reasoning_effort.as_deref())
+}
+
+fn record_model_selection(
+    models: &mut SessionModelState,
+    model_id: String,
+    reasoning_effort: Option<String>,
+) {
+    models.current_model_id = model_id;
+    let Some(reasoning_effort) = reasoning_effort else {
+        return;
+    };
+    if let Some(metadata) = models
+        .available_models
+        .iter_mut()
+        .find(|model| model.model_id == models.current_model_id)
+        .and_then(|model| model.metadata.as_mut())
+    {
+        metadata.reasoning_effort = Some(reasoning_effort);
+    }
 }
 
 async fn disconnect_runtime(state: &GrokRuntime) {
@@ -2048,6 +2146,7 @@ mod tests {
         PersistedSession, PersistedWorkspace, SessionHistoryAction, DEFAULT_SESSION_TITLE,
         MAX_SESSION_TITLE_CHARS,
     };
+    use super::{record_model_selection, resolve_initial_model_selection};
     use chrono::{Local, TimeZone};
     use serde_json::json;
 
@@ -2358,7 +2457,7 @@ mod tests {
 
     #[test]
     fn parses_models_advertised_by_the_grok_build_session() {
-        let models = parse_session_models(&json!({
+        let mut models = parse_session_models(&json!({
             "sessionId": "session-1",
             "models": {
                 "currentModelId": "grok-4.5",
@@ -2415,6 +2514,24 @@ mod tests {
             Ok("medium")
         );
         assert!(reasoning_effort_value(&models, "unsupported").is_err());
+
+        let selection =
+            resolve_initial_model_selection(Some(&models), Some("grok-4.5"), Some("medium"))
+                .expect("advertised initial selection")
+                .expect("requested initial selection");
+        assert_eq!(
+            selection,
+            ("grok-4.5".to_string(), Some("medium".to_string()))
+        );
+        record_model_selection(&mut models, selection.0, selection.1);
+        assert_eq!(
+            models.available_models[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.reasoning_effort.as_deref()),
+            Some("medium")
+        );
+        assert!(resolve_initial_model_selection(Some(&models), Some("missing"), None,).is_err());
     }
 
     #[test]

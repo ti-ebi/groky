@@ -486,6 +486,33 @@ function currentModel(models: SessionModelState | null) {
   return models.availableModels.find((model) => model.modelId === models.currentModelId) ?? null;
 }
 
+function selectModelInState(models: SessionModelState, modelId: string): SessionModelState {
+  return {
+    ...models,
+    currentModelId: modelId,
+  };
+}
+
+function selectReasoningInState(
+  models: SessionModelState,
+  reasoningEffort: string,
+): SessionModelState {
+  return {
+    ...models,
+    availableModels: models.availableModels.map((model) =>
+      model.modelId === models.currentModelId && model.metadata
+        ? {
+            ...model,
+            metadata: {
+              ...model.metadata,
+              reasoningEffort,
+            },
+          }
+        : model
+    ),
+  };
+}
+
 function enablesAlwaysApprove(option: PermissionOption | undefined) {
   if (!option || option.kind !== "allow_always") return false;
 
@@ -2159,7 +2186,7 @@ function ModelSelector({
       setOpen(false);
       return;
     }
-    if (!connected) {
+    if (!connected && !models) {
       setLoading(true);
       const loaded = await onLoad();
       setLoading(false);
@@ -2324,6 +2351,7 @@ function App() {
   const [setupError, setSetupError] = useState<string | null>(null);
   const [sessionHistory, setSessionHistory] = useState<PersistedSessionSummary[]>([]);
   const [workspaceHistory, setWorkspaceHistory] = useState<PersistedWorkspaceSummary[]>([]);
+  const [pendingModels, setPendingModels] = useState<SessionModelState | null>(null);
   const [pendingDraft, setPendingDraft] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<FileAttachment[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
@@ -2500,6 +2528,7 @@ function App() {
     replay?: SessionReplayProjection,
     initialComposer?: { draft: string; attachments: FileAttachment[] },
   ) {
+    if (nextConnection.models) setPendingModels(nextConnection.models);
     const current = sessionViewsRef.current;
     const existing = current[nextConnection.sessionId];
     const next = {
@@ -2532,6 +2561,7 @@ function App() {
     setActiveSessionId(null);
     setSessionViews({});
     setLoadingSessionIds(new Set());
+    setPendingModels(null);
     setPendingAttachments([]);
   }
 
@@ -3262,9 +3292,12 @@ function App() {
     connectionTransitioning.current = true;
     setStage("connecting");
     try {
+      const requestedModel = currentModel(pendingModels);
       const next = await invoke<Connection>("grok_connect", {
         workspace: targetWorkspace,
         approvalMode: targetApprovalMode,
+        modelId: pendingModels?.currentModelId,
+        reasoningEffort: requestedModel?.metadata?.reasoningEffort,
       });
       upsertSessionView(next, clearConversation ? [] : undefined, undefined, initialComposer);
       activateSession(next.sessionId);
@@ -3595,6 +3628,7 @@ function App() {
   }
 
   async function loadModels() {
+    if (pendingModels) return true;
     const activeConnection = await ensureActiveConnection();
     return activeConnection !== null;
   }
@@ -3630,7 +3664,12 @@ function App() {
 
   async function changeModel(modelId: string) {
     const sessionId = connection?.sessionId;
-    if (!sessionId) return null;
+    if (!sessionId) {
+      if (!pendingModels) return null;
+      const models = selectModelInState(pendingModels, modelId);
+      setPendingModels(models);
+      return models;
+    }
     setConnectionNotice(null);
     try {
       const models = await invoke<SessionModelState>("grok_set_model", { sessionId, modelId });
@@ -3638,6 +3677,7 @@ function App() {
         ...session,
         connection: { ...session.connection, models },
       }));
+      setPendingModels(models);
       return models;
     } catch (error) {
       setConnectionNotice(String(error));
@@ -3647,7 +3687,12 @@ function App() {
 
   async function changeReasoningEffort(reasoningEffort: string) {
     const sessionId = connection?.sessionId;
-    if (!sessionId) return null;
+    if (!sessionId) {
+      if (!pendingModels) return null;
+      const models = selectReasoningInState(pendingModels, reasoningEffort);
+      setPendingModels(models);
+      return models;
+    }
     setConnectionNotice(null);
     try {
       const models = await invoke<SessionModelState>("grok_set_reasoning_effort", { sessionId, reasoningEffort });
@@ -3655,6 +3700,7 @@ function App() {
         ...session,
         connection: { ...session.connection, models },
       }));
+      setPendingModels(models);
       return models;
     } catch (error) {
       setConnectionNotice(String(error));
@@ -4427,7 +4473,7 @@ function App() {
             <span className="toolbar-spacer" />
             <ModelSelector
               connected={connection !== null}
-              models={connection?.models ?? null}
+              models={connection?.models ?? pendingModels}
               busy={running || appUpdating || sessionTransitioning}
               onLoad={loadModels}
               onChange={changeModel}
