@@ -102,16 +102,16 @@ impl AcpTransport {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|_| "Grok Build ACPを起動できませんでした。".to_string())?;
+            .map_err(|_| "Failed to start Grok Build ACP.".to_string())?;
 
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "Grok Build ACPの入力を開けませんでした。".to_string())?;
+            .ok_or_else(|| "Failed to open the Grok Build ACP input stream.".to_string())?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "Grok Build ACPの出力を開けませんでした。".to_string())?;
+            .ok_or_else(|| "Failed to open the Grok Build ACP output stream.".to_string())?;
 
         let writer = Arc::new(Mutex::new(stdin));
         let pending = Arc::new(Mutex::new(HashMap::new()));
@@ -188,10 +188,10 @@ impl AcpTransport {
 
         match timeout(duration, receiver).await {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => Err("Grok Buildとの接続が閉じられました。".to_string()),
+            Ok(Err(_)) => Err("The connection to Grok Build was closed.".to_string()),
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                Err("Grok Buildからの応答がタイムアウトしました。".to_string())
+                Err("Timed out waiting for a response from Grok Build.".to_string())
             }
         }
     }
@@ -230,7 +230,7 @@ impl AcpTransport {
             .lock()
             .await
             .remove(request_id)
-            .ok_or_else(|| "この確認はすでに完了しています。".to_string())?;
+            .ok_or_else(|| "This permission request has already been resolved.".to_string())?;
 
         write_permission_response(&self.writer, permission.rpc_id, option_id).await
     }
@@ -321,7 +321,7 @@ fn spawn_reader(
                 .collect::<Vec<_>>()
         };
         for sender in waiting {
-            let _ = sender.send(Err("Grok Buildとの接続が閉じられました。".to_string()));
+            let _ = sender.send(Err("The connection to Grok Build was closed.".to_string()));
         }
 
         if let Some(app) = event_sink {
@@ -329,7 +329,7 @@ fn spawn_reader(
                 "grok://connection",
                 ConnectionEvent {
                     status: "disconnected",
-                    message: Some("Grok Buildとの接続が終了しました。"),
+                    message: Some("The connection to Grok Build was closed."),
                 },
             );
         }
@@ -337,19 +337,19 @@ fn spawn_reader(
 }
 
 async fn write_message(writer: &Arc<Mutex<ChildStdin>>, message: &Value) -> Result<(), String> {
-    let mut bytes = serde_json::to_vec(message)
-        .map_err(|_| "ACPメッセージを作成できませんでした。".to_string())?;
+    let mut bytes =
+        serde_json::to_vec(message).map_err(|_| "Failed to create the ACP message.".to_string())?;
     bytes.push(b'\n');
 
     let mut writer = writer.lock().await;
     writer
         .write_all(&bytes)
         .await
-        .map_err(|_| "Grok Buildへメッセージを送信できませんでした。".to_string())?;
+        .map_err(|_| "Failed to send a message to Grok Build.".to_string())?;
     writer
         .flush()
         .await
-        .map_err(|_| "Grok Buildへメッセージを送信できませんでした。".to_string())
+        .map_err(|_| "Failed to send a message to Grok Build.".to_string())
 }
 
 async fn write_permission_response(
@@ -402,7 +402,7 @@ fn decode_frame(line: &str) -> Result<InboundFrame, String> {
         Err(error
             .get("message")
             .and_then(Value::as_str)
-            .unwrap_or("Grok Buildでエラーが発生しました。")
+            .unwrap_or("Grok Build returned an error.")
             .to_string())
     } else if let Some(result) = object.get("result") {
         Ok(result.clone())
@@ -444,7 +444,7 @@ async fn sanitize_permission_request(
     let title = tool_call
         .get("title")
         .and_then(Value::as_str)
-        .unwrap_or("Grok Buildが操作の許可を求めています")
+        .unwrap_or("Grok Build is requesting permission to perform an action")
         .to_string();
     let tool_kind = tool_call
         .get("kind")
