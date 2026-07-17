@@ -83,6 +83,11 @@ interface AccountProfile {
   email: string | null;
 }
 
+const demoAccountProfile: AccountProfile | null = import.meta.env.DEV
+  && import.meta.env.VITE_DEMO_PROFILE === "1"
+  ? { displayName: "Alex Morgan", email: "alex@example.com" }
+  : null;
+
 interface Connection {
   sessionId: string;
   workspace: string | null;
@@ -2778,7 +2783,7 @@ function App() {
   const activeSessionTitle = activeSessionId
     ? sessionHistory.find((session) => session.sessionId === activeSessionId)?.title ?? "New Grok session"
     : "New session";
-  const accountProfile = status?.accountProfile ?? null;
+  const accountProfile = demoAccountProfile ?? status?.accountProfile ?? null;
   const accountName = accountProfile?.displayName ?? accountProfile?.email ?? "Grok Build";
   const accountDetail = accountProfile?.displayName && accountProfile.email
     ? accountProfile.email
