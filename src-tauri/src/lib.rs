@@ -1,4 +1,5 @@
 mod acp;
+mod terminal;
 
 use acp::{
     normalize_stop_reason, AcpTransport, ApprovalMode, PromptResourceLink, SafeAvailableCommand,
@@ -21,6 +22,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
+use terminal::{terminal_resize, terminal_start, terminal_stop, terminal_write, TerminalRuntime};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -2236,6 +2238,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(GrokRuntime::default())
         .manage(AppUpdateRuntime::default())
+        .manage(TerminalRuntime::default())
         .invoke_handler(tauri::generate_handler![
             configure_native_titlebar,
             check_app_update,
@@ -2264,6 +2267,10 @@ pub fn run() {
             grok_set_model,
             grok_set_reasoning_effort,
             grok_respond_permission,
+            terminal_start,
+            terminal_write,
+            terminal_resize,
+            terminal_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

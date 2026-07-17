@@ -83,7 +83,7 @@ textarea:focus-visible {
   height: 100%;
   background: var(--app-bg);
   color: var(--text);
-  transition: grid-template-columns 180ms ease;
+  transition: grid-template-columns 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .has-overlay-titlebar {
@@ -93,6 +93,24 @@ textarea:focus-visible {
 
 .app-shell.sidebar-collapsed {
   grid-template-columns: 0 minmax(500px, 1fr);
+}
+
+.app-shell.session-shell {
+  --effective-side-panel-width: min(var(--side-panel-width, 480px), calc(100vw - var(--sidebar-width, 258px) - 440px));
+  grid-template-columns: var(--sidebar-width, 258px) minmax(440px, 1fr) 0;
+}
+
+.app-shell.session-shell.sidebar-collapsed {
+  --effective-side-panel-width: min(var(--side-panel-width, 480px), calc(100vw - 500px));
+  grid-template-columns: 0 minmax(500px, 1fr) 0;
+}
+
+.app-shell.session-shell.right-panel-open {
+  grid-template-columns: var(--sidebar-width, 258px) minmax(440px, 1fr) var(--effective-side-panel-width);
+}
+
+.app-shell.session-shell.right-panel-open.sidebar-collapsed {
+  grid-template-columns: 0 minmax(500px, 1fr) var(--effective-side-panel-width);
 }
 
 .sidebar {
@@ -199,6 +217,53 @@ body.is-resizing-sidebar * {
 
 body.is-resizing-sidebar .app-shell {
   transition: none;
+}
+
+.side-panel-resizer {
+  position: absolute;
+  z-index: 22;
+  top: 0;
+  bottom: 0;
+  left: calc(100% - var(--effective-side-panel-width, var(--side-panel-width, 480px)) - 3px);
+  width: 6px;
+  cursor: col-resize;
+  outline: 0;
+  touch-action: none;
+}
+
+.side-panel-resizer::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  content: "";
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.side-panel-resizer:hover::after,
+.side-panel-resizer:focus-visible::after {
+  background: #8fe3c1;
+  box-shadow: 0 0 8px rgba(143, 227, 193, 0.32);
+}
+
+body.is-resizing-side-panel,
+body.is-resizing-side-panel * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.is-resizing-side-panel .app-shell {
+  transition: none;
+}
+
+.tools-panel-toggle {
+  position: absolute;
+  z-index: 30;
+  top: calc((var(--app-header-height) - 32px) / 2);
+  right: 7px;
+  color: var(--muted);
 }
 
 .brand-row {
@@ -993,7 +1058,7 @@ body.is-resizing-sidebar .app-shell {
 
 .taskbar {
   justify-content: space-between;
-  padding: 0 12px 0 17px;
+  padding: 0 47px 0 17px;
   background: color-mix(in srgb, var(--app-bg) 92%, transparent);
   backdrop-filter: blur(18px);
 }
@@ -1610,15 +1675,22 @@ body.is-resizing-sidebar .app-shell {
   text-transform: uppercase;
 }
 
-.composer {
+.composer-dock {
   position: absolute;
   z-index: 2;
   right: 28px;
   bottom: 20px;
   left: 28px;
+  display: grid;
   width: min(730px, calc(100% - 56px));
-  min-height: 104px;
+  gap: 8px;
   margin: auto;
+}
+
+.composer {
+  position: relative;
+  width: 100%;
+  min-height: 104px;
   padding: 14px 14px 10px;
   border: 1px solid color-mix(in srgb, var(--signal) 18%, var(--line-strong));
   border-radius: 20px;
@@ -1640,15 +1712,22 @@ body.is-resizing-sidebar .app-shell {
   opacity: 0.58;
 }
 
-.composer-session-context {
+.session-start-config {
+  position: relative;
   display: flex;
+  width: fit-content;
+  max-width: 100%;
   min-width: 0;
-  min-height: 29px;
+  min-height: 38px;
   align-items: center;
-  gap: 9px;
-  margin: -4px 0 8px;
-  padding: 0 1px 7px;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  justify-self: start;
+  padding: 4px;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--signal) 14%, var(--line-strong));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: 0 7px 20px rgba(0, 0, 0, 0.07);
+  animation: content-in 180ms ease-out both;
 }
 
 .attachment-tray {
@@ -1660,10 +1739,6 @@ body.is-resizing-sidebar .app-shell {
   border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
   scrollbar-color: var(--line-strong) transparent;
   scrollbar-width: thin;
-}
-
-.composer-session-context + .attachment-tray {
-  margin-top: 0;
 }
 
 .attachment-chip {
@@ -1754,6 +1829,16 @@ body.is-resizing-sidebar .app-shell {
   transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
 }
 
+.session-start-config .session-location-button {
+  max-width: min(350px, calc(100vw - 150px));
+  height: 28px;
+  padding: 0 7px;
+}
+
+.session-start-config .session-location-button:not(:disabled):hover {
+  background: var(--surface-raised);
+}
+
 .session-location-button > span {
   min-width: 0;
   overflow: hidden;
@@ -1777,15 +1862,6 @@ body.is-resizing-sidebar .app-shell {
 .session-location-button:disabled {
   cursor: default;
   opacity: 0.5;
-}
-
-.session-location-hint {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--faint);
-  font: 9px var(--mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .session-location-menu {
@@ -2471,12 +2547,41 @@ body.is-resizing-sidebar .app-shell {
   }
 }
 
+@media (max-width: 1120px) and (min-width: 791px) {
+  .app-shell.session-shell,
+  .app-shell.session-shell.right-panel-open {
+    --effective-side-panel-width: min(var(--side-panel-width, 480px), 64vw);
+    grid-template-columns: var(--sidebar-width, 258px) minmax(500px, 1fr) 0;
+  }
+
+  .app-shell.session-shell.sidebar-collapsed,
+  .app-shell.session-shell.right-panel-open.sidebar-collapsed {
+    --effective-side-panel-width: min(var(--side-panel-width, 480px), 64vw);
+    grid-template-columns: 0 minmax(500px, 1fr) 0;
+  }
+
+  .right-side-panel {
+    position: absolute;
+    z-index: 20;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--effective-side-panel-width);
+  }
+}
+
 @media (max-width: 790px) {
   body {
     min-width: 520px;
   }
 
-  .app-shell {
+  .app-shell,
+  .app-shell.session-shell,
+  .app-shell.session-shell.sidebar-collapsed,
+  .app-shell.session-shell.right-panel-open,
+  .app-shell.session-shell.right-panel-open.sidebar-collapsed,
+  .app-shell.right-panel-open,
+  .app-shell.right-panel-open.sidebar-collapsed {
     grid-template-columns: minmax(520px, 1fr);
   }
 
@@ -5480,8 +5585,21 @@ body.is-resizing-sidebar .app-shell {
   }
 
   .app-shell,
-  .app-shell.sidebar-collapsed {
+  .app-shell.sidebar-collapsed,
+  .app-shell.session-shell,
+  .app-shell.session-shell.sidebar-collapsed,
+  .app-shell.session-shell.right-panel-open,
+  .app-shell.session-shell.right-panel-open.sidebar-collapsed,
+  .app-shell.right-panel-open,
+  .app-shell.right-panel-open.sidebar-collapsed {
     grid-template-columns: minmax(520px, 1fr);
+  }
+
+  .app-shell.session-shell,
+  .app-shell.session-shell.sidebar-collapsed,
+  .app-shell.right-panel-open,
+  .app-shell.right-panel-open.sidebar-collapsed {
+    --effective-side-panel-width: min(var(--side-panel-width, 480px), calc(100vw - 52px));
   }
 
   .app-shell .sidebar {
@@ -5508,6 +5626,19 @@ body.is-resizing-sidebar .app-shell {
   .sidebar-resizer {
     z-index: 19;
     left: calc(min(var(--sidebar-width, 258px), calc(100% - 64px)) - 3px);
+  }
+
+  .right-side-panel {
+    position: absolute;
+    z-index: 20;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--effective-side-panel-width);
+  }
+
+  .side-panel-resizer {
+    left: calc(100% - var(--effective-side-panel-width) - 3px);
   }
 
   .onboarding-main { padding: 18px; }

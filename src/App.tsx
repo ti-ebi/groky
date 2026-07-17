@@ -21,6 +21,7 @@ import "@fontsource-variable/sora/index.css";
 import "./App.css";
 import { MarkdownContent } from "./MarkdownContent";
 import { GlobalSearchDialog } from "./GlobalSearchDialog";
+import { TerminalPanel } from "./TerminalPanel";
 
 type IconName =
   | "archive"
@@ -44,6 +45,7 @@ type IconName =
   | "refresh"
   | "search"
   | "sliders"
+  | "standalone"
   | "stop"
   | "terminal"
   | "trash"
@@ -530,9 +532,15 @@ const usesOverlayTitlebar = () => isTauri() && isMacOS();
 const AUTH_REQUIRED_ERROR = "GROK_AUTH_REQUIRED";
 const SIDEBAR_WIDTH_KEY = "groky.sidebar.width";
 const SIDEBAR_COLLAPSED_KEY = "groky.sidebar.collapsed";
+const SIDE_PANEL_WIDTH_KEY = "groky.side-panel.width";
+const SIDE_PANEL_OPEN_KEY = "groky.side-panel.open";
 const DEFAULT_SIDEBAR_WIDTH = 258;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 420;
+const FALLBACK_SIDE_PANEL_WIDTH = 480;
+const DEFAULT_SIDE_PANEL_WIDTH_RATIO = 0.42;
+const MIN_SIDE_PANEL_WIDTH = 340;
+const MAX_SIDE_PANEL_WIDTH = 760;
 const MAX_SESSION_TITLE_CHARS = 72;
 
 function clampSidebarWidth(width: number) {
@@ -551,6 +559,34 @@ function storedSidebarWidth() {
 function storedSidebarCollapsed() {
   try {
     return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function clampSidePanelWidth(width: number) {
+  return Math.min(MAX_SIDE_PANEL_WIDTH, Math.max(MIN_SIDE_PANEL_WIDTH, width));
+}
+
+function defaultSidePanelWidth() {
+  const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth;
+  return clampSidePanelWidth(
+    viewportWidth > 0 ? Math.round(viewportWidth * DEFAULT_SIDE_PANEL_WIDTH_RATIO) : FALLBACK_SIDE_PANEL_WIDTH,
+  );
+}
+
+function storedSidePanelWidth() {
+  try {
+    const width = Number(window.localStorage.getItem(SIDE_PANEL_WIDTH_KEY));
+    return Number.isFinite(width) && width > 0 ? clampSidePanelWidth(width) : defaultSidePanelWidth();
+  } catch {
+    return defaultSidePanelWidth();
+  }
+}
+
+function storedSidePanelOpen() {
+  try {
+    return window.localStorage.getItem(SIDE_PANEL_OPEN_KEY) === "true";
   } catch {
     return false;
   }
@@ -579,6 +615,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     refresh: <><path d="M20 6v5h-5" /><path d="M4 18v-5h5" /><path d="M18 9a7 7 0 0 0-12-2L4 11M6 15a7 7 0 0 0 12 2l2-4" /></>,
     search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
     sliders: <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>,
+    standalone: <><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" /><circle cx="8" cy="11" r="0.8" fill="currentColor" stroke="none" /><circle cx="12" cy="11" r="0.8" fill="currentColor" stroke="none" /><circle cx="16" cy="11" r="0.8" fill="currentColor" stroke="none" /></>,
     stop: <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />,
     terminal: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="m7 9 3 3-3 3M13 15h4" /></>,
     trash: <><path d="M4 7h16" /><path d="m9 7 .5-3h5l.5 3" /><path d="m6 7 1 13h10l1-13" /><path d="M10 11v5M14 11v5" /></>,
@@ -870,7 +907,7 @@ function SessionLocationSelector({
         disabled={disabled || addingWorkspace}
         onClick={() => setOpen((current) => !current)}
       >
-        <Icon name={value ? "folder" : "compose"} size={14} />
+        <Icon name={value ? "folder" : "standalone"} size={14} />
         <span>{label}</span>
         <Icon name="chevron-down" size={12} />
       </button>
@@ -921,7 +958,7 @@ function SessionLocationSelector({
               aria-checked={value === null}
               onClick={() => select(null)}
             >
-              <Icon name="compose" size={14} />
+              <Icon name="standalone" size={14} />
               <span>Standalone</span>
               {value === null && <Icon name="check" size={14} />}
             </button>
@@ -2335,6 +2372,7 @@ function App() {
   const overlayTitlebar = usesOverlayTitlebar();
   const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "deep" } : {};
   const sidebarShortcutLabel = isMacOS() ? "⌘B" : "Ctrl+B";
+  const sidePanelShortcutLabel = isMacOS() ? "⌘J" : "Ctrl+J";
   const searchShortcutLabel = isMacOS() ? "⌘K" : "Ctrl+K";
   const [stage, setStage] = useState<OnboardingStage>("checking");
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
@@ -2371,6 +2409,9 @@ function App() {
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
+  const [sidePanelWidth, setSidePanelWidth] = useState(storedSidePanelWidth);
+  const [sidePanelOpen, setSidePanelOpen] = useState(storedSidePanelOpen);
+  const [sidePanelMounted, setSidePanelMounted] = useState(storedSidePanelOpen);
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
@@ -2381,19 +2422,24 @@ function App() {
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
   const [commandSuggestionsOpen, setCommandSuggestionsOpen] = useState(true);
   const [activeCommandSuggestion, setActiveCommandSuggestion] = useState(0);
+  const toggleSidePanel = useCallback(() => {
+    setSidePanelMounted(true);
+    setSidePanelOpen((current) => !current);
+  }, []);
   const commandSuggestionsId = useId();
   const activeSessionIdRef = useRef<string | null>(null);
   const activeAssistantIds = useRef<Map<string, string>>(new Map());
   const sessionViewsRef = useRef(sessionViews);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
-  const composer = useRef<HTMLFormElement | null>(null);
+  const composerDock = useRef<HTMLDivElement | null>(null);
   const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
   const commandSuggestionsList = useRef<HTMLDivElement | null>(null);
   const commandCatalogRequests = useRef<Set<string>>(new Set());
   const updateCheckInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
+  const sidePanelResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
 
   const activeSession = activeSessionId ? sessionViews[activeSessionId] : undefined;
   const connection = activeSession && !activeSession.disconnected ? activeSession.connection : null;
@@ -2715,6 +2761,22 @@ function App() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
+    } catch {
+      // Persistence is optional when storage is unavailable.
+    }
+  }, [sidePanelWidth]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDE_PANEL_OPEN_KEY, String(sidePanelOpen));
+    } catch {
+      // Persistence is optional when storage is unavailable.
+    }
+  }, [sidePanelOpen]);
+
+  useEffect(() => {
     const handleSidebarShortcut = (event: globalThis.KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "b") return;
       event.preventDefault();
@@ -2747,6 +2809,20 @@ function App() {
     window.addEventListener("keydown", handleSearchShortcut);
     return () => window.removeEventListener("keydown", handleSearchShortcut);
   }, [deleteConfirmation, globalSearchOpen, stage]);
+
+  useEffect(() => {
+    const handleSidePanelShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "j") return;
+      event.preventDefault();
+      toggleSidePanel();
+    };
+
+    window.addEventListener("keydown", handleSidePanelShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleSidePanelShortcut);
+      document.body.classList.remove("is-resizing-side-panel");
+    };
+  }, [toggleSidePanel]);
 
   useEffect(() => {
     if ((stage !== "ready" && stage !== "connected") || deleteConfirmation) {
@@ -2899,6 +2975,42 @@ function App() {
     if (nextWidth === null) return;
     event.preventDefault();
     setSidebarWidth(clampSidebarWidth(nextWidth));
+  }
+
+  function startSidePanelResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !sidePanelOpen) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    sidePanelResizeStart.current = { pointerX: event.clientX, width: sidePanelWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("is-resizing-side-panel");
+  }
+
+  function resizeSidePanel(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = sidePanelResizeStart.current;
+    if (!start) return;
+    setSidePanelWidth(clampSidePanelWidth(start.width - event.clientX + start.pointerX));
+  }
+
+  function finishSidePanelResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!sidePanelResizeStart.current) return;
+    sidePanelResizeStart.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    document.body.classList.remove("is-resizing-side-panel");
+  }
+
+  function resizeSidePanelWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? 32 : 12;
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") nextWidth = sidePanelWidth + step;
+    if (event.key === "ArrowRight") nextWidth = sidePanelWidth - step;
+    if (event.key === "Home") nextWidth = MIN_SIDE_PANEL_WIDTH;
+    if (event.key === "End") nextWidth = MAX_SIDE_PANEL_WIDTH;
+    if (nextWidth === null) return;
+    event.preventDefault();
+    setSidePanelWidth(clampSidePanelWidth(nextWidth));
   }
 
   async function refreshSessionHistory() {
@@ -3117,20 +3229,20 @@ function App() {
 
   useLayoutEffect(() => {
     resizeTextareaToContent(composerTextarea.current);
-  }, [draft, sidebarCollapsed, sidebarWidth, stage]);
+  }, [draft, sidePanelOpen, sidePanelWidth, sidebarCollapsed, sidebarWidth, stage]);
 
   useLayoutEffect(() => {
-    const composerElement = composer.current;
-    const workspaceElement = composerElement?.parentElement;
-    if (!composerElement || !workspaceElement) return;
+    const composerDockElement = composerDock.current;
+    const workspaceElement = composerDockElement?.parentElement;
+    if (!composerDockElement || !workspaceElement) return;
 
     const updateComposerHeight = () => {
-      workspaceElement.style.setProperty("--composer-height", `${composerElement.offsetHeight}px`);
+      workspaceElement.style.setProperty("--composer-height", `${composerDockElement.offsetHeight}px`);
     };
     updateComposerHeight();
 
     const observer = new ResizeObserver(updateComposerHeight);
-    observer.observe(composerElement);
+    observer.observe(composerDockElement);
     return () => {
       observer.disconnect();
       workspaceElement.style.removeProperty("--composer-height");
@@ -4035,10 +4147,11 @@ function App() {
   return (
     <>
       <div
-        className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${activeView === "settings" ? "settings-open" : ""} ${activeView === "session" && sidebarCollapsed ? "sidebar-collapsed" : ""}`}
+        className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${activeView === "settings" ? "settings-open" : "session-shell"} ${activeView === "session" && sidebarCollapsed ? "sidebar-collapsed" : ""} ${activeView === "session" && sidePanelOpen ? "right-panel-open" : ""}`}
         inert={globalSearchOpen}
         style={{
           "--sidebar-width": `${sidebarWidth}px`,
+          "--side-panel-width": `${sidePanelWidth}px`,
           ...(overlayTitlebar && nativeTitlebarHeight !== null
             ? { "--app-header-height": `${nativeTitlebarHeight}px` }
             : {}),
@@ -4349,7 +4462,7 @@ function App() {
               <button className="icon-button sidebar-restore" type="button" aria-label="Show sidebar" title={`Show sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
             )}
             <div className="task-title workspace-context" title={workspace ?? undefined}>
-              <Icon name={workspace ? "folder" : "compose"} /><strong>{workspace ? projectName : "Standalone session"}</strong>
+              <Icon name={workspace ? "folder" : "standalone"} /><strong>{workspace ? projectName : "Standalone session"}</strong>
             </div>
           </div>
           <div className="task-actions">
@@ -4427,10 +4540,9 @@ function App() {
           </button>
         )}
 
-        <form ref={composer} className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
-          {plan.length > 0 && <PlanBlock entries={plan} active={running} />}
+        <div ref={composerDock} className="composer-dock">
           {sessionLocationEditable && (
-            <div className="composer-session-context">
+            <section className="session-start-config" aria-label="Session location">
               <SessionLocationSelector
                 value={workspace}
                 workspaces={workspaceGroups.map((group) => group.path)}
@@ -4438,9 +4550,10 @@ function App() {
                 onChange={selectPendingSessionLocation}
                 onAddWorkspace={chooseAndAddWorkspace}
               />
-              <span className="session-location-hint">Change until the first message</span>
-            </div>
+            </section>
           )}
+          <form className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
+          {plan.length > 0 && <PlanBlock entries={plan} active={running} />}
           {attachments.length > 0 && (
             <div className="attachment-tray" aria-label="Files attached to this message">
               {attachments.map((attachment) => (
@@ -4553,10 +4666,45 @@ function App() {
               <button className="send-button" type="submit" aria-label="Send" disabled={(!draft.trim() && attachments.length === 0) || appUpdating || sessionTransitioning || activeApprovalModeChanging}><Icon name="arrow-up" size={17} /></button>
             )}
           </div>
-        </form>
+          </form>
+        </div>
         </>
         )}
       </main>
+      {activeView === "session" && sidePanelOpen && (
+          <div
+            className="side-panel-resizer"
+            role="separator"
+            aria-label="Resize tools panel"
+            aria-orientation="vertical"
+            aria-valuemin={MIN_SIDE_PANEL_WIDTH}
+            aria-valuemax={MAX_SIDE_PANEL_WIDTH}
+            aria-valuenow={Math.round(sidePanelWidth)}
+            tabIndex={0}
+            onDoubleClick={() => setSidePanelWidth(defaultSidePanelWidth())}
+            onKeyDown={resizeSidePanelWithKeyboard}
+            onPointerDown={startSidePanelResize}
+            onPointerMove={resizeSidePanel}
+            onPointerUp={finishSidePanelResize}
+            onPointerCancel={finishSidePanelResize}
+          />
+      )}
+      {activeView === "session" && sidePanelMounted && (
+        <TerminalPanel open={sidePanelOpen} workingDirectory={connection?.workingDirectory ?? workspace} />
+      )}
+      {activeView === "session" && (
+        <button
+          className="icon-button tools-panel-toggle"
+          type="button"
+          aria-label={sidePanelOpen ? "Close tools panel" : "Open tools panel"}
+          aria-controls="tools-panel"
+          aria-expanded={sidePanelOpen}
+          title={`${sidePanelOpen ? "Close" : "Open"} tools panel (${sidePanelShortcutLabel})`}
+          onClick={toggleSidePanel}
+        >
+          <Icon name="panel" size={16} />
+        </button>
+      )}
       </div>
       <GlobalSearchDialog
         open={globalSearchOpen}
