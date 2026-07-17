@@ -11,20 +11,25 @@
 </p>
 
 <p align="center">
-  <a href="#getting-started">Getting started</a> ·
+  <a href="#install-groky">Install</a> ·
   <a href="#what-works-today">Features</a> ·
+  <a href="#getting-started">Getting started</a> ·
   <a href="#development">Development</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 > [!WARNING]
-> Groky is under active development. The core Grok Build workflow works from source, but the app is not yet presented as a stable release and its behavior may change.
+> Groky is an early release under active development. Features, stored navigation metadata, and compatibility may change between releases.
 
 > [!IMPORTANT]
 > Groky is an independent, unofficial project and is not affiliated with or endorsed by xAI.
 
 <p align="center">
   <img src="docs/assets/groky-hero.png" alt="Groky ready to start a standalone Grok Build session" width="100%">
+</p>
+
+<p align="center">
+  <strong><a href="https://github.com/ti-ebi/groky/releases/latest">Download the latest release</a></strong>
 </p>
 
 ## Why Groky
@@ -56,7 +61,9 @@ Grok Build is a powerful coding agent. Groky turns its local CLI into a persiste
 | Settings | Application version, updater status, CLI and active-session details, account controls, and searchable archived chats |
 | Updates | Signed in-app updates backed by GitHub Releases |
 
-## Getting started
+## Install Groky
+
+Groky runs the official Grok Build CLI on your computer. Install the CLI first, then choose the Groky package for your operating system.
 
 ### 1. Install Grok Build
 
@@ -69,27 +76,51 @@ grok --version
 
 Groky uses the official CLI as its agent runtime. You can sign in during Groky's onboarding flow, so starting an interactive `grok` session first is optional.
 
-### 2. Run Groky from source
-
-Requirements:
-
-- Node.js 24 or later
-- pnpm 10
-- Rust 1.88 or later
-- Grok Build CLI
-
-```bash
-git clone https://github.com/ti-ebi/groky.git
-cd groky
-pnpm install
-pnpm tauri dev
-```
-
 Groky checks `GROK_BINARY`, your `PATH`, `~/.local/bin`, and `~/.grok/bin` when locating the CLI. Set `GROK_BINARY` to the executable path if Grok Build is installed somewhere else.
 
-### 3. Start a session
+> [!NOTE]
+> The CLI must be available in the same operating-system environment as Groky. In particular, the native Windows app cannot automatically use a Grok Build installation that exists only inside WSL.
 
-On first launch, Groky:
+### 2. Download Groky
+
+Download Groky only from the official [GitHub Releases page](https://github.com/ti-ebi/groky/releases/latest). Expand **Assets** and select the package that matches your computer:
+
+| Operating system | Package to download | Architecture |
+| --- | --- | --- |
+| macOS on Apple Silicon | `Groky_*_aarch64.dmg` | Apple M1 or later |
+| macOS on Intel | `Groky_*_x64.dmg` | Intel 64-bit |
+| Windows | `Groky_*_x64-setup.exe` | x86-64 |
+| Debian or Ubuntu | `Groky_*_amd64.deb` | x86-64 |
+| Other Linux distributions | `Groky_*_amd64.AppImage` | x86-64 |
+
+#### macOS
+
+Open the `.dmg`, then drag **Groky** into the **Applications** folder. macOS release builds are code signed and notarized by Apple.
+
+#### Windows
+
+Run `Groky_*_x64-setup.exe` and follow the installer. The Windows installer is signed for Groky's in-app updater, but it is not yet Authenticode code signed, so Windows SmartScreen may show an unrecognized-publisher warning. Confirm that the file came from `github.com/ti-ebi/groky` before continuing.
+
+#### Debian or Ubuntu
+
+```bash
+sudo apt install ./Groky_*_amd64.deb
+```
+
+#### Other Linux distributions
+
+Make the AppImage executable, then run it:
+
+```bash
+chmod +x Groky_*_amd64.AppImage
+./Groky_*_amd64.AppImage
+```
+
+Files ending in `.sig`, `.app.tar.gz`, and `latest.json` are used by the signed automatic updater. You do not need to download them for a manual installation.
+
+## Getting started
+
+Start Groky from your Applications folder, Start menu, or application launcher. On first launch, Groky:
 
 1. Detects the local Grok Build CLI.
 2. Checks the CLI's cached authentication state.
@@ -145,9 +176,18 @@ Grok Build itself handles model and network communication. Prompts and project c
 
 ## Development
 
-Install dependencies and run the desktop application:
+Requirements:
+
+- Node.js 24 or later
+- pnpm 10
+- Rust 1.88 or later
+- Grok Build CLI
+
+Clone the repository, install dependencies, and run the desktop application:
 
 ```bash
+git clone https://github.com/ti-ebi/groky.git
+cd groky
 pnpm install
 pnpm tauri dev
 ```
@@ -197,9 +237,25 @@ Configure these GitHub Actions secrets before the first release:
 - `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY` for macOS code signing
 - `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` for macOS notarization
 
-For each release, update the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, merge the release commit into `develop`, then push a matching `vX.Y.Z` tag.
+For each release:
+
+1. Update the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+2. Merge the release commit into `develop`.
+3. Run the **Release** workflow manually with `develop` selected. A matching `vX.Y.Z` tag can also trigger the workflow, but the manual path is preferred because it prepares the tag as part of the draft release.
+4. Wait for every matrix job to finish and inspect the draft GitHub Release.
+5. Test each installer on its target operating system before publishing the draft.
 
 The [release workflow](.github/workflows/release.yml) builds both macOS architectures, Windows NSIS, and Linux AppImage/DEB artifacts, signs updater bundles, generates `latest.json`, and creates a draft GitHub Release. Publish the draft only after testing its installers.
+
+Before publishing, confirm that the draft contains:
+
+- Apple Silicon and Intel `.dmg` installers, plus their signed `.app.tar.gz` updater bundles.
+- The Windows NSIS `.exe` installer and its `.sig` file.
+- Linux `.AppImage` and `.deb` packages and both `.sig` files.
+- A `latest.json` whose version and platform entries match the uploaded updater bundles.
+- Release notes that clearly describe user-visible changes and any known limitations.
+
+After publishing, verify the public [latest release](https://github.com/ti-ebi/groky/releases/latest) and the [updater manifest](https://github.com/ti-ebi/groky/releases/latest/download/latest.json). Do not replace assets on a published release; ship a new patch release if an installer or updater manifest must be corrected.
 
 An installation that predates updater support cannot discover the updater-enabled release. Existing users must install that first release manually once; later releases can update inside Groky.
 
