@@ -25,7 +25,7 @@
 > Groky is an independent, unofficial project and is not affiliated with or endorsed by xAI.
 
 <p align="center">
-  <img src="docs/assets/groky-hero.png" alt="Groky ready to start a standalone Grok Build session" width="100%">
+  <img src="docs/assets/groky-hero.png" alt="Groky showing a Grok Build conversation, file preview, and workspace explorer" width="100%">
 </p>
 
 <p align="center">
