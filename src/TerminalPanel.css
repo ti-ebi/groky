@@ -92,11 +92,19 @@
 }
 
 .side-panel-tab-item {
+  position: relative;
   display: flex;
   min-width: 88px;
   max-width: 220px;
   flex: 0 1 auto;
   align-items: center;
+  user-select: none;
+  transform: translateX(var(--tool-tab-reorder-x, 0));
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease,
+    transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .side-panel-tab {
@@ -118,6 +126,50 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-panel-tab[data-reorderable="true"] {
+  cursor: grab;
+  touch-action: none;
+}
+
+.side-panel-tab-item[data-dragging="true"] {
+  z-index: 4;
+  background: color-mix(in srgb, var(--tool-surface) 88%, var(--tool-accent));
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--tool-text-strong) 18%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--tool-accent) 38%, transparent);
+  opacity: 0.9;
+  transform: translateX(var(--tool-tab-drag-x, 0));
+  transition: background 90ms ease, box-shadow 90ms ease, opacity 90ms ease;
+  will-change: transform;
+}
+
+.side-panel-tab-list[data-drag-active="true"] {
+  cursor: grabbing;
+}
+
+.side-panel-tab-list[data-drag-active="true"] .side-panel-tab-item:not([data-dragging="true"]) {
+  will-change: transform;
+}
+
+.side-panel-tab-list[data-reorder-committing="true"] .side-panel-tab-item {
+  transition: none;
+}
+
+body.is-dragging-tool-tab,
+body.is-dragging-tool-tab * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.side-panel-tab-announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
