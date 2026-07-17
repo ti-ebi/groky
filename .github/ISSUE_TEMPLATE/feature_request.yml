@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose an improvement or new capability for Groky
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Search existing issues first and focus this request on the problem to solve.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to accomplish, and what currently makes it difficult?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the behavior or result you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or alternative approaches you have tried.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized mockups or examples if they clarify the request.
+  - type: checkboxes
+    id: sensitive-information
+    attributes:
+      label: Sensitive information
+      options:
+        - label: I have removed credentials, private source code, prompts, session data, and raw ACP traffic from this request and its attachments.
+          required: true

@@ -26,6 +26,7 @@ const PROCESS_TREE_KILL_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_SESSION_ID_CHARS: usize = 256;
 const MAX_TOOL_CALL_ID_CHARS: usize = 256;
 const MAX_PERMISSION_OPTION_ID_CHARS: usize = 160;
+const MAX_ACP_ERROR_MESSAGE_CHARS: usize = 800;
 const COMMANDS_LIST_METHOD: &str = "_x.ai/commands/list";
 const SESSION_INFO_METHOD: &str = "_x.ai/session/info";
 
@@ -1008,8 +1009,8 @@ fn decode_frame(line: &str) -> Result<InboundFrame, String> {
         .and_then(Value::as_u64)
         .ok_or_else(|| "response is missing a numeric id".to_string())?;
 
-    let response = if object.get("error").is_some() {
-        Err("Grok Build returned an ACP error.".to_string())
+    let response = if let Some(error) = object.get("error") {
+        Err(safe_acp_error_message(error))
     } else if let Some(result) = object.get("result") {
         Ok(result.clone())
     } else {
@@ -1017,6 +1018,112 @@ fn decode_frame(line: &str) -> Result<InboundFrame, String> {
     };
 
     Ok(InboundFrame::Response { id, response })
+}
+
+fn safe_acp_error_message(error: &Value) -> String {
+    if let Some(message) = error
+        .get("message")
+        .and_then(Value::as_str)
+        .and_then(sanitize_acp_error_detail)
+    {
+        return message;
+    }
+
+    "Grok Build returned an error. Try again, or start a new session if the problem continues."
+        .to_string()
+}
+
+fn sanitize_acp_error_detail(message: &str) -> Option<String> {
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let redacted = redact_acp_error_credentials(&normalized);
+    let mut characters = redacted.chars();
+    let visible = characters
+        .by_ref()
+        .take(MAX_ACP_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        Some(format!("{visible}…"))
+    } else {
+        Some(visible)
+    }
+}
+
+fn redact_acp_error_credentials(message: &str) -> String {
+    const SECRET_PREFIXES: &[&str] = &["xai-", "sk-", "xoxb-", "xoxp-", "ghp_", "github_pat_"];
+    const SECRET_ASSIGNMENTS: &[&str] = &[
+        "api_key=",
+        "apikey=",
+        "xai_api_key=",
+        "access_token=",
+        "refresh_token=",
+        "token=",
+        "authorization=",
+        "password=",
+        "secret=",
+    ];
+    const SECRET_LABELS: &[&str] = &[
+        "authorization",
+        "bearer",
+        "api_key",
+        "apikey",
+        "xai_api_key",
+        "access_token",
+        "refresh_token",
+        "password",
+        "secret",
+    ];
+
+    let mut redacted = Vec::new();
+    let mut redact_next = false;
+
+    for word in message.split_whitespace() {
+        let lowercase = word.to_ascii_lowercase();
+        let label = lowercase.trim_matches(|character: char| {
+            matches!(
+                character,
+                '"' | '\'' | ':' | '=' | ',' | ';' | '(' | ')' | '[' | ']'
+            )
+        });
+
+        if redact_next {
+            if label == "bearer" {
+                redacted.push(word.to_string());
+                continue;
+            }
+            redacted.push("[REDACTED]".to_string());
+            redact_next = false;
+            continue;
+        }
+
+        if SECRET_PREFIXES
+            .iter()
+            .any(|prefix| lowercase.contains(prefix))
+        {
+            redacted.push("[REDACTED]".to_string());
+            continue;
+        }
+
+        if let Some((index, marker)) = SECRET_ASSIGNMENTS
+            .iter()
+            .find_map(|marker| lowercase.find(marker).map(|index| (index, *marker)))
+        {
+            redacted.push(format!("{}[REDACTED]", &word[..index + marker.len()]));
+            continue;
+        }
+
+        redacted.push(word.to_string());
+        redact_next = SECRET_LABELS.contains(&label);
+    }
+
+    if redact_next {
+        redacted.push("[REDACTED]".to_string());
+    }
+
+    redacted.join(" ")
 }
 
 fn route_response(
@@ -2252,19 +2359,57 @@ mod tests {
     }
 
     #[test]
-    fn replaces_agent_error_details_with_a_fixed_safe_message() {
+    fn shows_the_agent_error_message_without_exposing_its_data() {
         let frame = decode_frame(
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"secret output"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"API error (status 429 Too Many Requests): subscription:free-usage-exhausted: You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 2013658/2000000.","data":{"details":"secret output"}}}"#,
         )
         .expect("a valid error response should still be correlated");
 
         match frame {
             InboundFrame::Response { response, .. } => {
                 let error = response.expect_err("the response is an error");
-                assert_eq!(error, "Grok Build returned an ACP error.");
+                assert_eq!(
+                    error,
+                    "API error (status 429 Too Many Requests): subscription:free-usage-exhausted: You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 2013658/2000000."
+                );
                 assert!(!error.contains("secret output"));
             }
             _ => panic!("expected an ACP response"),
+        }
+    }
+
+    #[test]
+    fn normalizes_limits_and_redacts_credentials_in_agent_error_messages() {
+        let message = format!(
+            "  Request failed\nwith Authorization: Bearer credential-value, \
+             api_key=another-value and xai-sensitive-value. {}  ",
+            "x".repeat(MAX_ACP_ERROR_MESSAGE_CHARS)
+        );
+        let error = safe_acp_error_message(&json!({ "message": message }));
+
+        assert!(error.starts_with(
+            "Request failed with Authorization: Bearer [REDACTED] api_key=[REDACTED] and [REDACTED]"
+        ));
+        assert!(!error.contains("credential-value"));
+        assert!(!error.contains("another-value"));
+        assert!(!error.contains("xai-sensitive-value"));
+        assert!(error.ends_with('…'));
+        assert!(error.chars().count() <= MAX_ACP_ERROR_MESSAGE_CHARS + 1);
+    }
+
+    #[test]
+    fn keeps_unknown_or_malformed_agent_errors_generic() {
+        for agent_error in [
+            json!({ "code": -32000, "data": "secret output" }),
+            Value::Null,
+            json!("secret output"),
+        ] {
+            let error = safe_acp_error_message(&agent_error);
+            assert_eq!(
+                error,
+                "Grok Build returned an error. Try again, or start a new session if the problem continues."
+            );
+            assert!(!error.contains("secret output"));
         }
     }
 
