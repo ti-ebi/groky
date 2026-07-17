@@ -1746,14 +1746,13 @@ function SetupStep({ index, label, detail, state }: { index: string; label: stri
   );
 }
 
-function AppUpdateNotice({
+function SidebarUpdateCard({
   update,
   phase,
   progress,
   error,
   taskRunning,
   onInstall,
-  onDismiss,
 }: {
   update: AppUpdateInfo;
   phase: AppUpdatePhase;
@@ -1761,7 +1760,6 @@ function AppUpdateNotice({
   error: string | null;
   taskRunning: boolean;
   onInstall: () => void;
-  onDismiss: () => void;
 }) {
   const percentage = progress?.total
     ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
@@ -1773,44 +1771,45 @@ function AppUpdateNotice({
       ? "Downloading signed update…"
       : `Downloading signed update… ${percentage}%`;
 
+  const statusLabel = installing
+    ? progressLabel
+    : phase === "error"
+      ? error ?? "The update could not be installed."
+      : taskRunning
+        ? "Ready after the current turn finishes."
+        : "A new version is ready to install.";
+
   return (
-    <aside className={`app-update-notice ${phase}`} aria-live="polite" aria-label="Groky update">
-      <div className="update-glyph"><Icon name="download" size={18} /></div>
-      <div className="update-copy">
-        <span>GROKY UPDATE</span>
-        <strong>Version {update.version} is ready.</strong>
-        {installing ? (
-          <>
-            <small>{progressLabel}</small>
-            <div
-              className={`update-progress ${percentage === null ? "indeterminate" : ""}`}
-              role="progressbar"
-              aria-label={progressLabel}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={percentage ?? undefined}
-            >
-              <i style={percentage === null ? undefined : { width: `${percentage}%` }} />
-            </div>
-          </>
-        ) : (
-          <small>{phase === "error" ? error : update.body || `Update from ${update.currentVersion} to ${update.version}.`}</small>
-        )}
+    <section className={`sidebar-update-card ${phase}`} aria-live="polite" aria-label="Groky update available">
+      <div className="sidebar-update-heading">
+        <span className="sidebar-update-glyph"><Icon name="download" size={15} /></span>
+        <span>
+          <small>UPDATE AVAILABLE</small>
+          <strong>Groky {update.version}</strong>
+        </span>
       </div>
+      <p>{statusLabel}</p>
+      {installing && (
+        <div
+          className={`update-progress ${percentage === null ? "indeterminate" : ""}`}
+          role="progressbar"
+          aria-label={progressLabel}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percentage ?? undefined}
+        >
+          <i style={percentage === null ? undefined : { width: `${percentage}%` }} />
+        </div>
+      )}
       <button
-        className="update-install-button"
         type="button"
         disabled={taskRunning || installing}
         onClick={onInstall}
       >
+        <Icon name="download" size={13} />
         {installing ? "Updating…" : taskRunning ? "Finish current turn first" : "Update & restart"}
       </button>
-      {!installing && (
-        <button className="icon-button update-dismiss" type="button" aria-label="Dismiss update" onClick={onDismiss}>
-          <Icon name="x" size={14} />
-        </button>
-      )}
-    </aside>
+    </section>
   );
 }
 
@@ -1911,9 +1910,11 @@ function SettingsScreen({
   update,
   updatePhase,
   updateNotice,
+  taskRunning,
   archivedSessions,
   archivedActionsDisabled,
   onCheckForUpdates,
+  onInstallUpdate,
   onSignOut,
   onRestoreArchived,
   onDeleteArchived,
@@ -1929,9 +1930,11 @@ function SettingsScreen({
   update: AppUpdateInfo | null;
   updatePhase: AppUpdatePhase;
   updateNotice: string | null;
+  taskRunning: boolean;
   archivedSessions: SidebarSessionSummary[];
   archivedActionsDisabled: boolean;
   onCheckForUpdates: () => void;
+  onInstallUpdate: () => void;
   onSignOut: () => void;
   onRestoreArchived: (sessionId: string) => void;
   onDeleteArchived: (session: SidebarSessionSummary) => void;
@@ -1969,11 +1972,15 @@ function SettingsScreen({
       }
     });
   }, [archivedQuery, archivedSessions, archivedSort]);
-  const updateButtonLabel = checkingForUpdates
-    ? "Checking…"
-    : updating
+  const updateButtonLabel = update
+    ? updating
       ? "Updating…"
-      : "Check for updates";
+      : taskRunning
+        ? "Finish current turn first"
+        : "Update & restart"
+    : checkingForUpdates
+      ? "Checking…"
+      : "Check now";
 
   return (
     <div className="settings-page">
@@ -2006,10 +2013,16 @@ function SettingsScreen({
               <div className="settings-row settings-update-row">
                 <div>
                   <strong>Software updates</strong>
-                  <small>{update ? `Version ${update.version} is available.` : "Check GitHub Releases for a signed update."}</small>
+                  <small>{update
+                    ? `Version ${update.version} is available. Groky found it automatically.`
+                    : "Groky checks automatically and will notify you when a new version is ready."}</small>
                 </div>
-                <button type="button" disabled={checkingForUpdates || updating} onClick={onCheckForUpdates}>
-                  <Icon name="refresh" size={14} />
+                <button
+                  type="button"
+                  disabled={checkingForUpdates || updating || (update !== null && taskRunning)}
+                  onClick={update ? onInstallUpdate : onCheckForUpdates}
+                >
+                  <Icon name={update ? "download" : "refresh"} size={14} />
                   {updateButtonLabel}
                 </button>
               </div>
@@ -3577,13 +3590,6 @@ function App() {
     }
   }
 
-  function dismissAppUpdate() {
-    setAppUpdate(null);
-    setUpdateError(null);
-    setUpdateProgress(null);
-    setUpdatePhase("idle");
-  }
-
   async function login() {
     setSetupError(null);
     setDeviceAuthCode(null);
@@ -4340,17 +4346,6 @@ function App() {
 
   const authenticated = ["ready", "connecting", "connected"].includes(stage);
   const appNotice = connectionNotice ?? setupError;
-  const updateNotice = appUpdate ? (
-    <AppUpdateNotice
-      update={appUpdate}
-      phase={updatePhase}
-      progress={updateProgress}
-      error={updateError}
-      taskRunning={anySessionRunning}
-      onInstall={() => void installAppUpdate()}
-      onDismiss={dismissAppUpdate}
-    />
-  ) : null;
 
   if (!authenticated) {
     return (
@@ -4366,7 +4361,6 @@ function App() {
           onOpenInstallGuide={() => void openInstallGuide()}
           onLogin={() => void login()}
         />
-        {updateNotice}
       </>
     );
   }
@@ -4584,6 +4578,17 @@ function App() {
 
         </div>
 
+        {appUpdate && (
+          <SidebarUpdateCard
+            update={appUpdate}
+            phase={updatePhase}
+            progress={updateProgress}
+            error={updateError}
+            taskRunning={anySessionRunning}
+            onInstall={() => void installAppUpdate()}
+          />
+        )}
+
         <button
           className="profile-row"
           type="button"
@@ -4629,12 +4634,26 @@ function App() {
               <span>Settings</span>
               <span className="popover-settings-arrow"><Icon name="arrow-right" size={12} /></span>
             </button>
-            <div className="popover-update">
-              <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={updatePhase === "checking" || updatePhase === "downloading"}>
-                <Icon name="refresh" size={13} />
-                {updatePhase === "checking" ? "Checking…" : "Check for updates"}
+            <div className={`popover-update ${appUpdate ? "available" : ""}`}>
+              <button
+                type="button"
+                onClick={appUpdate ? () => void installAppUpdate() : () => void checkForAppUpdate(true)}
+                disabled={updatePhase === "checking" || updatePhase === "downloading" || (appUpdate !== null && anySessionRunning)}
+              >
+                <Icon name={appUpdate ? "download" : "refresh"} size={13} />
+                {appUpdate
+                  ? updatePhase === "downloading"
+                    ? "Updating…"
+                    : anySessionRunning
+                      ? "Finish current turn first"
+                      : "Update & restart"
+                  : updatePhase === "checking"
+                    ? "Checking…"
+                    : "Check now"}
               </button>
-              {updateCheckNotice && <small aria-live="polite">{updateCheckNotice}</small>}
+              <small aria-live="polite">{appUpdate
+                ? `Version ${appUpdate.version} was found automatically.`
+                : updateCheckNotice ?? "Automatic update checks are on."}</small>
             </div>
             <div className="popover-actions">
               <button className="danger-action" type="button" onClick={() => void signOut()}><Icon name="logout" size={14} /> Sign out</button>
@@ -4677,9 +4696,11 @@ function App() {
             update={appUpdate}
             updatePhase={updatePhase}
             updateNotice={updateCheckNotice}
+            taskRunning={anySessionRunning}
             archivedSessions={archivedSidebarSessions}
             archivedActionsDisabled={sidebarActionsDisabled}
             onCheckForUpdates={() => void checkForAppUpdate(true)}
+            onInstallUpdate={() => void installAppUpdate()}
             onSignOut={() => void signOut()}
             onRestoreArchived={(sessionId) => void mutateSessionHistory("restore", { sessionId })}
             onDeleteArchived={(session) => requestSessionDelete(session)}
@@ -5016,7 +5037,6 @@ function App() {
           </div>
         </div>
       )}
-      {updateNotice}
     </>
   );
 }
