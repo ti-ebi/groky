@@ -1,0 +1,33 @@
+name: Documentation improvement
+description: Report missing, unclear, or incorrect Groky documentation
+title: "[Docs]: "
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link to the page or provide the file and section name.
+      placeholder: "README.md — Development"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Explain what is missing, unclear, or incorrect.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: Describe the change you would like to see.
+    validations:
+      required: true
+  - type: checkboxes
+    id: sensitive-information
+    attributes:
+      label: Sensitive information
+      options:
+        - label: I have removed credentials, private source code, prompts, session data, and raw ACP traffic from this report and its attachments.
+          required: true

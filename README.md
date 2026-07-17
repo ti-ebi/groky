@@ -231,12 +231,12 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
+Community contributions are accepted through [GitHub Issues](https://github.com/ti-ebi/groky/issues/new/choose). Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a report or proposal.
 
-- Branch from `develop`.
-- Keep each change focused.
-- Run the required checks.
-- Open pull requests against `develop`.
+- Search existing issues before opening a new one.
+- Use the appropriate form for a bug, feature request, or documentation improvement.
+- Keep each issue focused on one topic and remove sensitive information from all reports and attachments.
+- Do not open a pull request unless a maintainer invites you to implement an accepted issue.
 
 ## Releasing
 
