@@ -41,6 +41,8 @@ const WORKSPACE_HISTORY_FILE: &str = "working-directories.json";
 const DEFAULT_SESSION_TITLE: &str = "New Grok session";
 const MAX_SESSION_TITLE_CHARS: usize = 72;
 const MAX_ATTACHMENTS: usize = 10;
+const MAX_AUTH_FILE_BYTES: usize = 1024 * 1024;
+const MAX_ACCOUNT_FIELD_CHARS: usize = 320;
 static MANAGED_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -94,6 +96,14 @@ struct OnboardingStatus {
     cli_version: Option<String>,
     suggested_workspace: Option<String>,
     message: Option<String>,
+    account_profile: Option<AccountProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountProfile {
+    display_name: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -502,11 +512,13 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
             .cloned()
     };
     if let Some(session) = active_session {
+        let account_profile = read_account_profile().await;
         return Ok(OnboardingStatus {
             stage: "connected",
             cli_version: Some(session.cli_version.clone()),
             suggested_workspace: session.workspace.clone(),
             message: None,
+            account_profile,
         });
     }
 
@@ -519,6 +531,7 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
                 cli_version: None,
                 suggested_workspace,
                 message: Some("Grok Build CLI was not found.".to_string()),
+                account_profile: None,
             })
         }
     };
@@ -535,6 +548,7 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
                 cli_version: Some(cli.version),
                 suggested_workspace,
                 message: Some(message),
+                account_profile: None,
             })
         }
     };
@@ -543,23 +557,29 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
     transport.shutdown().await;
 
     match auth_result {
-        Ok(_) => Ok(OnboardingStatus {
-            stage: "ready",
-            cli_version: Some(cli.version),
-            suggested_workspace,
-            message: None,
-        }),
+        Ok(_) => {
+            let account_profile = read_account_profile().await;
+            Ok(OnboardingStatus {
+                stage: "ready",
+                cli_version: Some(cli.version),
+                suggested_workspace,
+                message: None,
+                account_profile,
+            })
+        }
         Err(AuthError::NeedsLogin) => Ok(OnboardingStatus {
             stage: "needsAuth",
             cli_version: Some(cli.version),
             suggested_workspace,
             message: Some("Sign in to your Grok account to continue.".to_string()),
+            account_profile: None,
         }),
         Err(AuthError::Transport(message)) => Ok(OnboardingStatus {
             stage: "error",
             cli_version: Some(cli.version),
             suggested_workspace,
             message: Some(message),
+            account_profile: None,
         }),
     }
 }
@@ -1874,6 +1894,88 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+async fn read_account_profile() -> Option<AccountProfile> {
+    let path = home_dir()?.join(".grok").join("auth.json");
+    let bytes = tokio::fs::read(path).await.ok()?;
+    if bytes.len() > MAX_AUTH_FILE_BYTES {
+        return None;
+    }
+    let auth = serde_json::from_slice::<Value>(&bytes).ok()?;
+    account_profile_from_auth(&auth)
+}
+
+fn account_profile_from_auth(auth: &Value) -> Option<AccountProfile> {
+    auth.as_object()?
+        .values()
+        .filter_map(account_profile_candidate)
+        .max_by_key(|(created_at, _)| *created_at)
+        .map(|(_, profile)| profile)
+}
+
+fn account_profile_candidate(record: &Value) -> Option<(i64, AccountProfile)> {
+    let first_name = account_field(record, &["first_name", "firstName"]);
+    let last_name = account_field(record, &["last_name", "lastName"]);
+    let explicit_name = account_field(record, &["display_name", "displayName", "name"]);
+    let display_name = explicit_name.or_else(|| match (first_name, last_name) {
+        (Some(first), Some(last)) => Some(format!("{first} {last}")),
+        (Some(first), None) => Some(first),
+        (None, Some(last)) => Some(last),
+        (None, None) => None,
+    });
+    let email = account_field(record, &["email"]);
+    if display_name.is_none() && email.is_none() {
+        return None;
+    }
+
+    Some((
+        account_record_timestamp(record),
+        AccountProfile {
+            display_name,
+            email,
+        },
+    ))
+}
+
+fn account_field(record: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let value = record.get(*key)?.as_str()?.trim();
+        if value.is_empty()
+            || value.chars().count() > MAX_ACCOUNT_FIELD_CHARS
+            || value.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(value.to_string())
+    })
+}
+
+fn account_record_timestamp(record: &Value) -> i64 {
+    let Some(value) = record
+        .get("create_time")
+        .or_else(|| record.get("createTime"))
+    else {
+        return 0;
+    };
+    if let Some(timestamp) = value.as_i64() {
+        return timestamp;
+    }
+    if let Some(timestamp) = value.as_u64() {
+        return timestamp.min(i64::MAX as u64) as i64;
+    }
+    let Some(timestamp) = value.as_str() else {
+        return 0;
+    };
+    timestamp
+        .parse::<i64>()
+        .ok()
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .map(|date| date.timestamp_millis())
+        })
+        .unwrap_or(0)
+}
+
 fn session_history_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -2327,13 +2429,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_capabilities, apply_session_history_action, attachment_resource_links,
-        extract_device_auth_code, inspect_attachment_paths, is_context_slash_command,
-        managed_workspace_name, normalize_session_title, parse_initialize_models,
-        parse_session_models, reasoning_effort_value, remove_workspace_history,
-        rename_session_title, set_session_approval_mode, set_session_unread, title_from_prompt,
-        upsert_session_history, upsert_workspace_history, ApprovalMode, PersistedSession,
-        PersistedWorkspace, SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
+        account_profile_from_auth, agent_capabilities, apply_session_history_action,
+        attachment_resource_links, extract_device_auth_code, inspect_attachment_paths,
+        is_context_slash_command, managed_workspace_name, normalize_session_title,
+        parse_initialize_models, parse_session_models, reasoning_effort_value,
+        remove_workspace_history, rename_session_title, set_session_approval_mode,
+        set_session_unread, title_from_prompt, upsert_session_history, upsert_workspace_history,
+        ApprovalMode, PersistedSession, PersistedWorkspace, SessionHistoryAction,
+        DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
     };
     use super::{record_model_selection, resolve_initial_model_selection};
     use chrono::{Local, TimeZone};
@@ -2368,6 +2471,36 @@ mod tests {
         assert!(
             extract_device_auth_code("https://accounts.x.ai/oauth2/device?user_code=TOO-LONG")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn extracts_only_safe_fields_from_the_latest_grok_account() {
+        let profile = account_profile_from_auth(&json!({
+            "https://auth.x.ai::older": {
+                "create_time": 100,
+                "first_name": "Old",
+                "email": "old@example.com"
+            },
+            "https://auth.x.ai::current": {
+                "create_time": 200,
+                "first_name": " Grace ",
+                "last_name": " Hopper ",
+                "email": "grace@example.com",
+                "key": "must-not-cross-the-tauri-boundary",
+                "refresh_token": "must-not-cross-the-tauri-boundary"
+            }
+        }))
+        .expect("the latest account should provide a profile");
+
+        assert_eq!(profile.display_name.as_deref(), Some("Grace Hopper"));
+        assert_eq!(profile.email.as_deref(), Some("grace@example.com"));
+        assert_eq!(
+            serde_json::to_value(profile).expect("profile should serialize"),
+            json!({
+                "displayName": "Grace Hopper",
+                "email": "grace@example.com"
+            })
         );
     }
 

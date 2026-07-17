@@ -921,6 +921,7 @@ body.is-resizing-side-panel .app-shell {
 
 .avatar {
   display: grid;
+  flex: 0 0 auto;
   width: 25px;
   height: 25px;
   place-items: center;
@@ -3190,6 +3191,7 @@ body.is-resizing-side-panel .app-shell {
 
 .profile-copy {
   display: grid;
+  flex: 1 1 auto;
   min-width: 0;
   gap: 1px;
 }
@@ -3203,7 +3205,7 @@ body.is-resizing-side-panel .app-shell {
 
 .profile-copy small {
   color: var(--muted);
-  font: 8px var(--mono);
+  font: 9px/1.2 var(--mono);
 }
 
 .connection-pill {

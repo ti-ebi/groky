@@ -66,6 +66,12 @@ interface OnboardingStatus {
   cliVersion: string | null;
   suggestedWorkspace: string | null;
   message: string | null;
+  accountProfile: AccountProfile | null;
+}
+
+interface AccountProfile {
+  displayName: string | null;
+  email: string | null;
 }
 
 interface Connection {
@@ -971,6 +977,11 @@ function SessionLocationSelector({
 
 function cleanVersion(version: string | null) {
   return version?.replace(/^grok\s+/, "") ?? "not detected";
+}
+
+function accountAvatarLabel(profile: AccountProfile | null) {
+  const label = profile?.displayName ?? profile?.email ?? "G";
+  return Array.from(label.trim())[0]?.toLocaleUpperCase() ?? "G";
 }
 
 function makeMessageId(prefix: string) {
@@ -2629,6 +2640,11 @@ function App() {
   }
 
   const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
+  const accountProfile = status?.accountProfile ?? null;
+  const accountName = accountProfile?.displayName ?? accountProfile?.email ?? "Grok Build";
+  const accountDetail = accountProfile?.displayName && accountProfile.email
+    ? accountProfile.email
+    : cleanVersion(connection?.cliVersion ?? status?.cliVersion ?? null);
   const messageHistory = useMemo(() => conversationTurnPreviews(messages), [messages]);
   const appUpdating = updatePhase === "downloading";
   const sidebarSessions: SidebarSessionSummary[] = sessionHistory.map((session) => ({
@@ -4393,9 +4409,12 @@ function App() {
           data-connection-popover-root
           onClick={() => setShowConnection((current) => !current)}
         >
-          <span className="avatar">G</span>
-          <span className="profile-copy"><strong>Grok Build</strong><small>{cleanVersion(connection?.cliVersion ?? status?.cliVersion ?? null)}</small></span>
-          <span className={`connection-pill ${connection ? "" : "idle"}`}>{connection ? "live" : "signed in"}</span>
+          <span className="avatar" aria-hidden="true">{accountAvatarLabel(accountProfile)}</span>
+          <span className="profile-copy">
+            <strong>{accountName}</strong>
+            <small title={accountDetail}>{accountDetail}</small>
+          </span>
+          {connection && <span className="connection-pill">live</span>}
         </button>
 
         {showConnection && (
