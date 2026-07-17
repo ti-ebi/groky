@@ -32,6 +32,14 @@ pub(crate) struct TerminalRuntime {
     sessions: Mutex<HashMap<String, TerminalSession>>,
 }
 
+impl TerminalRuntime {
+    pub(crate) fn shutdown(&self) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.clear();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TerminalOutputEvent {

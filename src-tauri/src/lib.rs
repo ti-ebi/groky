@@ -1808,6 +1808,12 @@ async fn disconnect_runtime(state: &GrokRuntime) {
     }
 }
 
+async fn shutdown_app(app: &AppHandle) {
+    disconnect_runtime(&app.state::<GrokRuntime>()).await;
+    app.state::<TerminalRuntime>().shutdown();
+    app.state::<WorkspaceWatcherRuntime>().shutdown();
+}
+
 fn extract_device_auth_code(line: &str) -> Option<String> {
     let start = line.find(DEVICE_AUTH_URL_PREFIX)? + DEVICE_AUTH_URL_PREFIX.len();
     let code = line[start..]
@@ -2388,7 +2394,7 @@ fn open_url(url: &str) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(GrokRuntime::default())
         .manage(AppUpdateRuntime::default())
@@ -2434,8 +2440,14 @@ pub fn run() {
             terminal_resize,
             terminal_stop,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            tauri::async_runtime::block_on(shutdown_app(app));
+        }
+    });
 }
 
 #[cfg(test)]

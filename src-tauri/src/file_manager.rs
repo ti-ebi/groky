@@ -27,6 +27,14 @@ pub(crate) struct WorkspaceWatcherRuntime {
     watchers: Mutex<HashMap<String, (String, RecommendedWatcher)>>,
 }
 
+impl WorkspaceWatcherRuntime {
+    pub(crate) fn shutdown(&self) {
+        if let Ok(mut watchers) = self.watchers.lock() {
+            watchers.clear();
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceChangedEvent {
