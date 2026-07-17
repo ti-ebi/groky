@@ -241,11 +241,11 @@ For each release:
 
 1. Update the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Merge the release commit into `develop`.
-3. Run the **Release** workflow manually with `develop` selected. A matching `vX.Y.Z` tag can also trigger the workflow, but the manual path is preferred because it prepares the tag as part of the draft release.
+3. Open a pull request from `develop` to `main` and merge it after its required checks pass. The merge automatically starts the **Release** workflow.
 4. Wait for every matrix job to finish and inspect the draft GitHub Release.
 5. Test each installer on its target operating system before publishing the draft.
 
-The [release workflow](.github/workflows/release.yml) builds both macOS architectures, Windows NSIS, and Linux AppImage/DEB artifacts, signs updater bundles, generates `latest.json`, and creates a draft GitHub Release. Publish the draft only after testing its installers.
+The [release workflow](.github/workflows/release.yml) runs when a version change in `src-tauri/tauri.conf.json` reaches `main`. It builds both macOS architectures, Windows NSIS, and Linux AppImage/DEB artifacts, signs updater bundles, generates `latest.json`, and creates a draft GitHub Release. If a run must be retried manually, run the workflow with `main` selected. Publish the draft only after testing its installers.
 
 Before publishing, confirm that the draft contains:
 
