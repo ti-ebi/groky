@@ -105,6 +105,20 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: Groky v__VERSION__
+          releaseBody: |
+            ## Install Groky
+
+            Install the [official Grok Build CLI](https://docs.x.ai/build/overview) first, then download the package for your computer:
+
+            | Operating system | Package |
+            | --- | --- |
+            | macOS on Apple Silicon | `Groky_${{ needs.prepare.outputs.version }}_aarch64.dmg` |
+            | macOS on Intel | `Groky_${{ needs.prepare.outputs.version }}_x64.dmg` |
+            | Windows x86-64 | `Groky_${{ needs.prepare.outputs.version }}_x64-setup.exe` |
+            | Debian or Ubuntu x86-64 | `Groky_${{ needs.prepare.outputs.version }}_amd64.deb` |
+            | Other Linux x86-64 | `Groky_${{ needs.prepare.outputs.version }}_amd64.AppImage` |
+
+            See the [installation guide](https://github.com/ti-ebi/groky#install-groky) for step-by-step instructions. Files ending in `.sig`, `.app.tar.gz`, and `latest.json` are for automatic updates and are not manual installers.
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: true
