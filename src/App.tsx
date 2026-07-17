@@ -31,6 +31,9 @@ import {
   type EventTiming,
 } from "./timing";
 
+const INITIAL_UPDATE_CHECK_DELAY_MS = 1_200;
+const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1_000;
+
 type IconName =
   | "archive"
   | "arrow-right"
@@ -2607,6 +2610,7 @@ function App() {
   const commandSuggestionsList = useRef<HTMLDivElement | null>(null);
   const commandCatalogRequests = useRef<Set<string>>(new Set());
   const updateCheckInFlight = useRef(false);
+  const updateInstallationInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
   const sidePanelResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
@@ -3257,8 +3261,8 @@ function App() {
       if (!disposed) setAppVersion(version);
     }).catch(() => undefined);
 
-    const updateTimer = window.setTimeout(() => {
-      if (updateCheckInFlight.current) return;
+    const runAutomaticUpdateCheck = () => {
+      if (disposed || updateCheckInFlight.current || updateInstallationInFlight.current) return;
       updateCheckInFlight.current = true;
       setUpdatePhase("checking");
       void invoke<AppUpdateInfo | null>("check_app_update")
@@ -3274,7 +3278,13 @@ function App() {
         .finally(() => {
           updateCheckInFlight.current = false;
         });
-    }, 1200);
+    };
+
+    const initialUpdateTimer = window.setTimeout(runAutomaticUpdateCheck, INITIAL_UPDATE_CHECK_DELAY_MS);
+    const automaticUpdateTimer = window.setInterval(
+      runAutomaticUpdateCheck,
+      AUTOMATIC_UPDATE_CHECK_INTERVAL_MS,
+    );
 
     void listen<AppUpdateProgress>("groky://update-progress", ({ payload }) => {
       setUpdateProgress(payload);
@@ -3286,7 +3296,8 @@ function App() {
 
     return () => {
       disposed = true;
-      window.clearTimeout(updateTimer);
+      window.clearTimeout(initialUpdateTimer);
+      window.clearInterval(automaticUpdateTimer);
       unlisten?.();
     };
   }, []);
@@ -3550,7 +3561,7 @@ function App() {
   }
 
   async function checkForAppUpdate(manual: boolean) {
-    if (updatePhase === "downloading" || updateCheckInFlight.current) return;
+    if (updatePhase === "downloading" || updateCheckInFlight.current || updateInstallationInFlight.current) return;
     updateCheckInFlight.current = true;
     setUpdatePhase("checking");
     setUpdateError(null);
@@ -3575,7 +3586,14 @@ function App() {
   }
 
   async function installAppUpdate() {
-    if (!appUpdate || anySessionRunning || updatePhase === "downloading") return;
+    if (
+      !appUpdate
+      || anySessionRunning
+      || updatePhase === "downloading"
+      || updateCheckInFlight.current
+      || updateInstallationInFlight.current
+    ) return;
+    updateInstallationInFlight.current = true;
     setUpdateError(null);
     setUpdateProgress({ stage: "downloading", downloaded: 0, total: null });
     setUpdatePhase("downloading");
@@ -3587,6 +3605,7 @@ function App() {
       setUpdateError(message);
       setUpdateCheckNotice(message);
       setUpdatePhase("error");
+      updateInstallationInFlight.current = false;
     }
   }
 
