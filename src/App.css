@@ -1091,6 +1091,7 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .task-title strong {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   font-size: 14px;
@@ -1123,6 +1124,16 @@ body.is-resizing-side-panel .app-shell {
   font: 10px var(--mono);
   letter-spacing: 0.015em;
   text-transform: uppercase;
+}
+
+.agent-elapsed {
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.duration-text {
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
 }
 
 .live-dot {
@@ -1670,10 +1681,13 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .activity-detail {
+  display: inline-flex;
+  align-items: center;
   margin-left: 2px;
   color: var(--muted);
   font: 9px var(--mono);
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .composer-dock {
@@ -2143,6 +2157,11 @@ body.is-resizing-side-panel .app-shell {
   border-radius: 12px;
 }
 
+.model-menu-portal {
+  position: fixed;
+  z-index: 25;
+}
+
 .approval-menu-heading {
   display: flex;
   align-items: baseline;
@@ -2437,21 +2456,25 @@ body.is-resizing-side-panel .app-shell {
 
 .local-chip {
   display: flex;
-  height: 24px;
+  height: 18px;
+  max-width: min(28vw, 220px);
+  flex: 0 1 auto;
   align-items: center;
-  gap: 6px;
-  margin-left: 4px;
-  padding: 0 7px;
-  border-left: 1px solid var(--line);
+  margin-left: 1px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
   color: var(--muted);
-  font: 9px var(--mono);
+  font: 8px var(--mono);
   letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
-.local-chip .live-dot {
-  width: 5px;
-  height: 5px;
+.local-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-button {
@@ -3974,8 +3997,7 @@ body.is-resizing-side-panel .app-shell {
   transform: scale(0.96);
 }
 
-.agent-state.working .live-dot,
-.composer.is-running .local-chip .live-dot {
+.agent-state.working .live-dot {
   animation: pulse-ring 1s ease-in-out infinite;
 }
 
@@ -4607,7 +4629,7 @@ body.is-resizing-side-panel .app-shell {
 .tool-group-disclosure > button {
   width: fit-content;
   max-width: 100%;
-  grid-template-columns: auto minmax(0, auto);
+  grid-template-columns: auto minmax(0, auto) auto;
 }
 
 .tool-call-disclosure > button {
@@ -4737,6 +4759,19 @@ body.is-resizing-side-panel .app-shell {
   color: var(--faint);
 }
 
+.trace-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.trace-duration {
+  color: var(--faint);
+  font: 8.5px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .tool-call-disclosure.pending .trace-status,
 .tool-call-disclosure.in_progress .trace-status {
   color: var(--signal);
@@ -4842,6 +4877,11 @@ body.is-resizing-side-panel .app-shell {
   color: var(--muted);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.permission-decision .trace-duration {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .turn-status {

@@ -13,6 +13,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { createPortal } from "react-dom";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -22,6 +23,13 @@ import "./App.css";
 import { MarkdownContent } from "./MarkdownContent";
 import { GlobalSearchDialog } from "./GlobalSearchDialog";
 import { TerminalPanel } from "./TerminalPanel";
+import {
+  combineTimings,
+  elapsedForTiming,
+  finishTiming,
+  startTiming,
+  type EventTiming,
+} from "./timing";
 
 type IconName =
   | "archive"
@@ -134,6 +142,20 @@ interface AvailableCommand {
   inputHint?: string | null;
 }
 
+interface CommandToken {
+  query: string;
+  start: number;
+}
+
+function commandTokenAtEnd(draft: string): CommandToken | null {
+  const match = /(^| )\/([^\s]*)$/.exec(draft);
+  if (!match) return null;
+  return {
+    query: match[2],
+    start: (match.index ?? 0) + match[1].length,
+  };
+}
+
 interface SessionConfigOption {
   id: string;
   name: string;
@@ -217,7 +239,7 @@ interface PermissionRequest {
   options: PermissionOption[];
 }
 
-interface ToolActivity {
+interface ToolActivity extends EventTiming {
   id: string;
   title: string;
   kind?: string;
@@ -240,24 +262,22 @@ interface PermissionDecision {
 }
 
 type TurnTimelineItem =
-  | {
+  | ({
       id: string;
       kind: "thought";
       text: string;
       open: boolean;
-      startedAt?: number;
-      elapsedMs?: number;
-    }
+    } & EventTiming)
   | { id: string; kind: "response"; text: string }
   | { id: string; kind: "tool"; tool: ToolActivity }
-  | {
+  | ({
       id: string;
       kind: "permission";
       requestId: string;
       toolCallId: string;
       title: string;
       decision?: PermissionDecision;
-    };
+    } & EventTiming);
 
 interface MessageAttachment {
   name: string;
@@ -366,10 +386,7 @@ function finishThought(message: ConversationMessage, endedAt: number) {
     return [{
       ...item,
       open: false,
-      startedAt: undefined,
-      elapsedMs: item.startedAt === undefined
-        ? item.elapsedMs
-        : (item.elapsedMs ?? 0) + Math.max(0, endedAt - item.startedAt),
+      ...finishTiming(item, endedAt),
     }];
   });
   return {
@@ -407,21 +424,40 @@ function reconcileFallbackResponse(message: ConversationMessage, text: string) {
   return { ...message, text: resolvedText, timeline };
 }
 
-function cancelActiveTimelineTools(timeline: TurnTimelineItem[] | undefined) {
+function isActiveToolStatus(status: ToolStatus) {
+  return status === "pending" || status === "in_progress";
+}
+
+function finishActiveTimelineTools(
+  timeline: TurnTimelineItem[] | undefined,
+  endedAt: number,
+  status: Extract<ToolStatus, "completed" | "failed" | "cancelled">,
+) {
   return timeline?.map((item) => item.kind === "tool"
     ? {
         ...item,
-        tool: item.tool.status === "pending" || item.tool.status === "in_progress"
-          ? { ...item.tool, status: "cancelled" as const }
+        tool: isActiveToolStatus(item.tool.status)
+          ? { ...item.tool, ...finishTiming(item.tool, endedAt), status }
           : item.tool,
       }
     : item);
 }
 
-function finishRun(message: ConversationMessage, endedAt: number) {
+function terminalToolStatus(state: ConversationState) {
+  if (state === "complete") return "completed" as const;
+  if (state === "error") return "failed" as const;
+  return "cancelled" as const;
+}
+
+function finishRun(
+  message: ConversationMessage,
+  endedAt: number,
+  unfinishedToolStatus: Extract<ToolStatus, "completed" | "failed" | "cancelled"> = "completed",
+) {
   const finished = finishThought(message, endedAt);
   return {
     ...finished,
+    timeline: finishActiveTimelineTools(finished.timeline, endedAt, unfinishedToolStatus),
     elapsedMs: message.startedAt === undefined ? undefined : Math.max(0, endedAt - message.startedAt),
   };
 }
@@ -446,6 +482,53 @@ function formatThoughtDuration(elapsedMs: number) {
 
   const minutes = Math.floor(totalSeconds / 60);
   return `${minutes}m${(totalSeconds - minutes * 60).toFixed(0)}s`;
+}
+
+function useTimingElapsed(timing: EventTiming, active: boolean) {
+  const live = active && timing.startedAt !== undefined && timing.endedAt === undefined;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!live) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [live, timing.startedAt]);
+
+  if (!live && timing.startedAt !== undefined && timing.endedAt === undefined && timing.elapsedMs === undefined) {
+    return { elapsedMs: undefined, live: false };
+  }
+  return { elapsedMs: elapsedForTiming(timing, now), live };
+}
+
+function DurationText({
+  timing,
+  active = false,
+  className,
+  label = "Elapsed time",
+  prefix = "",
+  formatter = formatDuration,
+}: {
+  timing: EventTiming;
+  active?: boolean;
+  className?: string;
+  label?: string;
+  prefix?: string;
+  formatter?: (elapsedMs: number) => string;
+}) {
+  const { elapsedMs, live } = useTimingElapsed(timing, active);
+  if (elapsedMs === undefined) return null;
+
+  const duration = formatter(elapsedMs);
+  return (
+    <span
+      className={["duration-text", className].filter(Boolean).join(" ")}
+      role={live ? "timer" : undefined}
+      aria-label={`${label}: ${duration}`}
+    >
+      {prefix}{duration}
+    </span>
+  );
 }
 
 interface AppUpdateProgress {
@@ -1032,6 +1115,25 @@ function stateFromStopReason(stopReason: StopReason): ConversationState {
   }
 }
 
+function toolTimingForUpdate(
+  existing: ToolActivity | undefined,
+  status: ToolStatus,
+  now: number,
+  trackTiming: boolean,
+): EventTiming {
+  const existingTiming: EventTiming = {
+    startedAt: existing?.startedAt,
+    endedAt: existing?.endedAt,
+    elapsedMs: existing?.elapsedMs,
+  };
+  if (isActiveToolStatus(status)) {
+    if (existing && isActiveToolStatus(existing.status)) return existingTiming;
+    return trackTiming ? startTiming(now) : {};
+  }
+  if (existing && isActiveToolStatus(existing.status)) return finishTiming(existingTiming, now);
+  return existingTiming;
+}
+
 function applySessionUpdateToMessage(
   message: ConversationMessage,
   update: SessionUpdate,
@@ -1075,12 +1177,14 @@ function applySessionUpdateToMessage(
       const toolIndex = timeline.findIndex((item) => item.kind === "tool" && item.tool.id === update.toolCallId);
       const existingItem = toolIndex >= 0 ? timeline[toolIndex] : undefined;
       const existing = existingItem?.kind === "tool" ? existingItem.tool : undefined;
+      const status = update.status ?? existing?.status ?? "in_progress";
       const nextTool: ToolActivity = {
         id: update.toolCallId,
         title: update.title ?? existing?.title ?? "Working with a local tool",
         kind: update.toolKind ?? existing?.kind ?? undefined,
-        status: update.status ?? existing?.status ?? "in_progress",
+        status,
         locations: update.locations ?? existing?.locations ?? [],
+        ...toolTimingForUpdate(existing, status, now, message.state === "streaming"),
       };
       if (toolIndex >= 0 && existingItem?.kind === "tool") {
         timeline[toolIndex] = { ...existingItem, tool: nextTool };
@@ -1098,7 +1202,7 @@ function applySessionUpdateToMessage(
       }
       const state = stateFromStopReason(update.stopReason);
       return {
-        ...finishRun(message, now),
+        ...finishRun(message, now, terminalToolStatus(state)),
         state,
         stopReason: update.stopReason,
         metrics: update.metrics ?? message.metrics,
@@ -1120,6 +1224,7 @@ function applySessionUpdateToMessage(
             requestId: update.requestId,
             toolCallId: update.toolCallId,
             title: update.title,
+            ...(message.state === "streaming" ? startTiming(now) : {}),
           },
         ],
       };
@@ -1137,7 +1242,9 @@ function applySessionUpdateToMessage(
       const index = timeline.findIndex((item) => item.kind === "permission" && item.requestId === update.requestId);
       if (index >= 0) {
         const permission = timeline[index];
-        if (permission.kind === "permission") timeline[index] = { ...permission, decision };
+        if (permission.kind === "permission") {
+          timeline[index] = { ...permission, ...finishTiming(permission, now), decision };
+        }
       } else {
         timeline.push({
           id: makeMessageId("permission"),
@@ -1793,8 +1900,6 @@ function SettingsScreen({
   appVersion,
   cliVersion,
   connected,
-  approvalMode,
-  modelName,
   currentModeId,
   configOptions,
   usage,
@@ -1813,8 +1918,6 @@ function SettingsScreen({
   appVersion: string | null;
   cliVersion: string | null;
   connected: boolean;
-  approvalMode: ApprovalMode;
-  modelName: string;
   currentModeId: string | null;
   configOptions: SessionConfigOption[];
   usage: SessionUsage | null;
@@ -1924,14 +2027,6 @@ function SettingsScreen({
               <div className="settings-row">
                 <div><strong>Engine</strong><small>Grok Build CLI detected by Groky.</small></div>
                 <span className="settings-value">{cliVersion ?? "Not detected"}</span>
-              </div>
-              <div className="settings-row">
-                <div><strong>Model</strong><small>Model for the active session.</small></div>
-                <span className="settings-value">{modelName}</span>
-              </div>
-              <div className="settings-row">
-                <div><strong>Approval mode</strong><small>Permission behavior for the active session.</small></div>
-                <span className="settings-value">{approvalModeOption(approvalMode).label}</span>
               </div>
               {currentModeId && (
                 <div className="settings-row">
@@ -2203,7 +2298,9 @@ function ModelSelector({
   const [loading, setLoading] = useState(false);
   const [changingModelId, setChangingModelId] = useState<string | null>(null);
   const [changingReasoningEffort, setChangingReasoningEffort] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{ right: number; bottom: number } | null>(null);
   const root = useRef<HTMLDivElement | null>(null);
+  const menu = useRef<HTMLDivElement | null>(null);
   const selected = currentModel(models);
   const reasoningEffort = selected?.metadata?.reasoningEffort;
   const reasoningEfforts = selected?.metadata?.supportsReasoningEffort === false
@@ -2215,11 +2312,22 @@ function ModelSelector({
   const reasoningLabel = selectedReasoning?.label.replace(/\s+Effort$/i, "") ?? reasoningEffort;
   const changing = changingModelId !== null || changingReasoningEffort !== null;
 
+  const updateMenuPosition = useCallback(() => {
+    const bounds = root.current?.getBoundingClientRect();
+    if (!bounds) return;
+
+    setMenuPosition({
+      right: Math.max(8, window.innerWidth - bounds.right - 3),
+      bottom: Math.max(8, window.innerHeight - bounds.top + 8),
+    });
+  }, []);
+
   useEffect(() => {
     if (!open) return;
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!root.current?.contains(target) && !menu.current?.contains(target)) setOpen(false);
     };
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
@@ -2232,6 +2340,18 @@ function ModelSelector({
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [open, updateMenuPosition]);
 
   useEffect(() => {
     if (busy) setOpen(false);
@@ -2249,6 +2369,7 @@ function ModelSelector({
       if (!loaded) return;
     }
     setActiveSection(null);
+    updateMenuPosition();
     setOpen(true);
   }
 
@@ -2290,8 +2411,14 @@ function ModelSelector({
         <Icon name="chevron-down" size={12} />
       </button>
 
-      {open && (
-        <div className="approval-menu model-menu" role="menu" aria-label="Grok Build model and reasoning settings">
+      {open && menuPosition && createPortal(
+        <div
+          ref={menu}
+          className="approval-menu model-menu model-menu-portal"
+          role="menu"
+          aria-label="Grok Build model and reasoning settings"
+          style={{ right: menuPosition.right, bottom: menuPosition.bottom }}
+        >
           <div
             className="model-settings-item"
             role="none"
@@ -2385,7 +2512,8 @@ function ModelSelector({
           {!models && (
             <div className="model-settings-note">This Grok Build session uses its default model.</div>
           )}
-        </div>
+        </div>,
+        root.current?.closest<HTMLElement>(".app-shell") ?? document.body,
       )}
     </div>
   );
@@ -2470,6 +2598,9 @@ function App() {
   const draft = activeSession?.draft ?? pendingDraft;
   const attachments = activeSession?.attachments ?? pendingAttachments;
   const running = activeSession?.running ?? false;
+  const activeRunStartedAt = running
+    ? [...messages].reverse().find((message) => message.role === "assistant" && message.state === "streaming")?.startedAt
+    : undefined;
   const permission = activeSession?.permissions[0] ?? null;
   const plan = activeSession?.plan ?? [];
   const activeSessionLoading = activeSessionId !== null && loadingSessionIds.has(activeSessionId);
@@ -2484,9 +2615,9 @@ function App() {
     ?? [];
   const commandSuggestions = useMemo(() => {
     if (!commandSuggestionsOpen) return [];
-    const match = draft.match(/^\/([^\s]*)$/);
-    if (!match) return [];
-    const query = match[1].toLocaleLowerCase();
+    const token = commandTokenAtEnd(draft);
+    if (!token) return [];
+    const query = token.query.toLocaleLowerCase();
     return availableCommandsForComposer
       .filter((command) => command.name.toLocaleLowerCase().includes(query))
       .sort((left, right) => {
@@ -2642,7 +2773,11 @@ function App() {
     setPendingAttachments([]);
   }
 
-  const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
+  const sessionWorkspace = connection?.workspace ?? workspace;
+  const projectName = useMemo(() => workspaceName(sessionWorkspace), [sessionWorkspace]);
+  const activeSessionTitle = activeSessionId
+    ? sessionHistory.find((session) => session.sessionId === activeSessionId)?.title ?? "New Grok session"
+    : "New session";
   const accountProfile = status?.accountProfile ?? null;
   const accountName = accountProfile?.displayName ?? accountProfile?.email ?? "Grok Build";
   const accountDetail = accountProfile?.displayName && accountProfile.email
@@ -3192,9 +3327,18 @@ function App() {
       listen<PermissionRequest>("grok://permission-request", ({ payload }) => {
         const messageId = activeAssistantIds.current.get(payload.sessionId);
         if (messageId) {
-          const endedAt = Date.now();
+          const requestedAt = Date.now();
+          const update: SessionUpdate = {
+            kind: "permission_requested",
+            sessionId: payload.sessionId,
+            requestId: payload.requestId,
+            toolCallId: payload.toolCallId,
+            title: payload.title,
+            toolKind: payload.toolKind,
+            options: payload.options,
+          };
           setSessionMessages(payload.sessionId, (current) => current.map((message) =>
-            message.id === messageId ? finishThought(message, endedAt) : message
+            message.id === messageId ? applySessionUpdateToMessage(message, update, requestedAt) : message
           ));
         }
         enqueueSessionPermission(payload.sessionId, payload);
@@ -3215,7 +3359,7 @@ function App() {
             permissions: [],
             messages: session.messages.map((message) => message.id === messageId
               ? {
-                  ...finishRun(message, endedAt),
+                  ...finishRun(message, endedAt, "failed"),
                   state: "error",
                   error: payload.message ?? "Grok Build disconnected.",
                 }
@@ -4008,7 +4152,7 @@ function App() {
         message.id === assistantMessage.id ? (() => {
           const state = stateFromStopReason(result.stopReason);
           const finished = reconcileFallbackResponse(
-            addFallbackThought(finishRun(message, endedAt), result.thought),
+            addFallbackThought(finishRun(message, endedAt, terminalToolStatus(state)), result.thought),
             result.text,
           );
           return {
@@ -4023,7 +4167,7 @@ function App() {
       const endedAt = Date.now();
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === assistantMessage.id
-          ? { ...finishRun(message, endedAt), state: "error", error: String(error) }
+          ? { ...finishRun(message, endedAt, "failed"), state: "error", error: String(error) }
           : message
       ));
     } finally {
@@ -4096,13 +4240,15 @@ function App() {
 
   function handleComposerChange(nextDraft: string) {
     setDraft(nextDraft);
-    if (/^\/[^\s]*$/.test(nextDraft) && !connection) {
+    if (commandTokenAtEnd(nextDraft) && !connection) {
       void loadCommandCatalogForComposer();
     }
   }
 
   function selectAvailableCommand(command: AvailableCommand) {
-    const nextDraft = `/${command.name}${command.inputHint ? " " : ""}`;
+    const token = commandTokenAtEnd(draft);
+    if (!token) return;
+    const nextDraft = `${draft.slice(0, token.start)}/${command.name}${command.inputHint ? " " : ""}`;
     setDraft(nextDraft);
     setCommandSuggestionsOpen(false);
     window.requestAnimationFrame(() => {
@@ -4121,15 +4267,11 @@ function App() {
       const endedAt = Date.now();
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === messageId
-          ? (() => {
-              const finished = finishRun(message, endedAt);
-              return {
-                ...finished,
-                state: "cancelled" as const,
-                stopReason: "cancelled" as const,
-                timeline: cancelActiveTimelineTools(finished.timeline),
-              };
-            })()
+          ? {
+              ...finishRun(message, endedAt, "cancelled"),
+              state: "cancelled" as const,
+              stopReason: "cancelled" as const,
+            }
           : message
       ));
     } catch (error) {
@@ -4512,8 +4654,6 @@ function App() {
             appVersion={appVersion}
             cliVersion={connection?.cliVersion ?? status?.cliVersion ?? null}
             connected={connection !== null}
-            approvalMode={approvalMode}
-            modelName={currentModel(connection?.models ?? null)?.name ?? "Grok Build default"}
             currentModeId={activeSession?.currentModeId ?? null}
             configOptions={activeSession?.configOptions ?? []}
             usage={activeSession?.usage ?? null}
@@ -4541,12 +4681,35 @@ function App() {
             {sidebarCollapsed && (
               <button className="icon-button sidebar-restore" type="button" aria-label="Show sidebar" title={`Show sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
             )}
-            <div className="task-title workspace-context" title={workspace ?? undefined}>
-              <Icon name={workspace ? "folder" : "standalone"} /><strong>{workspace ? projectName : "Standalone session"}</strong>
+            <div className="task-title workspace-context">
+              <Icon name={sessionWorkspace ? "folder" : "standalone"} />
+              <strong title={activeSessionTitle}>{activeSessionTitle}</strong>
+              <span
+                className="local-chip"
+                title={sessionWorkspace ?? "Standalone"}
+              >
+                <span className="local-chip-label">{sessionWorkspace ? projectName : "Standalone"}</span>
+              </span>
             </div>
           </div>
           <div className="task-actions">
-            <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : sessionTransitioning ? "Loading session" : "Signed in"}</span>
+            <span className={`agent-state ${running ? "working" : ""}`}>
+              <span className="live-dot" />
+              {running ? (
+                <>
+                  <span>Grok is working</span>
+                  {activeRunStartedAt !== undefined && (
+                    <DurationText
+                      timing={{ startedAt: activeRunStartedAt }}
+                      active
+                      className="agent-elapsed"
+                      label="Turn elapsed time"
+                      prefix="· "
+                    />
+                  )}
+                </>
+              ) : connection ? "ACP connected" : "Signed in"}
+            </span>
           </div>
         </header>
 
@@ -4568,14 +4731,7 @@ function App() {
           onScroll={handleConversationScroll}
         >
           <div className="conversation-inner">
-            {activeSessionLoading ? (
-              <div className="empty-conversation" role="status" aria-live="polite">
-                <span className="empty-orbit"><i /><i /></span>
-                <p className="message-kicker">GROK BUILD / RESTORING</p>
-                <h1>Loading session…</h1>
-                <p>The conversation will appear here while other sessions continue in the background.</p>
-              </div>
-            ) : messages.length === 0 ? (
+            {!activeSessionLoading && (messages.length === 0 ? (
               <div className="empty-conversation">
                 <span className="empty-orbit"><i /><i /></span>
                 <p className="message-kicker">GROK BUILD / READY</p>
@@ -4589,7 +4745,7 @@ function App() {
               </div>
             ) : messages.map((message) => (
               <ConversationItem key={message.id} message={message} />
-            ))}
+            )))}
 
             {permission && (
               <PermissionCard
@@ -4706,7 +4862,7 @@ function App() {
               aria-activedescendant={commandSuggestions.length > 0
                 ? `${commandSuggestionsId}-option-${activeCommandSuggestion}`
                 : undefined}
-              placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : sessionTransitioning ? "Loading session…" : "Ask Groky to build, debug, or review"}
+              placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : "Ask Groky to build, debug, or review"}
               rows={2}
               disabled={running || appUpdating || sessionTransitioning}
             />
@@ -4729,9 +4885,6 @@ function App() {
               changing={activeApprovalModeChanging}
               onChange={(nextMode) => void changeApprovalMode(nextMode)}
             />
-            {!sessionLocationEditable && (
-              <span className="local-chip"><span className="live-dot" />{workspace ? "cwd" : "standalone"}</span>
-            )}
             <span className="toolbar-spacer" />
             <ModelSelector
               connected={connection !== null}
@@ -4851,11 +5004,34 @@ function App() {
   );
 }
 
-function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active: boolean; elapsedMs?: number }) {
+function ThoughtBlock({
+  thought,
+  active,
+  startedAt,
+  endedAt,
+  elapsedMs,
+}: {
+  thought: string;
+  active: boolean;
+  startedAt?: number;
+  endedAt?: number;
+  elapsedMs?: number;
+}) {
   const [open, setOpen] = useState(active);
   const contentId = useId();
   const label = active
-    ? "Thinking…"
+    ? (
+        <>
+          <span>Thinking</span>
+          <DurationText
+            timing={{ startedAt, endedAt, elapsedMs }}
+            active
+            label="Thought elapsed time"
+            prefix=" · "
+            formatter={formatThoughtDuration}
+          />
+        </>
+      )
     : elapsedMs === undefined
       ? "Thought"
       : `Thought for ${formatThoughtDuration(elapsedMs)}`;
@@ -5018,6 +5194,7 @@ function toolGroupSummary(tools: ToolActivity[]) {
 }
 
 function ToolDetailRow({ tool }: { tool: ToolActivity }) {
+  const active = isActiveToolStatus(tool.status);
   return (
     <div className={`activity-row ${tool.status}`}>
       <span className="activity-icon">
@@ -5033,7 +5210,15 @@ function ToolDetailRow({ tool }: { tool: ToolActivity }) {
           <small>{tool.locations.map((location) => fileNameFromPath(location.path)).join(", ")}</small>
         )}
       </span>
-      <span className="activity-detail">{tool.status.replace(/_/g, " ")}</span>
+      <span className="activity-detail">
+        <span>{tool.status.replace(/_/g, " ")}</span>
+        <DurationText
+          timing={tool}
+          active={active}
+          label={`${tool.title} elapsed time`}
+          prefix=" · "
+        />
+      </span>
     </div>
   );
 }
@@ -5042,6 +5227,8 @@ function ToolGroupBlock({ tools }: { tools: ToolActivity[] }) {
   const failed = tools.filter((tool) => tool.status === "failed");
   const cancelled = tools.filter((tool) => tool.status === "cancelled");
   const interrupted = failed.length + cancelled.length;
+  const active = tools.some((tool) => isActiveToolStatus(tool.status));
+  const timing = combineTimings(tools);
   const [open, setOpen] = useState(interrupted > 0);
   const contentId = useId();
 
@@ -5054,6 +5241,12 @@ function ToolGroupBlock({ tools }: { tools: ToolActivity[] }) {
       <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
         <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
         <span className="progress-disclosure-summary">{toolGroupSummary(tools)}</span>
+        <DurationText
+          timing={timing}
+          active={active}
+          className="trace-duration"
+          label="Event group elapsed time"
+        />
       </button>
       <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
         <div>
@@ -5066,6 +5259,7 @@ function ToolGroupBlock({ tools }: { tools: ToolActivity[] }) {
 
 function ToolBlock({ tool }: { tool: ToolActivity }) {
   const interrupted = tool.status === "failed" || tool.status === "cancelled";
+  const active = isActiveToolStatus(tool.status);
   const [open, setOpen] = useState(interrupted);
   const contentId = useId();
   const statusLabel = tool.status.replace(/_/g, " ");
@@ -5082,12 +5276,20 @@ function ToolBlock({ tool }: { tool: ToolActivity }) {
       <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
         <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
         <span className="progress-disclosure-summary">{tool.title}</span>
-        <span className="trace-status" aria-label={statusLabel} title={statusLabel}>
-          {tool.status === "completed"
-            ? <Icon name="check" size={12} />
-            : interrupted
-              ? <Icon name="x" size={12} />
-              : <span className="trace-status-pulse" />}
+        <span className="trace-meta">
+          <DurationText
+            timing={tool}
+            active={active}
+            className="trace-duration"
+            label={`${tool.title} elapsed time`}
+          />
+          <span className="trace-status" aria-label={statusLabel} title={statusLabel}>
+            {tool.status === "completed"
+              ? <Icon name="check" size={12} />
+              : interrupted
+                ? <Icon name="x" size={12} />
+                : <span className="trace-status-pulse" />}
+          </span>
         </span>
       </button>
       <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
@@ -5113,6 +5315,8 @@ function TraceItems({ items, messageState }: { items: TraceTimelineItem[]; messa
           key={item.id}
           thought={item.text}
           active={messageState === "streaming" && item.open}
+          startedAt={item.startedAt}
+          endedAt={item.endedAt}
           elapsedMs={item.elapsedMs}
         />
       );
@@ -5127,6 +5331,7 @@ function TraceItems({ items, messageState }: { items: TraceTimelineItem[]; messa
         <Icon name={item.decision.outcome === "allowed" ? "check" : "x"} size={13} />
         <span>{item.decision.label}</span>
         <small>{item.decision.title}</small>
+        <DurationText timing={item} className="trace-duration" label="Permission wait time" />
       </div>
     );
   });
@@ -5155,6 +5360,12 @@ function traceGroupDetails(items: TraceTimelineItem[]) {
   return { count, running, interrupted };
 }
 
+function traceItemTiming(item: TraceTimelineItem): EventTiming {
+  if (item.kind === "tool_group") return combineTimings(item.tools);
+  if (item.kind === "tool") return item.tool;
+  return item;
+}
+
 function CollapsedTraceBlock({
   items,
   messageState,
@@ -5165,6 +5376,10 @@ function CollapsedTraceBlock({
   const [open, setOpen] = useState(false);
   const contentId = useId();
   const { count, running, interrupted } = traceGroupDetails(items);
+  const timing = combineTimings(items.map(traceItemTiming));
+  const active = messageState === "streaming"
+    && timing.startedAt !== undefined
+    && timing.endedAt === undefined;
   const summary = `${count} execution ${count === 1 ? "event" : "events"}${interrupted > 0 ? ` · ${interrupted} interrupted` : ""}`;
   const status = interrupted > 0 ? "interrupted" : running > 0 ? "in progress" : "completed";
 
@@ -5178,12 +5393,20 @@ function CollapsedTraceBlock({
       <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
         <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
         <span className="progress-disclosure-summary">{summary}</span>
-        <span className="trace-status" aria-label={status} title={status}>
-          {interrupted > 0
-            ? <Icon name="x" size={12} />
-            : running > 0
-              ? <span className="trace-status-pulse" />
-              : <Icon name="check" size={12} />}
+        <span className="trace-meta">
+          <DurationText
+            timing={timing}
+            active={active}
+            className="trace-duration"
+            label="Execution group elapsed time"
+          />
+          <span className="trace-status" aria-label={status} title={status}>
+            {interrupted > 0
+              ? <Icon name="x" size={12} />
+              : running > 0
+                ? <span className="trace-status-pulse" />
+                : <Icon name="check" size={12} />}
+          </span>
         </span>
       </button>
       <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
