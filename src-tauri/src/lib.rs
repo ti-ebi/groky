@@ -1,20 +1,16 @@
 mod acp;
-mod app_update;
 mod file_manager;
-mod native_window;
 mod terminal;
 
 use acp::{
     normalize_stop_reason, AcpTransport, ApprovalMode, PromptResourceLink, SafeAvailableCommand,
     SessionUpdateEvent,
 };
-use app_update::{check_app_update, install_app_update, AppUpdateRuntime};
 use chrono::{DateTime, Local};
 use file_manager::{
     workspace_inspect_attachment, workspace_list_directory, workspace_open_folder,
     workspace_preview_file, workspace_unwatch, workspace_watch, WorkspaceWatcherRuntime,
 };
-use native_window::configure_native_titlebar;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -30,6 +26,7 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_updater::{Update, UpdaterExt};
 use terminal::{terminal_resize, terminal_start, terminal_stop, terminal_write, TerminalRuntime};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -87,7 +84,7 @@ struct GrokRuntimeState {
 }
 
 #[derive(Default)]
-pub(crate) struct GrokRuntime {
+struct GrokRuntime {
     inner: Mutex<GrokRuntimeState>,
     history: Mutex<()>,
 }
@@ -295,7 +292,212 @@ struct DeviceAuthCodeEvent {
     code: String,
 }
 
-pub(crate) async fn grok_prompt_active(runtime: &GrokRuntime) -> bool {
+#[derive(Default)]
+struct AppUpdateRuntime {
+    pending: Mutex<Option<Update>>,
+    installing: AtomicBool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateInfo {
+    current_version: String,
+    version: String,
+    body: Option<String>,
+    date: Option<String>,
+}
+
+impl From<&Update> for AppUpdateInfo {
+    fn from(update: &Update) -> Self {
+        Self {
+            current_version: update.current_version.clone(),
+            version: update.version.clone(),
+            body: update.body.clone(),
+            date: update.date.map(|date| date.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgress {
+    stage: &'static str,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+#[tauri::command]
+fn configure_native_titlebar(window: tauri::WebviewWindow) -> Result<Option<f64>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSWindow, NSWindowButton};
+
+        const MINIMUM_TITLEBAR_HEIGHT: f64 = 40.0;
+
+        let ns_window_ptr = window
+            .ns_window()
+            .map_err(|error| format!("Failed to access the native window: {error}"))?
+            as *mut NSWindow;
+        let ns_window = unsafe { &*ns_window_ptr };
+        let window_frame = ns_window.frame();
+        let native_height = window_frame.size.height - ns_window.contentLayoutRect().size.height;
+        let height = native_height.max(MINIMUM_TITLEBAR_HEIGHT);
+
+        if let Some(close_button) = ns_window.standardWindowButton(NSWindowButton::CloseButton) {
+            let button_parent = unsafe { close_button.superview() };
+            let titlebar_container = button_parent
+                .as_ref()
+                .and_then(|parent| unsafe { parent.superview() });
+
+            if let Some(container) = titlebar_container {
+                let mut container_frame = container.frame();
+                container_frame.size.height = height;
+                container_frame.origin.y = window_frame.size.height - height;
+                container.setFrame(container_frame);
+
+                for kind in [
+                    NSWindowButton::CloseButton,
+                    NSWindowButton::MiniaturizeButton,
+                    NSWindowButton::ZoomButton,
+                ] {
+                    let Some(button) = ns_window.standardWindowButton(kind) else {
+                        continue;
+                    };
+                    let Some(parent) = (unsafe { button.superview() }) else {
+                        continue;
+                    };
+                    let parent_frame = parent.frame();
+                    let mut button_frame = button.frame();
+                    button_frame.origin.y =
+                        height / 2.0 - parent_frame.origin.y - button_frame.size.height / 2.0;
+                    button.setFrameOrigin(button_frame.origin);
+                }
+            }
+        }
+
+        return Ok((height.is_finite() && height > 0.0 && height <= 96.0).then_some(height));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn check_app_update(
+    app: AppHandle,
+    state: State<'_, AppUpdateRuntime>,
+) -> Result<Option<AppUpdateInfo>, String> {
+    if state.installing.load(Ordering::Acquire) {
+        return Err("An update is already being installed.".to_string());
+    }
+
+    let update = app
+        .updater()
+        .map_err(|error| format!("Failed to prepare the updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("Failed to check for updates: {error}"))?;
+    let info = update.as_ref().map(AppUpdateInfo::from);
+    *state.pending.lock().await = update;
+    Ok(info)
+}
+
+#[tauri::command]
+async fn install_app_update(
+    app: AppHandle,
+    grok: State<'_, GrokRuntime>,
+    state: State<'_, AppUpdateRuntime>,
+) -> Result<(), String> {
+    if state
+        .installing
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("An update is already being installed.".to_string());
+    }
+
+    let result = async {
+        if grok_prompt_active(&grok).await {
+            return Err("Stop the active turn before updating.".to_string());
+        }
+
+        let update = state
+            .pending
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| "Check for updates before installing one.".to_string())?;
+
+        let _ = app.emit(
+            "groky://update-progress",
+            AppUpdateProgress {
+                stage: "downloading",
+                downloaded: 0,
+                total: None,
+            },
+        );
+
+        let progress_app = app.clone();
+        let finished_app = app.clone();
+        let mut downloaded = 0_u64;
+        let bytes = update
+            .download(
+                move |chunk_length, total| {
+                    downloaded = downloaded.saturating_add(chunk_length as u64);
+                    let _ = progress_app.emit(
+                        "groky://update-progress",
+                        AppUpdateProgress {
+                            stage: "downloading",
+                            downloaded,
+                            total,
+                        },
+                    );
+                },
+                move || {
+                    let _ = finished_app.emit(
+                        "groky://update-progress",
+                        AppUpdateProgress {
+                            stage: "downloaded",
+                            downloaded: 0,
+                            total: None,
+                        },
+                    );
+                },
+            )
+            .await
+            .map_err(|error| format!("Failed to download the update: {error}"))?;
+
+        if grok_prompt_active(&grok).await {
+            return Err("Stop the active turn before updating.".to_string());
+        }
+
+        let package_size = bytes.len() as u64;
+        let _ = app.emit(
+            "groky://update-progress",
+            AppUpdateProgress {
+                stage: "installing",
+                downloaded: package_size,
+                total: Some(package_size),
+            },
+        );
+        disconnect_runtime(&grok).await;
+        update
+            .install(&bytes)
+            .map_err(|error| format!("Failed to install the update: {error}"))?;
+        Ok(())
+    }
+    .await;
+
+    state.installing.store(false, Ordering::Release);
+    result?;
+    *state.pending.lock().await = None;
+    app.restart()
+}
+
+async fn grok_prompt_active(runtime: &GrokRuntime) -> bool {
     runtime
         .inner
         .lock()
@@ -1596,7 +1798,7 @@ fn record_model_selection(
     }
 }
 
-pub(crate) async fn disconnect_runtime(state: &GrokRuntime) {
+async fn disconnect_runtime(state: &GrokRuntime) {
     let transports = {
         let mut runtime = state.inner.lock().await;
         runtime.sessions.clear();

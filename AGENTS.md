@@ -7,16 +7,11 @@
 
 ## Repository map
 
-- `src/App.tsx` owns renderer-side session orchestration, history, composer state, ACP event subscription, and the main layout.
-- `src/sessionTypes.ts` owns shared renderer-side ACP, session, and persistence types.
-- `src/sessionProjection.ts` owns pure ACP event projection, replay, and conversation-preview logic; keep its unit tests in `tests/sessionProjection.test.ts`.
-- Keep display-only React components in focused files and pass host behavior into them through typed props.
+- `src/App.tsx` owns renderer-side session orchestration, history, composer state, ACP event projection, and the main layout.
 - `src/TerminalPanel.tsx` owns tools-panel tabs and the xterm.js terminal surface.
 - `src/FileExplorer.tsx` owns the workspace tree, previews, live refresh, and attach actions in the renderer.
 - `src/timing.ts` contains execution-timing helpers; keep their unit tests in `tests/timing.test.ts`.
 - `src-tauri/src/lib.rs` owns Tauri command registration, authentication, session history, and application lifecycle.
-- `src-tauri/src/app_update.rs` owns signed update discovery, download progress, installation, and updater state.
-- `src-tauri/src/native_window.rs` owns native titlebar configuration.
 - `src-tauri/src/acp.rs` owns the Grok Build ACP transport and safe renderer-facing event types.
 - `src-tauri/src/file_manager.rs` owns workspace-scoped listing, preview, attachment inspection, folder opening, and watching.
 - `src-tauri/src/terminal.rs` owns local PTY creation, I/O, resizing, and cleanup.
@@ -64,7 +59,6 @@
 - When changing workspace file access, add Rust tests for path normalization, canonical workspace containment, listing or preview limits, and watcher path projection as applicable.
 - When changing terminal host behavior, add Rust tests for identifier, size, input, or lifecycle validation as applicable.
 - When changing execution timing or grouping, update `tests/timing.test.ts` and run `pnpm test:timing`.
-- When changing renderer-side ACP projection or replay behavior, update `tests/sessionProjection.test.ts` and run `pnpm test:frontend`.
 - For documentation-only changes, verify referenced commands and paths; application builds are not required.
 - Report which checks were run and identify any checks that could not be run.
 
