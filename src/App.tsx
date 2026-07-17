@@ -2173,17 +2173,20 @@ function ModelSelector({
   connected,
   models,
   busy,
+  onLoad,
   onChange,
   onReasoningChange,
 }: {
   connected: boolean;
   models: SessionModelState | null;
   busy: boolean;
+  onLoad: () => Promise<boolean>;
   onChange: (modelId: string) => Promise<SessionModelState | null>;
   onReasoningChange: (reasoningEffort: string) => Promise<SessionModelState | null>;
 }) {
   const [open, setOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<"model" | "reasoning" | null>(null);
+  const [loading, setLoading] = useState(false);
   const [changingModelId, setChangingModelId] = useState<string | null>(null);
   const [changingReasoningEffort, setChangingReasoningEffort] = useState<string | null>(null);
   const root = useRef<HTMLDivElement | null>(null);
@@ -2220,10 +2223,16 @@ function ModelSelector({
     if (busy) setOpen(false);
   }, [busy]);
 
-  function toggleMenu() {
+  async function toggleMenu() {
     if (open) {
       setOpen(false);
       return;
+    }
+    if (!connected && !models) {
+      setLoading(true);
+      const loaded = await onLoad();
+      setLoading(false);
+      if (!loaded) return;
     }
     setActiveSection(null);
     setOpen(true);
@@ -2259,10 +2268,10 @@ function ModelSelector({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Model: ${selected?.name ?? "Grok Build default"}${reasoningLabel ? `, reasoning: ${reasoningLabel}` : ""}`}
-        disabled={busy || changing}
-        onClick={toggleMenu}
+        disabled={busy || loading || changing}
+        onClick={() => void toggleMenu()}
       >
-        <span>{selected?.name ?? "Grok Build"}</span>
+        <span>{loading ? "Loading models…" : selected?.name ?? "Grok Build"}</span>
         <span className="reasoning">· {reasoningLabel ?? (connected ? "ACP" : "default")}</span>
         <Icon name="chevron-down" size={12} />
       </button>
@@ -3824,6 +3833,25 @@ function App() {
     return reconnectActiveSession();
   }
 
+  async function loadModels() {
+    if (pendingModels) return true;
+    setConnectionNotice(null);
+    try {
+      const models = await invoke<SessionModelState | null>("grok_list_models", {
+        workspace,
+        approvalMode,
+      });
+      if (models) setPendingModels(models);
+      return true;
+    } catch (error) {
+      const message = String(error);
+      const authRequired = message.includes(AUTH_REQUIRED_ERROR);
+      setConnectionNotice(authRequired ? null : message);
+      if (authRequired) setStage("needsAuth");
+      return false;
+    }
+  }
+
   async function changeModel(modelId: string) {
     const sessionId = connection?.sessionId;
     if (!sessionId) {
@@ -4657,6 +4685,7 @@ function App() {
               connected={connection !== null}
               models={connection?.models ?? pendingModels}
               busy={running || appUpdating || sessionTransitioning || activeApprovalModeChanging}
+              onLoad={loadModels}
               onChange={changeModel}
               onReasoningChange={changeReasoningEffort}
             />

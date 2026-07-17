@@ -195,6 +195,11 @@ struct AgentCapabilities {
     load_session: bool,
 }
 
+struct InitializedAgent {
+    capabilities: AgentCapabilities,
+    response: Value,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionModelState {
@@ -924,8 +929,8 @@ async fn acquire_transport(
         Some(app.clone()),
     )
     .await?;
-    let capabilities = match initialize_and_authenticate(&transport).await {
-        Ok(capabilities) => capabilities,
+    let initialized = match initialize_and_authenticate(&transport).await {
+        Ok(initialized) => initialized,
         Err(error) => {
             transport.shutdown().await;
             return Err(auth_error_message(error));
@@ -933,7 +938,7 @@ async fn acquire_transport(
     };
     let candidate = ManagedTransport {
         transport: transport.clone(),
-        capabilities,
+        capabilities: initialized.capabilities,
     };
 
     let existing = {
@@ -1016,6 +1021,37 @@ async fn grok_list_commands(
         .transport;
 
     Ok(transport.command_catalog(Some(&cwd)).await)
+}
+
+#[tauri::command]
+async fn grok_list_models(
+    workspace: Option<String>,
+    approval_mode: Option<ApprovalMode>,
+) -> Result<Option<SessionModelState>, String> {
+    let approval_mode = approval_mode.unwrap_or_default();
+    let workspace_path = if let Some(workspace) = workspace {
+        let path = PathBuf::from(workspace)
+            .canonicalize()
+            .map_err(|_| "Could not open the selected working directory.".to_string())?;
+        if !path.is_dir() {
+            return Err("Choose a folder to use as the working directory.".to_string());
+        }
+        path
+    } else {
+        env::temp_dir()
+    };
+    let cli = resolve_cli().await?;
+    let transport = AcpTransport::spawn(&cli.binary, &workspace_path, approval_mode, None).await?;
+
+    let result = async {
+        let initialized = initialize_and_authenticate(&transport)
+            .await
+            .map_err(auth_error_message)?;
+        parse_initialize_models(&initialized.response)
+    }
+    .await;
+    transport.shutdown().await;
+    result
 }
 
 #[tauri::command]
@@ -1562,7 +1598,7 @@ enum AuthError {
 
 async fn initialize_and_authenticate(
     transport: &AcpTransport,
-) -> Result<AgentCapabilities, AuthError> {
+) -> Result<InitializedAgent, AuthError> {
     let init = transport
         .request(
             "initialize",
@@ -1602,7 +1638,10 @@ async fn initialize_and_authenticate(
         )
         .await
         .map_err(|_| AuthError::NeedsLogin)?;
-    Ok(capabilities)
+    Ok(InitializedAgent {
+        capabilities,
+        response: init,
+    })
 }
 
 fn agent_capabilities(initialize_result: &Value) -> AgentCapabilities {
@@ -1614,11 +1653,8 @@ fn agent_capabilities(initialize_result: &Value) -> AgentCapabilities {
     }
 }
 
-fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, String> {
-    let Some(models) = result.get("models") else {
-        return Ok(None);
-    };
-    let models = serde_json::from_value::<SessionModelState>(models.clone())
+fn parse_model_state(value: &Value) -> Result<SessionModelState, String> {
+    let models = serde_json::from_value::<SessionModelState>(value.clone())
         .map_err(|_| "Grok Build returned invalid model information.".to_string())?;
     let current_model_is_available = models
         .available_models
@@ -1628,7 +1664,18 @@ fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, Str
         return Err("Grok Build returned invalid model information.".to_string());
     }
 
-    Ok(Some(models))
+    Ok(models)
+}
+
+fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, String> {
+    result.get("models").map(parse_model_state).transpose()
+}
+
+fn parse_initialize_models(result: &Value) -> Result<Option<SessionModelState>, String> {
+    result
+        .pointer("/_meta/modelState")
+        .map(parse_model_state)
+        .transpose()
 }
 
 fn reasoning_effort_value(
@@ -2257,6 +2304,7 @@ pub fn run() {
             grok_remove_workspace,
             grok_mutate_sessions,
             grok_list_commands,
+            grok_list_models,
             grok_connect,
             grok_load_session,
             grok_activate_session,
@@ -2281,11 +2329,11 @@ mod tests {
     use super::{
         agent_capabilities, apply_session_history_action, attachment_resource_links,
         extract_device_auth_code, inspect_attachment_paths, is_context_slash_command,
-        managed_workspace_name, normalize_session_title, parse_session_models,
-        reasoning_effort_value, remove_workspace_history, rename_session_title,
-        set_session_approval_mode, set_session_unread, title_from_prompt, upsert_session_history,
-        upsert_workspace_history, ApprovalMode, PersistedSession, PersistedWorkspace,
-        SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
+        managed_workspace_name, normalize_session_title, parse_initialize_models,
+        parse_session_models, reasoning_effort_value, remove_workspace_history,
+        rename_session_title, set_session_approval_mode, set_session_unread, title_from_prompt,
+        upsert_session_history, upsert_workspace_history, ApprovalMode, PersistedSession,
+        PersistedWorkspace, SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
     };
     use super::{record_model_selection, resolve_initial_model_selection};
     use chrono::{Local, TimeZone};
@@ -2616,13 +2664,33 @@ mod tests {
 
     #[test]
     fn reads_session_loading_support_from_agent_capabilities() {
-        assert!(
-            agent_capabilities(&json!({
-                "agentCapabilities": { "loadSession": true }
-            }))
-            .load_session
-        );
-        assert!(!agent_capabilities(&json!({ "agentCapabilities": {} })).load_session);
+        let capabilities = agent_capabilities(&json!({
+            "agentCapabilities": { "loadSession": true }
+        }));
+        assert!(capabilities.load_session);
+
+        let capabilities = agent_capabilities(&json!({ "agentCapabilities": {} }));
+        assert!(!capabilities.load_session);
+    }
+
+    #[test]
+    fn parses_models_advertised_before_session_creation() {
+        let models = parse_initialize_models(&json!({
+            "_meta": {
+                "modelState": {
+                    "currentModelId": "grok-4.5",
+                    "availableModels": [{
+                        "modelId": "grok-4.5",
+                        "name": "Grok 4.5"
+                    }]
+                }
+            }
+        }))
+        .expect("valid initialization model state")
+        .expect("model selection should be present");
+
+        assert_eq!(models.current_model_id, "grok-4.5");
+        assert_eq!(models.available_models[0].name, "Grok 4.5");
     }
 
     #[test]
