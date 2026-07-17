@@ -4726,7 +4726,7 @@ function App() {
         <section
           id="task-conversation"
           ref={conversation}
-          className={`conversation ${messages.length === 0 ? "empty" : ""}`}
+          className={`conversation ${messages.length === 0 ? "empty" : ""} ${messageHistory.length >= 2 ? "has-message-history" : ""}`}
           aria-label="Session conversation"
           onScroll={handleConversationScroll}
         >

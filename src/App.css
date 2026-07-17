@@ -963,6 +963,7 @@ body.is-resizing-side-panel .app-shell {
   flex-direction: column;
   overflow: hidden;
   background: var(--app-bg);
+  container: workspace / inline-size;
   isolation: isolate;
 }
 
@@ -1315,6 +1316,16 @@ body.is-resizing-side-panel .app-shell {
   line-height: 1.52;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+@container workspace (max-width: 830px) {
+  .conversation.has-message-history {
+    padding-left: 54px;
+  }
+
+  .message-history-preview {
+    display: none;
+  }
 }
 
 .scroll-to-latest {
