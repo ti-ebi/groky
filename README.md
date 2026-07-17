@@ -40,7 +40,8 @@ Grok Build is a powerful coding agent. Groky turns its local CLI into a persiste
 - **Flexible starting point:** Choose an existing folder or use a managed standalone directory created by Groky.
 - **Local integration:** Groky launches the official Grok Build CLI on your machine and communicates with it over the Agent Client Protocol (ACP).
 - **Human in the loop:** Review permission requests, choose an approval mode per session, and stop an active turn at any time.
-- **Focused interface:** Follow Markdown responses, thoughts, plans, tool activity, usage, and turn metrics without keeping a terminal open.
+- **Focused interface:** Follow Markdown responses, thoughts, plans, compact execution traces, live timing, usage, and turn metrics without leaving the app.
+- **Workspace tools:** Browse and preview files, attach workspace files to a prompt, and use one or more interactive terminals from a resizable tools panel.
 - **Native desktop host:** Process and filesystem access stay behind typed Tauri commands in the Rust host.
 
 ## What works today
@@ -52,13 +53,15 @@ Grok Build is a powerful coding agent. Groky turns its local CLI into a persiste
 | Working directories | Tracked local folders and managed standalone directories under `Documents/Groky/YYYY-MM-DD/` |
 | Session history | Local navigation metadata, session reload when supported by Grok Build, rename, archive, restore, delete, unread state, and approval-needed indicators |
 | Multi-session work | Switch between sessions while turns continue in the background and return when a response or permission request needs attention |
-| Search and navigation | Working-directory groups, resizable and collapsible sidebar, and a global session/action search palette |
+| Search and navigation | Working-directory groups, resizable and collapsible sidebar and tools panel, a global session/action search palette, and responsive message-history navigation |
 | Composer | Text prompts, up to 10 file attachments through the picker or drag and drop, and suggestions for slash commands advertised by Grok Build |
-| Live activity | Streamed GitHub-Flavored Markdown, thoughts, plans, tool calls, permission decisions, completion state, and usage, cost, or turn metrics when reported by Grok Build |
+| Live activity | Streamed GitHub-Flavored Markdown, thoughts, plans, compact or collapsible execution events, per-event and per-turn timing, permission decisions, completion state, and usage, cost, or turn metrics when reported by Grok Build |
+| Workspace files | Live file tree with hidden-file controls, system file-manager actions, syntax-highlighted text and Markdown previews, image, PDF, and font previews, and one-click attachment to the next message |
+| Terminals | Multiple interactive shell tabs rooted in the selected working directory, with resize, restart, close, and drag or keyboard tab reordering |
 | Permissions | **Ask** and **Always approve** session modes, plus interactive choices supplied by each tool permission request |
 | Model controls | Model and reasoning-effort selection when advertised by Grok Build |
 | Session controls | Start on first send, stop, reconnect, switch, rename, archive, restore, delete, and sign out |
-| Settings | Application version, updater status, CLI and active-session details, account controls, and searchable archived chats |
+| Settings | Application version, updater status, CLI and active-session details, signed-in account information, Grok usage access, account controls, and searchable archived chats |
 | Updates | Signed in-app updates backed by GitHub Releases |
 
 ## Install Groky
@@ -137,10 +140,13 @@ Standalone sessions use a unique directory inside `Documents/Groky/YYYY-MM-DD/`.
 
 Session titles start from the first message or attachment name and can be renamed later. Saved sessions can be reopened when the installed Grok Build version advertises ACP session loading.
 
+The tools panel's **Files** tab follows the active session, watches its working directory for changes, previews supported files without leaving Groky, and can attach a selected file to the next message. Each new **Terminal** tab runs your system shell in the working directory that was active when the tab opened. You can open multiple terminals, close tool tabs, and reorder tabs by dragging them or pressing <kbd>Alt</kbd> + <kbd>←</kbd>/<kbd>→</kbd> while a tab is focused.
+
 Useful keyboard controls:
 
 - <kbd>Command</kbd>/<kbd>Ctrl</kbd> + <kbd>K</kbd> searches sessions and common actions.
 - <kbd>Command</kbd>/<kbd>Ctrl</kbd> + <kbd>B</kbd> toggles the sidebar.
+- <kbd>Command</kbd>/<kbd>Ctrl</kbd> + <kbd>J</kbd> toggles the tools panel.
 - <kbd>Enter</kbd> sends a message; <kbd>Shift</kbd> + <kbd>Enter</kbd> inserts a new line.
 - Typing `/` opens the command catalog supplied by Grok Build.
 
@@ -156,9 +162,11 @@ Tauri Rust host
 Grok Build CLI (`grok agent stdio`)
 ```
 
-The React renderer does not start processes or access the filesystem directly. The Rust host owns CLI discovery, authentication commands, working-directory access, ACP transport, permission responses, cancellation, and updates.
+The React renderer does not start processes or access the filesystem directly. The Rust host owns CLI discovery, authentication commands, working-directory access and watching, file previews, terminal PTYs, ACP transport, permission responses, cancellation, and updates. Workspace file commands resolve canonical paths beneath the active session's working directory before reading or opening them.
 
 ACP events are routed by session, so a turn can continue while another session is open. Groky stores lightweight navigation metadata locally and requests conversation replay from Grok Build when reopening a saved session.
+
+Closing Groky stops active Grok Build processes, terminal sessions, and workspace watchers.
 
 Grok Build itself handles model and network communication. Prompts and project context are processed according to xAI's Grok Build service and data policies; see the official [Grok Build documentation](https://docs.x.ai/build/overview).
 
@@ -169,6 +177,8 @@ Grok Build itself handles model and network communication. Prompts and project c
 - Groky stores session IDs, titles, working-directory paths, approval modes, timestamps, archive state, and unread state in the operating system's application-data directory. The initial title is derived from the first message or attachment name.
 - Groky does not persist full conversation bodies or source-file contents in its own history files, and it does not write prompts, responses, credentials, or raw ACP traffic to application logs.
 - Attached files are not copied into Groky. Their validated local paths and metadata are passed to Grok Build as ACP resource links.
+- Files opened in the tools panel are read on demand for an in-memory preview. Text previews are capped at 512 KiB, font previews at 8 MiB, and supported image or PDF previews at 20 MiB.
+- Terminal tabs run your local system shell with the session working directory as their current directory. Commands entered there have the same local access as that shell.
 - Local processes and filesystem access are initiated through the Tauri Rust host, not the renderer.
 - Deleting Groky history does not delete files in the associated working directory.
 - **Always approve** skips individual prompts unless a policy rule still requires approval. Use it only in a working directory you trust.
@@ -202,6 +212,7 @@ pnpm dev
 
 - Tauri 2 and Rust
 - React 19, TypeScript, and Vite
+- xterm.js with a Rust-hosted pseudoterminal
 - pnpm
 - A typed ACP client powered by Grok Build's `grok agent stdio`
 
@@ -212,7 +223,7 @@ pnpm check
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 ```
 
-`pnpm check` runs the frontend typecheck and build, Rust ACP transport tests, and `cargo check`.
+`pnpm check` runs the frontend typecheck and build, TypeScript timing tests, all Rust unit tests, and `cargo check`.
 
 ## Contributing
 

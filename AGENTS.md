@@ -7,8 +7,14 @@
 
 ## Repository map
 
-- `src/` contains the React renderer.
-- `src-tauri/` contains the Tauri Rust host.
+- `src/App.tsx` owns renderer-side session orchestration, history, composer state, ACP event projection, and the main layout.
+- `src/TerminalPanel.tsx` owns tools-panel tabs and the xterm.js terminal surface.
+- `src/FileExplorer.tsx` owns the workspace tree, previews, live refresh, and attach actions in the renderer.
+- `src/timing.ts` contains execution-timing helpers; keep their unit tests in `tests/timing.test.ts`.
+- `src-tauri/src/lib.rs` owns Tauri command registration, authentication, session history, and application lifecycle.
+- `src-tauri/src/acp.rs` owns the Grok Build ACP transport and safe renderer-facing event types.
+- `src-tauri/src/file_manager.rs` owns workspace-scoped listing, preview, attachment inspection, folder opening, and watching.
+- `src-tauri/src/terminal.rs` owns local PTY creation, I/O, resizing, and cleanup.
 - Keep process, filesystem, and Grok Build access inside the Tauri host.
 - Expose host functionality to the renderer through typed Tauri commands and ACP types.
 
@@ -24,6 +30,10 @@
 - Install dependencies: `pnpm install`
 - Run the web UI: `pnpm dev`
 - Run the desktop app: `pnpm tauri dev`
+- Run the frontend typecheck and build: `pnpm build`
+- Run execution-timing tests: `pnpm test:timing`
+- Run all Rust unit tests: `pnpm test:rust`
+- Run Rust compilation checks: `pnpm check:rust`
 - Run frontend and Rust checks: `pnpm check`
 - Check Rust formatting: `cargo fmt --manifest-path src-tauri/Cargo.toml --check`
 
@@ -31,6 +41,11 @@
 
 - Do not access processes or the filesystem directly from the React renderer.
 - Run Grok Build only through the Tauri Rust host and its typed ACP boundary.
+- Resolve workspace file operations from the active session ID in the Rust host; accept normalized relative paths and reject canonical targets outside the session working directory.
+- Keep file preview size limits, MIME handling, attachment inspection, filesystem watching, and system file-manager launching in `src-tauri/src/file_manager.rs`.
+- Run interactive shells through the Rust-hosted PTY commands; validate terminal identifiers, dimensions, and input sizes before touching a terminal session.
+- Stop PTYs when their terminal tab closes, stop workspace watchers when the Files tab leaves a session, and stop all host runtimes when the application exits.
+- Keep Rust command payloads, emitted event names, and their TypeScript counterparts synchronized, including serde casing and optional fields.
 - Do not persist prompts, source code, credentials, session data, or raw ACP traffic in application logs.
 - Write all user-facing UI text and host-provided error or status messages in English.
 
@@ -39,6 +54,9 @@
 - After changing application code, run `pnpm check` and the Rust formatting check.
 - When changing ACP transport behavior, add unit tests for framing, request correlation, cancellation, and malformed messages.
 - Connect ACP behavior to UI state only after the transport tests pass.
+- When changing workspace file access, add Rust tests for path normalization, canonical workspace containment, listing or preview limits, and watcher path projection as applicable.
+- When changing terminal host behavior, add Rust tests for identifier, size, input, or lifecycle validation as applicable.
+- When changing execution timing or grouping, update `tests/timing.test.ts` and run `pnpm test:timing`.
 - For documentation-only changes, verify referenced commands and paths; application builds are not required.
 - Report which checks were run and identify any checks that could not be run.
 
@@ -46,6 +64,9 @@
 
 - Flag direct process or filesystem access from `src/`.
 - Flag Grok Build integration that bypasses the typed Tauri ACP boundary.
+- Flag workspace file commands that trust renderer-supplied absolute paths or permit traversal or symlink escape outside the active working directory.
+- Flag PTYs that survive terminal-tab or application teardown, and flag filesystem watchers that survive Files-tab, session, or application teardown.
+- Flag mismatches between Rust command or event payloads and their renderer-side TypeScript types.
 - Flag logs that may contain prompts, source code, credentials, session data, or raw ACP traffic.
 - Require transport-level tests when ACP framing, request lifecycle, or cancellation behavior changes.
 
