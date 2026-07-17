@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible problem with Groky
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Groky. Search existing issues before submitting a new report, and do not include credentials, private source code, session data, or raw ACP traffic.
+  - type: input
+    id: groky-version
+    attributes:
+      label: Groky version
+      description: Find this in Groky settings or on the release package.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: grok-version
+    attributes:
+      label: Grok Build CLI version
+      description: Run `grok --version`. Enter "Not applicable" if the problem does not involve Grok Build.
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem description
+      description: Clearly describe what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized screenshots or logs if useful. Do not include raw ACP traffic.
+  - type: checkboxes
+    id: sensitive-information
+    attributes:
+      label: Sensitive information
+      options:
+        - label: I have removed credentials, private source code, prompts, session data, and raw ACP traffic from this report and its attachments.
+          required: true
