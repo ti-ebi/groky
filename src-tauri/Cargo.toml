@@ -25,9 +25,11 @@ tauri-plugin-updater = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 tokio = { version = "1", features = ["io-util", "macros", "process", "sync", "time"] }
 rfd = "0.15"
 mime_guess = "2"
+notify = "8.2"
 url = "2"
 portable-pty = "0.9"
 

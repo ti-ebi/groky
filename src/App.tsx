@@ -548,6 +548,7 @@ const DEFAULT_SIDE_PANEL_WIDTH_RATIO = 0.42;
 const MIN_SIDE_PANEL_WIDTH = 340;
 const MAX_SIDE_PANEL_WIDTH = 760;
 const MAX_SESSION_TITLE_CHARS = 72;
+const MAX_MESSAGE_ATTACHMENTS = 10;
 
 function clampSidebarWidth(width: number) {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
@@ -2690,6 +2691,18 @@ function App() {
     }
   }, [attachmentDisabled, attachments]);
 
+  function addWorkspaceAttachment(attachment: FileAttachment) {
+    if (attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
+      if (attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
+        setConnectionNotice(`Attach up to ${MAX_MESSAGE_ATTACHMENTS} files at a time.`);
+      }
+      return false;
+    }
+    if (attachments.some((current) => current.path === attachment.path)) return false;
+    setAttachments([...attachments, attachment]);
+    return true;
+  }
+
   async function chooseAttachmentFiles() {
     if (attachmentDisabled || attachmentBusy) return;
     setAttachmentBusy(true);
@@ -4738,7 +4751,13 @@ function App() {
           />
       )}
       {activeView === "session" && sidePanelMounted && (
-        <TerminalPanel open={sidePanelOpen} workingDirectory={connection?.workingDirectory ?? workspace} />
+        <TerminalPanel
+          open={sidePanelOpen}
+          sessionId={activeSession?.connection.sessionId ?? null}
+          workingDirectory={activeSession?.connection.workingDirectory ?? workspace}
+          attachmentDisabled={attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS}
+          onAttach={addWorkspaceAttachment}
+        />
       )}
       {activeView === "session" && (
         <button

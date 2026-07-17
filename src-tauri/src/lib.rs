@@ -1,4 +1,5 @@
 mod acp;
+mod file_manager;
 mod terminal;
 
 use acp::{
@@ -6,6 +7,10 @@ use acp::{
     SessionUpdateEvent,
 };
 use chrono::{DateTime, Local};
+use file_manager::{
+    workspace_inspect_attachment, workspace_list_directory, workspace_open_folder,
+    workspace_preview_file, workspace_unwatch, workspace_watch, WorkspaceWatcherRuntime,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -2388,6 +2393,7 @@ pub fn run() {
         .manage(GrokRuntime::default())
         .manage(AppUpdateRuntime::default())
         .manage(TerminalRuntime::default())
+        .manage(WorkspaceWatcherRuntime::default())
         .invoke_handler(tauri::generate_handler![
             configure_native_titlebar,
             check_app_update,
@@ -2417,6 +2423,12 @@ pub fn run() {
             grok_set_model,
             grok_set_reasoning_effort,
             grok_respond_permission,
+            workspace_list_directory,
+            workspace_inspect_attachment,
+            workspace_open_folder,
+            workspace_preview_file,
+            workspace_watch,
+            workspace_unwatch,
             terminal_start,
             terminal_write,
             terminal_resize,

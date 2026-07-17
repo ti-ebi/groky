@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import "./TerminalPanel.css";
+import { FileExplorer, type WorkspaceFileAttachment } from "./FileExplorer";
 
 interface TerminalInfo {
   terminalId: string;
@@ -25,6 +26,54 @@ interface TerminalExitEvent {
 
 type TerminalStatus = "starting" | "running" | "exited" | "error";
 
+const LIGHT_TERMINAL_THEME = {
+  background: "#f7faf9",
+  foreground: "#25302c",
+  cursor: "#117568",
+  cursorAccent: "#f7faf9",
+  selectionBackground: "#9cd5c466",
+  black: "#17201d",
+  red: "#b94736",
+  green: "#117568",
+  yellow: "#8a6515",
+  blue: "#326d9f",
+  magenta: "#7a5597",
+  cyan: "#17747a",
+  white: "#e7eeeb",
+  brightBlack: "#71807a",
+  brightRed: "#d15d49",
+  brightGreen: "#0d8b78",
+  brightYellow: "#a77b1c",
+  brightBlue: "#3d82bd",
+  brightMagenta: "#966ab8",
+  brightCyan: "#208b91",
+  brightWhite: "#ffffff",
+};
+
+const DARK_TERMINAL_THEME = {
+  background: "#0b0f0e",
+  foreground: "#d9e3df",
+  cursor: "#8fe3c1",
+  cursorAccent: "#0b0f0e",
+  selectionBackground: "#24544799",
+  black: "#111614",
+  red: "#ff7e68",
+  green: "#8fe3c1",
+  yellow: "#e6c56f",
+  blue: "#83b8ff",
+  magenta: "#c9a0ff",
+  cyan: "#72d7dc",
+  white: "#d9e3df",
+  brightBlack: "#63706b",
+  brightRed: "#ff9b89",
+  brightGreen: "#b5f1d8",
+  brightYellow: "#f2d98f",
+  brightBlue: "#a7ceff",
+  brightMagenta: "#ddc2ff",
+  brightCyan: "#9ae9ec",
+  brightWhite: "#f4f8f6",
+};
+
 function isTauri() {
   return "__TAURI_INTERNALS__" in window;
 }
@@ -42,7 +91,7 @@ function compactPath(path: string | null) {
   return `${prefix}${segments.slice(0, -1).map((segment) => segment[0]).join("/")}/${segments[segments.length - 1]}`;
 }
 
-function PanelIcon({ name, size = 15 }: { name: "plus" | "terminal" | "x"; size?: number }) {
+function PanelIcon({ name, size = 15 }: { name: "files" | "plus" | "terminal" | "x"; size?: number }) {
   return (
     <svg
       aria-hidden="true"
@@ -56,6 +105,7 @@ function PanelIcon({ name, size = 15 }: { name: "plus" | "terminal" | "x"; size?
       strokeLinejoin="round"
     >
       {name === "plus" && <><path d="M12 5v14" /><path d="M5 12h14" /></>}
+      {name === "files" && <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="M7 11h10M7 15h7" /></>}
       {name === "terminal" && <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="m7 9 3 3-3 3M13 15h4" /></>}
       {name === "x" && <><path d="m7 7 10 10" /><path d="M17 7 7 17" /></>}
     </svg>
@@ -115,6 +165,7 @@ function TerminalSurface({
     const unlisteners: UnlistenFn[] = [];
     const encoder = new TextEncoder();
     let writeQueue = Promise.resolve();
+    const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
     const terminal = new Terminal({
       allowProposedApi: false,
       cursorBlink: true,
@@ -129,30 +180,12 @@ function TerminalSurface({
       lineHeight: 1.22,
       minimumContrastRatio: 4.5,
       scrollback: 5000,
-      theme: {
-        background: "#0b0f0e",
-        foreground: "#d9e3df",
-        cursor: "#8fe3c1",
-        cursorAccent: "#0b0f0e",
-        selectionBackground: "#24544799",
-        black: "#111614",
-        red: "#ff7e68",
-        green: "#8fe3c1",
-        yellow: "#e6c56f",
-        blue: "#83b8ff",
-        magenta: "#c9a0ff",
-        cyan: "#72d7dc",
-        white: "#d9e3df",
-        brightBlack: "#63706b",
-        brightRed: "#ff9b89",
-        brightGreen: "#b5f1d8",
-        brightYellow: "#f2d98f",
-        brightBlue: "#a7ceff",
-        brightMagenta: "#ddc2ff",
-        brightCyan: "#9ae9ec",
-        brightWhite: "#f4f8f6",
-      },
+      theme: colorScheme.matches ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME,
     });
+    const updateTerminalTheme = (event: MediaQueryListEvent) => {
+      terminal.options.theme = event.matches ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME;
+    };
+    colorScheme.addEventListener("change", updateTerminalTheme);
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(target);
@@ -268,6 +301,7 @@ function TerminalSurface({
       dataSubscription.dispose();
       binarySubscription.dispose();
       resizeSubscription.dispose();
+      colorScheme.removeEventListener("change", updateTerminalTheme);
       unlisteners.forEach((unlisten) => unlisten());
       if (started) void invoke("terminal_stop", { terminalId }).catch(() => undefined);
       if (terminalInstance.current === terminal) terminalInstance.current = null;
@@ -287,8 +321,16 @@ function TerminalSurface({
 
 interface TerminalToolTab {
   id: string;
+  type: "terminal";
   workingDirectory: string | null;
 }
+
+interface FileToolTab {
+  id: string;
+  type: "files";
+}
+
+type ToolTab = FileToolTab | TerminalToolTab;
 
 interface TerminalTabMeta {
   label: string;
@@ -328,10 +370,10 @@ function TerminalToolView({
 
   return (
     <div
-      id={`terminal-tab-content-${tab.id}`}
+      id={`tool-content-${tab.id}`}
       className="terminal-stage"
       role="tabpanel"
-      aria-labelledby={`terminal-tool-tab-${tab.id}`}
+      aria-labelledby={`tool-tab-${tab.id}`}
       hidden={!active}
     >
         <TerminalSurface
@@ -359,22 +401,30 @@ function TerminalToolView({
 
 export function TerminalPanel({
   open,
+  sessionId,
   workingDirectory,
+  attachmentDisabled,
+  onAttach,
 }: {
   open: boolean;
+  sessionId: string | null;
   workingDirectory: string | null;
+  attachmentDisabled: boolean;
+  onAttach: (attachment: WorkspaceFileAttachment) => boolean;
 }) {
-  const [initialTabId] = useState(() => crypto.randomUUID());
+  const [initialTabs] = useState<ToolTab[]>(() => [
+    { id: crypto.randomUUID(), type: "files" },
+    { id: crypto.randomUUID(), type: "terminal", workingDirectory },
+  ]);
   const tabHeader = useRef<HTMLDivElement | null>(null);
   const addMenuRoot = useRef<HTMLDivElement | null>(null);
   const addMenuTrigger = useRef<HTMLButtonElement | null>(null);
   const addMenu = useRef<HTMLDivElement | null>(null);
+  const addFilesItem = useRef<HTMLButtonElement | null>(null);
   const addTerminalItem = useRef<HTMLButtonElement | null>(null);
-  const [tabs, setTabs] = useState<TerminalToolTab[]>(() => [
-    { id: initialTabId, workingDirectory },
-  ]);
+  const [tabs, setTabs] = useState<ToolTab[]>(initialTabs);
   const [tabMeta, setTabMeta] = useState<Record<string, TerminalTabMeta>>({});
-  const [activeTabId, setActiveTabId] = useState<string | null>(initialTabId);
+  const [activeTabId, setActiveTabId] = useState<string | null>(initialTabs[0]?.id ?? null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [addMenuLeft, setAddMenuLeft] = useState(8);
 
@@ -410,7 +460,7 @@ export function TerminalPanel({
   useEffect(() => {
     if (!addMenuOpen) return;
 
-    const focusFrame = window.requestAnimationFrame(() => addTerminalItem.current?.focus());
+    const focusFrame = window.requestAnimationFrame(() => addFilesItem.current?.focus());
     const handlePointerDown = (event: PointerEvent) => {
       if (
         !(event.target instanceof Node)
@@ -455,7 +505,20 @@ export function TerminalPanel({
 
   function openTerminal() {
     const id = crypto.randomUUID();
-    setTabs((current) => [...current, { id, workingDirectory }]);
+    setTabs((current) => [...current, { id, type: "terminal", workingDirectory }]);
+    setActiveTabId(id);
+    setAddMenuOpen(false);
+  }
+
+  function openFiles() {
+    const existing = tabs.find((tab) => tab.type === "files");
+    if (existing) {
+      setActiveTabId(existing.id);
+      setAddMenuOpen(false);
+      return;
+    }
+    const id = crypto.randomUUID();
+    setTabs((current) => [{ id, type: "files" }, ...current]);
     setActiveTabId(id);
     setAddMenuOpen(false);
   }
@@ -485,7 +548,7 @@ export function TerminalPanel({
 
     window.requestAnimationFrame(() => {
       if (nextActiveId) {
-        document.getElementById(`terminal-tool-tab-${nextActiveId}`)?.focus();
+        document.getElementById(`tool-tab-${nextActiveId}`)?.focus();
       } else {
         addMenuTrigger.current?.focus();
       }
@@ -500,7 +563,7 @@ export function TerminalPanel({
     const nextTab = tabs[(currentIndex + direction + tabs.length) % tabs.length];
     if (!nextTab) return;
     selectTab(nextTab.id);
-    window.requestAnimationFrame(() => document.getElementById(`terminal-tool-tab-${nextTab.id}`)?.focus());
+    window.requestAnimationFrame(() => document.getElementById(`tool-tab-${nextTab.id}`)?.focus());
   }
 
   return (
@@ -509,36 +572,42 @@ export function TerminalPanel({
         <div className="side-panel-tab-rail">
           <div className="side-panel-tab-list" role="tablist" aria-label="Open tools">
             {tabs.map((tab) => {
-              const meta = tabMeta[tab.id] ?? {
-                label: compactPath(tab.workingDirectory),
-                fullPath: tab.workingDirectory,
-                status: "starting" as const,
-              };
+              const meta = tab.type === "files"
+                ? {
+                    label: "Files",
+                    fullPath: workingDirectory,
+                    status: undefined,
+                  }
+                : tabMeta[tab.id] ?? {
+                    label: compactPath(tab.workingDirectory),
+                    fullPath: tab.workingDirectory,
+                    status: "starting" as const,
+                  };
               const selected = activeTabId === tab.id;
               return (
                 <div className="side-panel-tab-item" data-selected={selected} key={tab.id} role="presentation">
                   <button
-                    id={`terminal-tool-tab-${tab.id}`}
+                    id={`tool-tab-${tab.id}`}
                     className="side-panel-tab"
                     data-status={meta.status}
                     type="button"
                     role="tab"
-                    aria-controls={`terminal-tab-content-${tab.id}`}
+                    aria-controls={`tool-content-${tab.id}`}
                     aria-selected={selected}
                     tabIndex={selected ? 0 : -1}
                     title={meta.fullPath ?? "Terminal"}
                     onClick={() => selectTab(tab.id)}
                     onKeyDown={(event) => handleTabKeyDown(event, tab.id)}
                   >
-                    <PanelIcon name="terminal" size={14} />
+                    <PanelIcon name={tab.type === "files" ? "files" : "terminal"} size={14} />
                     <span>{meta.label}</span>
                   </button>
                   <button
                     className="side-panel-tab-close"
                     type="button"
-                    aria-label={`Close terminal ${meta.label}`}
+                    aria-label={`Close ${meta.label}`}
                     tabIndex={selected ? 0 : -1}
-                    title="Close terminal"
+                    title={`Close ${meta.label}`}
                     onClick={() => closeTab(tab.id)}
                   >
                     <PanelIcon name="x" size={13} />
@@ -570,6 +639,10 @@ export function TerminalPanel({
             aria-label="Add tool tab"
             style={{ left: addMenuLeft }}
           >
+            <button ref={addFilesItem} type="button" role="menuitem" onClick={openFiles}>
+              <PanelIcon name="files" size={14} />
+              <span>Files</span>
+            </button>
             <button ref={addTerminalItem} type="button" role="menuitem" onClick={openTerminal}>
               <PanelIcon name="terminal" size={14} />
               <span>Terminal</span>
@@ -583,10 +656,27 @@ export function TerminalPanel({
           <div className="side-panel-empty" role="status">
             <span className="side-panel-empty-icon"><PanelIcon name="terminal" size={17} /></span>
             <strong>No open tools</strong>
-            <p>Use + to open a terminal.</p>
+            <p>Use + to browse files or open a terminal.</p>
           </div>
         )}
-        {tabs.map((tab) => (
+        {tabs.map((tab) => tab.type === "files" ? (
+          <div
+            id={`tool-content-${tab.id}`}
+            className="file-tool-stage"
+            role="tabpanel"
+            aria-labelledby={`tool-tab-${tab.id}`}
+            hidden={activeTabId !== tab.id}
+            key={tab.id}
+          >
+            <FileExplorer
+              active={open && activeTabId === tab.id}
+              sessionId={sessionId}
+              workingDirectory={workingDirectory}
+              attachmentDisabled={attachmentDisabled}
+              onAttach={onAttach}
+            />
+          </div>
+        ) : (
           <TerminalToolView
             key={tab.id}
             tab={tab}
