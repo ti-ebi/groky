@@ -16,7 +16,7 @@
 
 - Branch from `develop` and open pull requests against `develop`.
 - Do not commit directly to `main`.
-- Promote releases by merging `develop` into `main`; each update to `main` creates a draft GitHub Release.
+- Promote releases by merging `develop` into `main`; each version update reaching `main` creates a draft GitHub Release.
 - Keep each change focused and preserve unrelated working-tree changes.
 
 ## Commands
