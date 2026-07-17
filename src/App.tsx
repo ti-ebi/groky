@@ -2588,6 +2588,7 @@ function App() {
   const sessionViewsRef = useRef(sessionViews);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
+  const conversationContent = useRef<HTMLDivElement | null>(null);
   const composerDock = useRef<HTMLDivElement | null>(null);
   const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
   const commandSuggestionsList = useRef<HTMLDivElement | null>(null);
@@ -3421,20 +3422,31 @@ function App() {
   }, [draft, sidePanelOpen, sidePanelWidth, sidebarCollapsed, sidebarWidth, stage]);
 
   useLayoutEffect(() => {
+    const container = conversation.current;
+    const content = conversationContent.current;
     const composerDockElement = composerDock.current;
-    const workspaceElement = composerDockElement?.parentElement;
-    if (!composerDockElement || !workspaceElement) return;
+    if (!container || !content || !composerDockElement) return;
 
-    const updateComposerHeight = () => {
-      workspaceElement.style.setProperty("--composer-height", `${composerDockElement.offsetHeight}px`);
+    const syncScrollPosition = () => {
+      if (autoScrollEnabled.current) {
+        container.scrollTop = container.scrollHeight;
+        setShowScrollToLatest(false);
+      } else {
+        const hasContentBelow = container.scrollHeight - container.scrollTop - container.clientHeight > 2;
+        autoScrollEnabled.current = !hasContentBelow;
+        setShowScrollToLatest(hasContentBelow);
+      }
+
+      updateActiveHistoryMessage(container);
     };
-    updateComposerHeight();
+    syncScrollPosition();
 
-    const observer = new ResizeObserver(updateComposerHeight);
+    const observer = new ResizeObserver(syncScrollPosition);
+    observer.observe(container);
+    observer.observe(content);
     observer.observe(composerDockElement);
     return () => {
       observer.disconnect();
-      workspaceElement.style.removeProperty("--composer-height");
     };
   }, [stage]);
 
@@ -4735,7 +4747,7 @@ function App() {
           aria-label="Session conversation"
           onScroll={handleConversationScroll}
         >
-          <div className="conversation-inner">
+          <div ref={conversationContent} className="conversation-inner">
             {!activeSessionLoading && (messages.length === 0 ? (
               <div className="empty-conversation">
                 <span className="empty-orbit"><i /><i /></span>
@@ -4768,20 +4780,20 @@ function App() {
           onNavigate={scrollToHistoryMessage}
         />
 
-        {showScrollToLatest && (
-          <button
-            className="scroll-to-latest"
-            type="button"
-            aria-label="Scroll to latest message"
-            aria-controls="task-conversation"
-            onClick={scrollToLatest}
-          >
-            <Icon name="arrow-down" size={14} />
-            <span>Latest</span>
-          </button>
-        )}
-
         <div ref={composerDock} className="composer-dock">
+          {showScrollToLatest && (
+            <button
+              className="scroll-to-latest"
+              type="button"
+              aria-label="Scroll to latest message"
+              aria-controls="task-conversation"
+              onClick={scrollToLatest}
+            >
+              <Icon name="arrow-down" size={14} />
+              <span>Latest</span>
+            </button>
+          )}
+
           {sessionLocationEditable && (
             <section className="session-start-config" aria-label="Session location">
               <SessionLocationSelector
