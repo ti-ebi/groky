@@ -245,7 +245,7 @@ For each release:
 4. Wait for every matrix job to finish and inspect the draft GitHub Release.
 5. Test each installer on its target operating system before publishing the draft.
 
-The [release workflow](.github/workflows/release.yml) runs when a commit reaches `main`. It builds both macOS architectures, Windows NSIS, and Linux AppImage/DEB artifacts, signs updater bundles, generates `latest.json`, and creates a draft GitHub Release. If a run must be retried manually, run the workflow with `main` selected. Publish the draft only after testing its installers.
+The [release workflow](.github/workflows/release.yml) runs when a version change in `src-tauri/tauri.conf.json` reaches `main`. It builds both macOS architectures, Windows NSIS, and Linux AppImage/DEB artifacts, signs updater bundles, generates `latest.json`, and creates a draft GitHub Release. If a run must be retried manually, run the workflow with `main` selected. Publish the draft only after testing its installers.
 
 Before publishing, confirm that the draft contains:
 
