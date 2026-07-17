@@ -13,6 +13,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { createPortal } from "react-dom";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -21,6 +22,14 @@ import "@fontsource-variable/sora/index.css";
 import "./App.css";
 import { MarkdownContent } from "./MarkdownContent";
 import { GlobalSearchDialog } from "./GlobalSearchDialog";
+import { TerminalPanel } from "./TerminalPanel";
+import {
+  combineTimings,
+  elapsedForTiming,
+  finishTiming,
+  startTiming,
+  type EventTiming,
+} from "./timing";
 
 type IconName =
   | "archive"
@@ -37,6 +46,7 @@ type IconName =
   | "folder"
   | "folder-x"
   | "folder-open"
+  | "gauge"
   | "logout"
   | "panel"
   | "paperclip"
@@ -44,6 +54,7 @@ type IconName =
   | "refresh"
   | "search"
   | "sliders"
+  | "standalone"
   | "stop"
   | "terminal"
   | "trash"
@@ -64,7 +75,18 @@ interface OnboardingStatus {
   cliVersion: string | null;
   suggestedWorkspace: string | null;
   message: string | null;
+  accountProfile: AccountProfile | null;
 }
+
+interface AccountProfile {
+  displayName: string | null;
+  email: string | null;
+}
+
+const demoAccountProfile: AccountProfile | null = import.meta.env.DEV
+  && import.meta.env.VITE_DEMO_PROFILE === "1"
+  ? { displayName: "Alex Morgan", email: "alex@example.com" }
+  : null;
 
 interface Connection {
   sessionId: string;
@@ -123,6 +145,20 @@ interface AvailableCommand {
   name: string;
   description: string;
   inputHint?: string | null;
+}
+
+interface CommandToken {
+  query: string;
+  start: number;
+}
+
+function commandTokenAtEnd(draft: string): CommandToken | null {
+  const match = /(^| )\/([^\s]*)$/.exec(draft);
+  if (!match) return null;
+  return {
+    query: match[2],
+    start: (match.index ?? 0) + match[1].length,
+  };
 }
 
 interface SessionConfigOption {
@@ -208,7 +244,7 @@ interface PermissionRequest {
   options: PermissionOption[];
 }
 
-interface ToolActivity {
+interface ToolActivity extends EventTiming {
   id: string;
   title: string;
   kind?: string;
@@ -231,24 +267,22 @@ interface PermissionDecision {
 }
 
 type TurnTimelineItem =
-  | {
+  | ({
       id: string;
       kind: "thought";
       text: string;
       open: boolean;
-      startedAt?: number;
-      elapsedMs?: number;
-    }
+    } & EventTiming)
   | { id: string; kind: "response"; text: string }
   | { id: string; kind: "tool"; tool: ToolActivity }
-  | {
+  | ({
       id: string;
       kind: "permission";
       requestId: string;
       toolCallId: string;
       title: string;
       decision?: PermissionDecision;
-    };
+    } & EventTiming);
 
 interface MessageAttachment {
   name: string;
@@ -357,10 +391,7 @@ function finishThought(message: ConversationMessage, endedAt: number) {
     return [{
       ...item,
       open: false,
-      startedAt: undefined,
-      elapsedMs: item.startedAt === undefined
-        ? item.elapsedMs
-        : (item.elapsedMs ?? 0) + Math.max(0, endedAt - item.startedAt),
+      ...finishTiming(item, endedAt),
     }];
   });
   return {
@@ -398,21 +429,40 @@ function reconcileFallbackResponse(message: ConversationMessage, text: string) {
   return { ...message, text: resolvedText, timeline };
 }
 
-function cancelActiveTimelineTools(timeline: TurnTimelineItem[] | undefined) {
+function isActiveToolStatus(status: ToolStatus) {
+  return status === "pending" || status === "in_progress";
+}
+
+function finishActiveTimelineTools(
+  timeline: TurnTimelineItem[] | undefined,
+  endedAt: number,
+  status: Extract<ToolStatus, "completed" | "failed" | "cancelled">,
+) {
   return timeline?.map((item) => item.kind === "tool"
     ? {
         ...item,
-        tool: item.tool.status === "pending" || item.tool.status === "in_progress"
-          ? { ...item.tool, status: "cancelled" as const }
+        tool: isActiveToolStatus(item.tool.status)
+          ? { ...item.tool, ...finishTiming(item.tool, endedAt), status }
           : item.tool,
       }
     : item);
 }
 
-function finishRun(message: ConversationMessage, endedAt: number) {
+function terminalToolStatus(state: ConversationState) {
+  if (state === "complete") return "completed" as const;
+  if (state === "error") return "failed" as const;
+  return "cancelled" as const;
+}
+
+function finishRun(
+  message: ConversationMessage,
+  endedAt: number,
+  unfinishedToolStatus: Extract<ToolStatus, "completed" | "failed" | "cancelled"> = "completed",
+) {
   const finished = finishThought(message, endedAt);
   return {
     ...finished,
+    timeline: finishActiveTimelineTools(finished.timeline, endedAt, unfinishedToolStatus),
     elapsedMs: message.startedAt === undefined ? undefined : Math.max(0, endedAt - message.startedAt),
   };
 }
@@ -437,6 +487,53 @@ function formatThoughtDuration(elapsedMs: number) {
 
   const minutes = Math.floor(totalSeconds / 60);
   return `${minutes}m${(totalSeconds - minutes * 60).toFixed(0)}s`;
+}
+
+function useTimingElapsed(timing: EventTiming, active: boolean) {
+  const live = active && timing.startedAt !== undefined && timing.endedAt === undefined;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!live) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [live, timing.startedAt]);
+
+  if (!live && timing.startedAt !== undefined && timing.endedAt === undefined && timing.elapsedMs === undefined) {
+    return { elapsedMs: undefined, live: false };
+  }
+  return { elapsedMs: elapsedForTiming(timing, now), live };
+}
+
+function DurationText({
+  timing,
+  active = false,
+  className,
+  label = "Elapsed time",
+  prefix = "",
+  formatter = formatDuration,
+}: {
+  timing: EventTiming;
+  active?: boolean;
+  className?: string;
+  label?: string;
+  prefix?: string;
+  formatter?: (elapsedMs: number) => string;
+}) {
+  const { elapsedMs, live } = useTimingElapsed(timing, active);
+  if (elapsedMs === undefined) return null;
+
+  const duration = formatter(elapsedMs);
+  return (
+    <span
+      className={["duration-text", className].filter(Boolean).join(" ")}
+      role={live ? "timer" : undefined}
+      aria-label={`${label}: ${duration}`}
+    >
+      {prefix}{duration}
+    </span>
+  );
 }
 
 interface AppUpdateProgress {
@@ -530,10 +627,17 @@ const usesOverlayTitlebar = () => isTauri() && isMacOS();
 const AUTH_REQUIRED_ERROR = "GROK_AUTH_REQUIRED";
 const SIDEBAR_WIDTH_KEY = "groky.sidebar.width";
 const SIDEBAR_COLLAPSED_KEY = "groky.sidebar.collapsed";
+const SIDE_PANEL_WIDTH_KEY = "groky.side-panel.width";
+const SIDE_PANEL_OPEN_KEY = "groky.side-panel.open";
 const DEFAULT_SIDEBAR_WIDTH = 258;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 420;
+const FALLBACK_SIDE_PANEL_WIDTH = 480;
+const DEFAULT_SIDE_PANEL_WIDTH_RATIO = 0.42;
+const MIN_SIDE_PANEL_WIDTH = 340;
+const MAX_SIDE_PANEL_WIDTH = 760;
 const MAX_SESSION_TITLE_CHARS = 72;
+const MAX_MESSAGE_ATTACHMENTS = 10;
 
 function clampSidebarWidth(width: number) {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
@@ -556,6 +660,34 @@ function storedSidebarCollapsed() {
   }
 }
 
+function clampSidePanelWidth(width: number) {
+  return Math.min(MAX_SIDE_PANEL_WIDTH, Math.max(MIN_SIDE_PANEL_WIDTH, width));
+}
+
+function defaultSidePanelWidth() {
+  const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth;
+  return clampSidePanelWidth(
+    viewportWidth > 0 ? Math.round(viewportWidth * DEFAULT_SIDE_PANEL_WIDTH_RATIO) : FALLBACK_SIDE_PANEL_WIDTH,
+  );
+}
+
+function storedSidePanelWidth() {
+  try {
+    const width = Number(window.localStorage.getItem(SIDE_PANEL_WIDTH_KEY));
+    return Number.isFinite(width) && width > 0 ? clampSidePanelWidth(width) : defaultSidePanelWidth();
+  } catch {
+    return defaultSidePanelWidth();
+  }
+}
+
+function storedSidePanelOpen() {
+  try {
+    return window.localStorage.getItem(SIDE_PANEL_OPEN_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
     archive: <><path d="M4 7h16" /><path d="M5 7v12h14V7" /><path d="M3 4h18v3H3Z" /><path d="M9 11h6" /></>,
@@ -572,6 +704,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     folder: <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
     "folder-x": <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m10 11 4 4m0-4-4 4" /></>,
     "folder-open": <><path d="M3 9V7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1" /><path d="m3 10 2 9h14l2-9Z" /></>,
+    gauge: <><path d="M5.6 18a8 8 0 1 1 12.8 0" /><path d="m12 14 4-4" /><path d="M8 18h8" /></>,
     logout: <><path d="M10 5H5v14h5" /><path d="M14 8l4 4-4 4M8 12h10" /></>,
     panel: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M15 4v16" /></>,
     paperclip: <path d="m20.5 11.5-8.9 8.9a5 5 0 0 1-7.1-7.1l9.6-9.6a3.5 3.5 0 1 1 5 5l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9" />,
@@ -579,6 +712,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     refresh: <><path d="M20 6v5h-5" /><path d="M4 18v-5h5" /><path d="M18 9a7 7 0 0 0-12-2L4 11M6 15a7 7 0 0 0 12 2l2-4" /></>,
     search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
     sliders: <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>,
+    standalone: <><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" /><circle cx="8" cy="11" r="0.8" fill="currentColor" stroke="none" /><circle cx="12" cy="11" r="0.8" fill="currentColor" stroke="none" /><circle cx="16" cy="11" r="0.8" fill="currentColor" stroke="none" /></>,
     stop: <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />,
     terminal: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="m7 9 3 3-3 3M13 15h4" /></>,
     trash: <><path d="M4 7h16" /><path d="m9 7 .5-3h5l.5 3" /><path d="m6 7 1 13h10l1-13" /><path d="M10 11v5M14 11v5" /></>,
@@ -870,7 +1004,7 @@ function SessionLocationSelector({
         disabled={disabled || addingWorkspace}
         onClick={() => setOpen((current) => !current)}
       >
-        <Icon name={value ? "folder" : "compose"} size={14} />
+        <Icon name={value ? "folder" : "standalone"} size={14} />
         <span>{label}</span>
         <Icon name="chevron-down" size={12} />
       </button>
@@ -921,7 +1055,7 @@ function SessionLocationSelector({
               aria-checked={value === null}
               onClick={() => select(null)}
             >
-              <Icon name="compose" size={14} />
+              <Icon name="standalone" size={14} />
               <span>Standalone</span>
               {value === null && <Icon name="check" size={14} />}
             </button>
@@ -934,6 +1068,11 @@ function SessionLocationSelector({
 
 function cleanVersion(version: string | null) {
   return version?.replace(/^grok\s+/, "") ?? "not detected";
+}
+
+function accountAvatarLabel(profile: AccountProfile | null) {
+  const label = profile?.displayName ?? profile?.email ?? "G";
+  return Array.from(label.trim())[0]?.toLocaleUpperCase() ?? "G";
 }
 
 function makeMessageId(prefix: string) {
@@ -981,6 +1120,25 @@ function stateFromStopReason(stopReason: StopReason): ConversationState {
   }
 }
 
+function toolTimingForUpdate(
+  existing: ToolActivity | undefined,
+  status: ToolStatus,
+  now: number,
+  trackTiming: boolean,
+): EventTiming {
+  const existingTiming: EventTiming = {
+    startedAt: existing?.startedAt,
+    endedAt: existing?.endedAt,
+    elapsedMs: existing?.elapsedMs,
+  };
+  if (isActiveToolStatus(status)) {
+    if (existing && isActiveToolStatus(existing.status)) return existingTiming;
+    return trackTiming ? startTiming(now) : {};
+  }
+  if (existing && isActiveToolStatus(existing.status)) return finishTiming(existingTiming, now);
+  return existingTiming;
+}
+
 function applySessionUpdateToMessage(
   message: ConversationMessage,
   update: SessionUpdate,
@@ -1024,12 +1182,14 @@ function applySessionUpdateToMessage(
       const toolIndex = timeline.findIndex((item) => item.kind === "tool" && item.tool.id === update.toolCallId);
       const existingItem = toolIndex >= 0 ? timeline[toolIndex] : undefined;
       const existing = existingItem?.kind === "tool" ? existingItem.tool : undefined;
+      const status = update.status ?? existing?.status ?? "in_progress";
       const nextTool: ToolActivity = {
         id: update.toolCallId,
         title: update.title ?? existing?.title ?? "Working with a local tool",
         kind: update.toolKind ?? existing?.kind ?? undefined,
-        status: update.status ?? existing?.status ?? "in_progress",
+        status,
         locations: update.locations ?? existing?.locations ?? [],
+        ...toolTimingForUpdate(existing, status, now, message.state === "streaming"),
       };
       if (toolIndex >= 0 && existingItem?.kind === "tool") {
         timeline[toolIndex] = { ...existingItem, tool: nextTool };
@@ -1047,7 +1207,7 @@ function applySessionUpdateToMessage(
       }
       const state = stateFromStopReason(update.stopReason);
       return {
-        ...finishRun(message, now),
+        ...finishRun(message, now, terminalToolStatus(state)),
         state,
         stopReason: update.stopReason,
         metrics: update.metrics ?? message.metrics,
@@ -1069,6 +1229,7 @@ function applySessionUpdateToMessage(
             requestId: update.requestId,
             toolCallId: update.toolCallId,
             title: update.title,
+            ...(message.state === "streaming" ? startTiming(now) : {}),
           },
         ],
       };
@@ -1086,7 +1247,9 @@ function applySessionUpdateToMessage(
       const index = timeline.findIndex((item) => item.kind === "permission" && item.requestId === update.requestId);
       if (index >= 0) {
         const permission = timeline[index];
-        if (permission.kind === "permission") timeline[index] = { ...permission, decision };
+        if (permission.kind === "permission") {
+          timeline[index] = { ...permission, ...finishTiming(permission, now), decision };
+        }
       } else {
         timeline.push({
           id: makeMessageId("permission"),
@@ -1742,8 +1905,6 @@ function SettingsScreen({
   appVersion,
   cliVersion,
   connected,
-  approvalMode,
-  modelName,
   currentModeId,
   configOptions,
   usage,
@@ -1762,8 +1923,6 @@ function SettingsScreen({
   appVersion: string | null;
   cliVersion: string | null;
   connected: boolean;
-  approvalMode: ApprovalMode;
-  modelName: string;
   currentModeId: string | null;
   configOptions: SessionConfigOption[];
   usage: SessionUsage | null;
@@ -1873,14 +2032,6 @@ function SettingsScreen({
               <div className="settings-row">
                 <div><strong>Engine</strong><small>Grok Build CLI detected by Groky.</small></div>
                 <span className="settings-value">{cliVersion ?? "Not detected"}</span>
-              </div>
-              <div className="settings-row">
-                <div><strong>Model</strong><small>Model for the active session.</small></div>
-                <span className="settings-value">{modelName}</span>
-              </div>
-              <div className="settings-row">
-                <div><strong>Approval mode</strong><small>Permission behavior for the active session.</small></div>
-                <span className="settings-value">{approvalModeOption(approvalMode).label}</span>
               </div>
               {currentModeId && (
                 <div className="settings-row">
@@ -2136,20 +2287,25 @@ function ModelSelector({
   connected,
   models,
   busy,
+  onLoad,
   onChange,
   onReasoningChange,
 }: {
   connected: boolean;
   models: SessionModelState | null;
   busy: boolean;
+  onLoad: () => Promise<boolean>;
   onChange: (modelId: string) => Promise<SessionModelState | null>;
   onReasoningChange: (reasoningEffort: string) => Promise<SessionModelState | null>;
 }) {
   const [open, setOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<"model" | "reasoning" | null>(null);
+  const [loading, setLoading] = useState(false);
   const [changingModelId, setChangingModelId] = useState<string | null>(null);
   const [changingReasoningEffort, setChangingReasoningEffort] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{ right: number; bottom: number } | null>(null);
   const root = useRef<HTMLDivElement | null>(null);
+  const menu = useRef<HTMLDivElement | null>(null);
   const selected = currentModel(models);
   const reasoningEffort = selected?.metadata?.reasoningEffort;
   const reasoningEfforts = selected?.metadata?.supportsReasoningEffort === false
@@ -2161,11 +2317,22 @@ function ModelSelector({
   const reasoningLabel = selectedReasoning?.label.replace(/\s+Effort$/i, "") ?? reasoningEffort;
   const changing = changingModelId !== null || changingReasoningEffort !== null;
 
+  const updateMenuPosition = useCallback(() => {
+    const bounds = root.current?.getBoundingClientRect();
+    if (!bounds) return;
+
+    setMenuPosition({
+      right: Math.max(8, window.innerWidth - bounds.right - 3),
+      bottom: Math.max(8, window.innerHeight - bounds.top + 8),
+    });
+  }, []);
+
   useEffect(() => {
     if (!open) return;
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!root.current?.contains(target) && !menu.current?.contains(target)) setOpen(false);
     };
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
@@ -2179,16 +2346,35 @@ function ModelSelector({
     };
   }, [open]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [open, updateMenuPosition]);
+
   useEffect(() => {
     if (busy) setOpen(false);
   }, [busy]);
 
-  function toggleMenu() {
+  async function toggleMenu() {
     if (open) {
       setOpen(false);
       return;
     }
+    if (!connected && !models) {
+      setLoading(true);
+      const loaded = await onLoad();
+      setLoading(false);
+      if (!loaded) return;
+    }
     setActiveSection(null);
+    updateMenuPosition();
     setOpen(true);
   }
 
@@ -2222,16 +2408,22 @@ function ModelSelector({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Model: ${selected?.name ?? "Grok Build default"}${reasoningLabel ? `, reasoning: ${reasoningLabel}` : ""}`}
-        disabled={busy || changing}
-        onClick={toggleMenu}
+        disabled={busy || loading || changing}
+        onClick={() => void toggleMenu()}
       >
-        <span>{selected?.name ?? "Grok Build"}</span>
+        <span>{loading ? "Loading models…" : selected?.name ?? "Grok Build"}</span>
         <span className="reasoning">· {reasoningLabel ?? (connected ? "ACP" : "default")}</span>
         <Icon name="chevron-down" size={12} />
       </button>
 
-      {open && (
-        <div className="approval-menu model-menu" role="menu" aria-label="Grok Build model and reasoning settings">
+      {open && menuPosition && createPortal(
+        <div
+          ref={menu}
+          className="approval-menu model-menu model-menu-portal"
+          role="menu"
+          aria-label="Grok Build model and reasoning settings"
+          style={{ right: menuPosition.right, bottom: menuPosition.bottom }}
+        >
           <div
             className="model-settings-item"
             role="none"
@@ -2325,7 +2517,8 @@ function ModelSelector({
           {!models && (
             <div className="model-settings-note">This Grok Build session uses its default model.</div>
           )}
-        </div>
+        </div>,
+        root.current?.closest<HTMLElement>(".app-shell") ?? document.body,
       )}
     </div>
   );
@@ -2335,6 +2528,7 @@ function App() {
   const overlayTitlebar = usesOverlayTitlebar();
   const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "deep" } : {};
   const sidebarShortcutLabel = isMacOS() ? "⌘B" : "Ctrl+B";
+  const sidePanelShortcutLabel = isMacOS() ? "⌘J" : "Ctrl+J";
   const searchShortcutLabel = isMacOS() ? "⌘K" : "Ctrl+K";
   const [stage, setStage] = useState<OnboardingStage>("checking");
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
@@ -2371,6 +2565,9 @@ function App() {
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
   const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
+  const [sidePanelWidth, setSidePanelWidth] = useState(storedSidePanelWidth);
+  const [sidePanelOpen, setSidePanelOpen] = useState(storedSidePanelOpen);
+  const [sidePanelMounted, setSidePanelMounted] = useState(storedSidePanelOpen);
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
@@ -2381,19 +2578,24 @@ function App() {
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
   const [commandSuggestionsOpen, setCommandSuggestionsOpen] = useState(true);
   const [activeCommandSuggestion, setActiveCommandSuggestion] = useState(0);
+  const toggleSidePanel = useCallback(() => {
+    setSidePanelMounted(true);
+    setSidePanelOpen((current) => !current);
+  }, []);
   const commandSuggestionsId = useId();
   const activeSessionIdRef = useRef<string | null>(null);
   const activeAssistantIds = useRef<Map<string, string>>(new Map());
   const sessionViewsRef = useRef(sessionViews);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
-  const composer = useRef<HTMLFormElement | null>(null);
+  const composerDock = useRef<HTMLDivElement | null>(null);
   const composerTextarea = useRef<HTMLTextAreaElement | null>(null);
   const commandSuggestionsList = useRef<HTMLDivElement | null>(null);
   const commandCatalogRequests = useRef<Set<string>>(new Set());
   const updateCheckInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
+  const sidePanelResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
 
   const activeSession = activeSessionId ? sessionViews[activeSessionId] : undefined;
   const connection = activeSession && !activeSession.disconnected ? activeSession.connection : null;
@@ -2401,6 +2603,9 @@ function App() {
   const draft = activeSession?.draft ?? pendingDraft;
   const attachments = activeSession?.attachments ?? pendingAttachments;
   const running = activeSession?.running ?? false;
+  const activeRunStartedAt = running
+    ? [...messages].reverse().find((message) => message.role === "assistant" && message.state === "streaming")?.startedAt
+    : undefined;
   const permission = activeSession?.permissions[0] ?? null;
   const plan = activeSession?.plan ?? [];
   const activeSessionLoading = activeSessionId !== null && loadingSessionIds.has(activeSessionId);
@@ -2415,9 +2620,9 @@ function App() {
     ?? [];
   const commandSuggestions = useMemo(() => {
     if (!commandSuggestionsOpen) return [];
-    const match = draft.match(/^\/([^\s]*)$/);
-    if (!match) return [];
-    const query = match[1].toLocaleLowerCase();
+    const token = commandTokenAtEnd(draft);
+    if (!token) return [];
+    const query = token.query.toLocaleLowerCase();
     return availableCommandsForComposer
       .filter((command) => command.name.toLocaleLowerCase().includes(query))
       .sort((left, right) => {
@@ -2573,7 +2778,16 @@ function App() {
     setPendingAttachments([]);
   }
 
-  const projectName = useMemo(() => workspaceName(connection?.workspace ?? workspace), [connection, workspace]);
+  const sessionWorkspace = connection?.workspace ?? workspace;
+  const projectName = useMemo(() => workspaceName(sessionWorkspace), [sessionWorkspace]);
+  const activeSessionTitle = activeSessionId
+    ? sessionHistory.find((session) => session.sessionId === activeSessionId)?.title ?? "New Grok session"
+    : "New session";
+  const accountProfile = demoAccountProfile ?? status?.accountProfile ?? null;
+  const accountName = accountProfile?.displayName ?? accountProfile?.email ?? "Grok Build";
+  const accountDetail = accountProfile?.displayName && accountProfile.email
+    ? accountProfile.email
+    : cleanVersion(connection?.cliVersion ?? status?.cliVersion ?? null);
   const messageHistory = useMemo(() => conversationTurnPreviews(messages), [messages]);
   const appUpdating = updatePhase === "downloading";
   const sidebarSessions: SidebarSessionSummary[] = sessionHistory.map((session) => ({
@@ -2618,6 +2832,18 @@ function App() {
       setAttachmentBusy(false);
     }
   }, [attachmentDisabled, attachments]);
+
+  function addWorkspaceAttachment(attachment: FileAttachment) {
+    if (attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
+      if (attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
+        setConnectionNotice(`Attach up to ${MAX_MESSAGE_ATTACHMENTS} files at a time.`);
+      }
+      return false;
+    }
+    if (attachments.some((current) => current.path === attachment.path)) return false;
+    setAttachments([...attachments, attachment]);
+    return true;
+  }
 
   async function chooseAttachmentFiles() {
     if (attachmentDisabled || attachmentBusy) return;
@@ -2715,6 +2941,22 @@ function App() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
+    } catch {
+      // Persistence is optional when storage is unavailable.
+    }
+  }, [sidePanelWidth]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDE_PANEL_OPEN_KEY, String(sidePanelOpen));
+    } catch {
+      // Persistence is optional when storage is unavailable.
+    }
+  }, [sidePanelOpen]);
+
+  useEffect(() => {
     const handleSidebarShortcut = (event: globalThis.KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "b") return;
       event.preventDefault();
@@ -2747,6 +2989,20 @@ function App() {
     window.addEventListener("keydown", handleSearchShortcut);
     return () => window.removeEventListener("keydown", handleSearchShortcut);
   }, [deleteConfirmation, globalSearchOpen, stage]);
+
+  useEffect(() => {
+    const handleSidePanelShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "j") return;
+      event.preventDefault();
+      toggleSidePanel();
+    };
+
+    window.addEventListener("keydown", handleSidePanelShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleSidePanelShortcut);
+      document.body.classList.remove("is-resizing-side-panel");
+    };
+  }, [toggleSidePanel]);
 
   useEffect(() => {
     if ((stage !== "ready" && stage !== "connected") || deleteConfirmation) {
@@ -2901,6 +3157,42 @@ function App() {
     setSidebarWidth(clampSidebarWidth(nextWidth));
   }
 
+  function startSidePanelResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !sidePanelOpen) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    sidePanelResizeStart.current = { pointerX: event.clientX, width: sidePanelWidth };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.body.classList.add("is-resizing-side-panel");
+  }
+
+  function resizeSidePanel(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = sidePanelResizeStart.current;
+    if (!start) return;
+    setSidePanelWidth(clampSidePanelWidth(start.width - event.clientX + start.pointerX));
+  }
+
+  function finishSidePanelResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!sidePanelResizeStart.current) return;
+    sidePanelResizeStart.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    document.body.classList.remove("is-resizing-side-panel");
+  }
+
+  function resizeSidePanelWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? 32 : 12;
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") nextWidth = sidePanelWidth + step;
+    if (event.key === "ArrowRight") nextWidth = sidePanelWidth - step;
+    if (event.key === "Home") nextWidth = MIN_SIDE_PANEL_WIDTH;
+    if (event.key === "End") nextWidth = MAX_SIDE_PANEL_WIDTH;
+    if (nextWidth === null) return;
+    event.preventDefault();
+    setSidePanelWidth(clampSidePanelWidth(nextWidth));
+  }
+
   async function refreshSessionHistory() {
     if (!isTauri()) return;
     try {
@@ -3040,9 +3332,18 @@ function App() {
       listen<PermissionRequest>("grok://permission-request", ({ payload }) => {
         const messageId = activeAssistantIds.current.get(payload.sessionId);
         if (messageId) {
-          const endedAt = Date.now();
+          const requestedAt = Date.now();
+          const update: SessionUpdate = {
+            kind: "permission_requested",
+            sessionId: payload.sessionId,
+            requestId: payload.requestId,
+            toolCallId: payload.toolCallId,
+            title: payload.title,
+            toolKind: payload.toolKind,
+            options: payload.options,
+          };
           setSessionMessages(payload.sessionId, (current) => current.map((message) =>
-            message.id === messageId ? finishThought(message, endedAt) : message
+            message.id === messageId ? applySessionUpdateToMessage(message, update, requestedAt) : message
           ));
         }
         enqueueSessionPermission(payload.sessionId, payload);
@@ -3063,7 +3364,7 @@ function App() {
             permissions: [],
             messages: session.messages.map((message) => message.id === messageId
               ? {
-                  ...finishRun(message, endedAt),
+                  ...finishRun(message, endedAt, "failed"),
                   state: "error",
                   error: payload.message ?? "Grok Build disconnected.",
                 }
@@ -3117,20 +3418,20 @@ function App() {
 
   useLayoutEffect(() => {
     resizeTextareaToContent(composerTextarea.current);
-  }, [draft, sidebarCollapsed, sidebarWidth, stage]);
+  }, [draft, sidePanelOpen, sidePanelWidth, sidebarCollapsed, sidebarWidth, stage]);
 
   useLayoutEffect(() => {
-    const composerElement = composer.current;
-    const workspaceElement = composerElement?.parentElement;
-    if (!composerElement || !workspaceElement) return;
+    const composerDockElement = composerDock.current;
+    const workspaceElement = composerDockElement?.parentElement;
+    if (!composerDockElement || !workspaceElement) return;
 
     const updateComposerHeight = () => {
-      workspaceElement.style.setProperty("--composer-height", `${composerElement.offsetHeight}px`);
+      workspaceElement.style.setProperty("--composer-height", `${composerDockElement.offsetHeight}px`);
     };
     updateComposerHeight();
 
     const observer = new ResizeObserver(updateComposerHeight);
-    observer.observe(composerElement);
+    observer.observe(composerDockElement);
     return () => {
       observer.disconnect();
       workspaceElement.style.removeProperty("--composer-height");
@@ -3211,6 +3512,15 @@ function App() {
       await invoke("open_grok_install_guide");
     } catch (error) {
       setSetupError(String(error));
+    }
+  }
+
+  async function openUsageDetails() {
+    setShowConnection(false);
+    try {
+      await invoke("open_grok_usage");
+    } catch (error) {
+      setConnectionNotice(String(error));
     }
   }
 
@@ -3712,6 +4022,25 @@ function App() {
     return reconnectActiveSession();
   }
 
+  async function loadModels() {
+    if (pendingModels) return true;
+    setConnectionNotice(null);
+    try {
+      const models = await invoke<SessionModelState | null>("grok_list_models", {
+        workspace,
+        approvalMode,
+      });
+      if (models) setPendingModels(models);
+      return true;
+    } catch (error) {
+      const message = String(error);
+      const authRequired = message.includes(AUTH_REQUIRED_ERROR);
+      setConnectionNotice(authRequired ? null : message);
+      if (authRequired) setStage("needsAuth");
+      return false;
+    }
+  }
+
   async function changeModel(modelId: string) {
     const sessionId = connection?.sessionId;
     if (!sessionId) {
@@ -3828,7 +4157,7 @@ function App() {
         message.id === assistantMessage.id ? (() => {
           const state = stateFromStopReason(result.stopReason);
           const finished = reconcileFallbackResponse(
-            addFallbackThought(finishRun(message, endedAt), result.thought),
+            addFallbackThought(finishRun(message, endedAt, terminalToolStatus(state)), result.thought),
             result.text,
           );
           return {
@@ -3843,7 +4172,7 @@ function App() {
       const endedAt = Date.now();
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === assistantMessage.id
-          ? { ...finishRun(message, endedAt), state: "error", error: String(error) }
+          ? { ...finishRun(message, endedAt, "failed"), state: "error", error: String(error) }
           : message
       ));
     } finally {
@@ -3916,13 +4245,15 @@ function App() {
 
   function handleComposerChange(nextDraft: string) {
     setDraft(nextDraft);
-    if (/^\/[^\s]*$/.test(nextDraft) && !connection) {
+    if (commandTokenAtEnd(nextDraft) && !connection) {
       void loadCommandCatalogForComposer();
     }
   }
 
   function selectAvailableCommand(command: AvailableCommand) {
-    const nextDraft = `/${command.name}${command.inputHint ? " " : ""}`;
+    const token = commandTokenAtEnd(draft);
+    if (!token) return;
+    const nextDraft = `${draft.slice(0, token.start)}/${command.name}${command.inputHint ? " " : ""}`;
     setDraft(nextDraft);
     setCommandSuggestionsOpen(false);
     window.requestAnimationFrame(() => {
@@ -3941,15 +4272,11 @@ function App() {
       const endedAt = Date.now();
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === messageId
-          ? (() => {
-              const finished = finishRun(message, endedAt);
-              return {
-                ...finished,
-                state: "cancelled" as const,
-                stopReason: "cancelled" as const,
-                timeline: cancelActiveTimelineTools(finished.timeline),
-              };
-            })()
+          ? {
+              ...finishRun(message, endedAt, "cancelled"),
+              state: "cancelled" as const,
+              stopReason: "cancelled" as const,
+            }
           : message
       ));
     } catch (error) {
@@ -4035,10 +4362,11 @@ function App() {
   return (
     <>
       <div
-        className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${activeView === "settings" ? "settings-open" : ""} ${activeView === "session" && sidebarCollapsed ? "sidebar-collapsed" : ""}`}
+        className={`app-shell ${overlayTitlebar ? "has-overlay-titlebar" : ""} ${activeView === "settings" ? "settings-open" : "session-shell"} ${activeView === "session" && sidebarCollapsed ? "sidebar-collapsed" : ""} ${activeView === "session" && sidePanelOpen ? "right-panel-open" : ""}`}
         inert={globalSearchOpen}
         style={{
           "--sidebar-width": `${sidebarWidth}px`,
+          "--side-panel-width": `${sidePanelWidth}px`,
           ...(overlayTitlebar && nativeTitlebarHeight !== null
             ? { "--app-header-height": `${nativeTitlebarHeight}px` }
             : {}),
@@ -4252,9 +4580,12 @@ function App() {
           data-connection-popover-root
           onClick={() => setShowConnection((current) => !current)}
         >
-          <span className="avatar">G</span>
-          <span className="profile-copy"><strong>Grok Build</strong><small>{cleanVersion(connection?.cliVersion ?? status?.cliVersion ?? null)}</small></span>
-          <span className={`connection-pill ${connection ? "" : "idle"}`}>{connection ? "live" : "signed in"}</span>
+          <span className="avatar" aria-hidden="true">{accountAvatarLabel(accountProfile)}</span>
+          <span className="profile-copy">
+            <strong>{accountName}</strong>
+            <small title={accountDetail}>{accountDetail}</small>
+          </span>
+          {connection && <span className="connection-pill">live</span>}
         </button>
 
         {showConnection && (
@@ -4263,6 +4594,15 @@ function App() {
               <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
               <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
             </dl>
+            <button
+              className="popover-settings-link popover-usage-link"
+              type="button"
+              onClick={() => void openUsageDetails()}
+            >
+              <Icon name="gauge" size={14} />
+              <span>Usage &amp; limits</span>
+              <span className="popover-settings-arrow"><Icon name="external-link" size={12} /></span>
+            </button>
             <button
               className="popover-settings-link"
               type="button"
@@ -4319,8 +4659,6 @@ function App() {
             appVersion={appVersion}
             cliVersion={connection?.cliVersion ?? status?.cliVersion ?? null}
             connected={connection !== null}
-            approvalMode={approvalMode}
-            modelName={currentModel(connection?.models ?? null)?.name ?? "Grok Build default"}
             currentModeId={activeSession?.currentModeId ?? null}
             configOptions={activeSession?.configOptions ?? []}
             usage={activeSession?.usage ?? null}
@@ -4348,12 +4686,35 @@ function App() {
             {sidebarCollapsed && (
               <button className="icon-button sidebar-restore" type="button" aria-label="Show sidebar" title={`Show sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
             )}
-            <div className="task-title workspace-context" title={workspace ?? undefined}>
-              <Icon name={workspace ? "folder" : "compose"} /><strong>{workspace ? projectName : "Standalone session"}</strong>
+            <div className="task-title workspace-context">
+              <Icon name={sessionWorkspace ? "folder" : "standalone"} />
+              <strong title={activeSessionTitle}>{activeSessionTitle}</strong>
+              <span
+                className="local-chip"
+                title={sessionWorkspace ?? "Standalone"}
+              >
+                <span className="local-chip-label">{sessionWorkspace ? projectName : "Standalone"}</span>
+              </span>
             </div>
           </div>
           <div className="task-actions">
-            <span className={`agent-state ${running ? "working" : ""}`}><span className="live-dot" />{running ? "Grok is working" : connection ? "ACP connected" : sessionTransitioning ? "Loading session" : "Signed in"}</span>
+            <span className={`agent-state ${running ? "working" : ""}`}>
+              <span className="live-dot" />
+              {running ? (
+                <>
+                  <span>Grok is working</span>
+                  {activeRunStartedAt !== undefined && (
+                    <DurationText
+                      timing={{ startedAt: activeRunStartedAt }}
+                      active
+                      className="agent-elapsed"
+                      label="Turn elapsed time"
+                      prefix="· "
+                    />
+                  )}
+                </>
+              ) : connection ? "ACP connected" : "Signed in"}
+            </span>
           </div>
         </header>
 
@@ -4370,19 +4731,12 @@ function App() {
         <section
           id="task-conversation"
           ref={conversation}
-          className={`conversation ${messages.length === 0 ? "empty" : ""}`}
+          className={`conversation ${messages.length === 0 ? "empty" : ""} ${messageHistory.length >= 2 ? "has-message-history" : ""}`}
           aria-label="Session conversation"
           onScroll={handleConversationScroll}
         >
           <div className="conversation-inner">
-            {activeSessionLoading ? (
-              <div className="empty-conversation" role="status" aria-live="polite">
-                <span className="empty-orbit"><i /><i /></span>
-                <p className="message-kicker">GROK BUILD / RESTORING</p>
-                <h1>Loading session…</h1>
-                <p>The conversation will appear here while other sessions continue in the background.</p>
-              </div>
-            ) : messages.length === 0 ? (
+            {!activeSessionLoading && (messages.length === 0 ? (
               <div className="empty-conversation">
                 <span className="empty-orbit"><i /><i /></span>
                 <p className="message-kicker">GROK BUILD / READY</p>
@@ -4396,7 +4750,7 @@ function App() {
               </div>
             ) : messages.map((message) => (
               <ConversationItem key={message.id} message={message} />
-            ))}
+            )))}
 
             {permission && (
               <PermissionCard
@@ -4427,10 +4781,9 @@ function App() {
           </button>
         )}
 
-        <form ref={composer} className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
-          {plan.length > 0 && <PlanBlock entries={plan} active={running} />}
+        <div ref={composerDock} className="composer-dock">
           {sessionLocationEditable && (
-            <div className="composer-session-context">
+            <section className="session-start-config" aria-label="Session location">
               <SessionLocationSelector
                 value={workspace}
                 workspaces={workspaceGroups.map((group) => group.path)}
@@ -4438,9 +4791,10 @@ function App() {
                 onChange={selectPendingSessionLocation}
                 onAddWorkspace={chooseAndAddWorkspace}
               />
-              <span className="session-location-hint">Change until the first message</span>
-            </div>
+            </section>
           )}
+          <form className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
+          {plan.length > 0 && <PlanBlock entries={plan} active={running} />}
           {attachments.length > 0 && (
             <div className="attachment-tray" aria-label="Files attached to this message">
               {attachments.map((attachment) => (
@@ -4513,7 +4867,7 @@ function App() {
               aria-activedescendant={commandSuggestions.length > 0
                 ? `${commandSuggestionsId}-option-${activeCommandSuggestion}`
                 : undefined}
-              placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : sessionTransitioning ? "Loading session…" : "Ask Groky to build, debug, or review"}
+              placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : "Ask Groky to build, debug, or review"}
               rows={2}
               disabled={running || appUpdating || sessionTransitioning}
             />
@@ -4536,14 +4890,12 @@ function App() {
               changing={activeApprovalModeChanging}
               onChange={(nextMode) => void changeApprovalMode(nextMode)}
             />
-            {!sessionLocationEditable && (
-              <span className="local-chip"><span className="live-dot" />{workspace ? "cwd" : "standalone"}</span>
-            )}
             <span className="toolbar-spacer" />
             <ModelSelector
               connected={connection !== null}
               models={connection?.models ?? pendingModels}
               busy={running || appUpdating || sessionTransitioning || activeApprovalModeChanging}
+              onLoad={loadModels}
               onChange={changeModel}
               onReasoningChange={changeReasoningEffort}
             />
@@ -4553,10 +4905,51 @@ function App() {
               <button className="send-button" type="submit" aria-label="Send" disabled={(!draft.trim() && attachments.length === 0) || appUpdating || sessionTransitioning || activeApprovalModeChanging}><Icon name="arrow-up" size={17} /></button>
             )}
           </div>
-        </form>
+          </form>
+        </div>
         </>
         )}
       </main>
+      {activeView === "session" && sidePanelOpen && (
+          <div
+            className="side-panel-resizer"
+            role="separator"
+            aria-label="Resize tools panel"
+            aria-orientation="vertical"
+            aria-valuemin={MIN_SIDE_PANEL_WIDTH}
+            aria-valuemax={MAX_SIDE_PANEL_WIDTH}
+            aria-valuenow={Math.round(sidePanelWidth)}
+            tabIndex={0}
+            onDoubleClick={() => setSidePanelWidth(defaultSidePanelWidth())}
+            onKeyDown={resizeSidePanelWithKeyboard}
+            onPointerDown={startSidePanelResize}
+            onPointerMove={resizeSidePanel}
+            onPointerUp={finishSidePanelResize}
+            onPointerCancel={finishSidePanelResize}
+          />
+      )}
+      {activeView === "session" && sidePanelMounted && (
+        <TerminalPanel
+          open={sidePanelOpen}
+          sessionId={activeSession?.connection.sessionId ?? null}
+          workingDirectory={activeSession?.connection.workingDirectory ?? workspace}
+          attachmentDisabled={attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS}
+          onAttach={addWorkspaceAttachment}
+        />
+      )}
+      {activeView === "session" && (
+        <button
+          className="icon-button tools-panel-toggle"
+          type="button"
+          aria-label={sidePanelOpen ? "Close tools panel" : "Open tools panel"}
+          aria-controls="tools-panel"
+          aria-expanded={sidePanelOpen}
+          title={`${sidePanelOpen ? "Close" : "Open"} tools panel (${sidePanelShortcutLabel})`}
+          onClick={toggleSidePanel}
+        >
+          <Icon name="panel" size={16} />
+        </button>
+      )}
       </div>
       <GlobalSearchDialog
         open={globalSearchOpen}
@@ -4616,11 +5009,34 @@ function App() {
   );
 }
 
-function ThoughtBlock({ thought, active, elapsedMs }: { thought: string; active: boolean; elapsedMs?: number }) {
+function ThoughtBlock({
+  thought,
+  active,
+  startedAt,
+  endedAt,
+  elapsedMs,
+}: {
+  thought: string;
+  active: boolean;
+  startedAt?: number;
+  endedAt?: number;
+  elapsedMs?: number;
+}) {
   const [open, setOpen] = useState(active);
   const contentId = useId();
   const label = active
-    ? "Thinking…"
+    ? (
+        <>
+          <span>Thinking</span>
+          <DurationText
+            timing={{ startedAt, endedAt, elapsedMs }}
+            active
+            label="Thought elapsed time"
+            prefix=" · "
+            formatter={formatThoughtDuration}
+          />
+        </>
+      )
     : elapsedMs === undefined
       ? "Thought"
       : `Thought for ${formatThoughtDuration(elapsedMs)}`;
@@ -4783,6 +5199,7 @@ function toolGroupSummary(tools: ToolActivity[]) {
 }
 
 function ToolDetailRow({ tool }: { tool: ToolActivity }) {
+  const active = isActiveToolStatus(tool.status);
   return (
     <div className={`activity-row ${tool.status}`}>
       <span className="activity-icon">
@@ -4798,7 +5215,15 @@ function ToolDetailRow({ tool }: { tool: ToolActivity }) {
           <small>{tool.locations.map((location) => fileNameFromPath(location.path)).join(", ")}</small>
         )}
       </span>
-      <span className="activity-detail">{tool.status.replace(/_/g, " ")}</span>
+      <span className="activity-detail">
+        <span>{tool.status.replace(/_/g, " ")}</span>
+        <DurationText
+          timing={tool}
+          active={active}
+          label={`${tool.title} elapsed time`}
+          prefix=" · "
+        />
+      </span>
     </div>
   );
 }
@@ -4807,6 +5232,8 @@ function ToolGroupBlock({ tools }: { tools: ToolActivity[] }) {
   const failed = tools.filter((tool) => tool.status === "failed");
   const cancelled = tools.filter((tool) => tool.status === "cancelled");
   const interrupted = failed.length + cancelled.length;
+  const active = tools.some((tool) => isActiveToolStatus(tool.status));
+  const timing = combineTimings(tools);
   const [open, setOpen] = useState(interrupted > 0);
   const contentId = useId();
 
@@ -4819,6 +5246,12 @@ function ToolGroupBlock({ tools }: { tools: ToolActivity[] }) {
       <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
         <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
         <span className="progress-disclosure-summary">{toolGroupSummary(tools)}</span>
+        <DurationText
+          timing={timing}
+          active={active}
+          className="trace-duration"
+          label="Event group elapsed time"
+        />
       </button>
       <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
         <div>
@@ -4831,6 +5264,7 @@ function ToolGroupBlock({ tools }: { tools: ToolActivity[] }) {
 
 function ToolBlock({ tool }: { tool: ToolActivity }) {
   const interrupted = tool.status === "failed" || tool.status === "cancelled";
+  const active = isActiveToolStatus(tool.status);
   const [open, setOpen] = useState(interrupted);
   const contentId = useId();
   const statusLabel = tool.status.replace(/_/g, " ");
@@ -4847,12 +5281,20 @@ function ToolBlock({ tool }: { tool: ToolActivity }) {
       <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
         <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
         <span className="progress-disclosure-summary">{tool.title}</span>
-        <span className="trace-status" aria-label={statusLabel} title={statusLabel}>
-          {tool.status === "completed"
-            ? <Icon name="check" size={12} />
-            : interrupted
-              ? <Icon name="x" size={12} />
-              : <span className="trace-status-pulse" />}
+        <span className="trace-meta">
+          <DurationText
+            timing={tool}
+            active={active}
+            className="trace-duration"
+            label={`${tool.title} elapsed time`}
+          />
+          <span className="trace-status" aria-label={statusLabel} title={statusLabel}>
+            {tool.status === "completed"
+              ? <Icon name="check" size={12} />
+              : interrupted
+                ? <Icon name="x" size={12} />
+                : <span className="trace-status-pulse" />}
+          </span>
         </span>
       </button>
       <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
@@ -4863,6 +5305,119 @@ function ToolBlock({ tool }: { tool: ToolActivity }) {
             {tool.locations && tool.locations.length > 0 && (
               <small>{tool.locations.map((location) => fileNameFromPath(location.path)).join(", ")}</small>
             )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TraceItems({ items, messageState }: { items: TraceTimelineItem[]; messageState?: ConversationState }) {
+  return items.map((item) => {
+    if (item.kind === "thought") {
+      return (
+        <ThoughtBlock
+          key={item.id}
+          thought={item.text}
+          active={messageState === "streaming" && item.open}
+          startedAt={item.startedAt}
+          endedAt={item.endedAt}
+          elapsedMs={item.elapsedMs}
+        />
+      );
+    }
+    if (item.kind === "tool_group") {
+      return <ToolGroupBlock key={item.id} tools={item.tools} />;
+    }
+    if (item.kind === "tool") return <ToolBlock key={item.id} tool={item.tool} />;
+    if (!item.decision) return null;
+    return (
+      <div className={`permission-decision ${item.decision.outcome}`} key={item.id}>
+        <Icon name={item.decision.outcome === "allowed" ? "check" : "x"} size={13} />
+        <span>{item.decision.label}</span>
+        <small>{item.decision.title}</small>
+        <DurationText timing={item} className="trace-duration" label="Permission wait time" />
+      </div>
+    );
+  });
+}
+
+function traceGroupDetails(items: TraceTimelineItem[]) {
+  let count = 0;
+  let running = 0;
+  let interrupted = 0;
+  items.forEach((item) => {
+    if (item.kind === "tool_group") {
+      count += item.tools.length;
+      item.tools.forEach((tool) => {
+        if (tool.status === "pending" || tool.status === "in_progress") running += 1;
+        if (tool.status === "failed" || tool.status === "cancelled") interrupted += 1;
+      });
+      return;
+    }
+    count += 1;
+    if (item.kind === "tool") {
+      if (item.tool.status === "pending" || item.tool.status === "in_progress") running += 1;
+      if (item.tool.status === "failed" || item.tool.status === "cancelled") interrupted += 1;
+    }
+    if (item.kind === "permission" && item.decision && item.decision.outcome !== "allowed") interrupted += 1;
+  });
+  return { count, running, interrupted };
+}
+
+function traceItemTiming(item: TraceTimelineItem): EventTiming {
+  if (item.kind === "tool_group") return combineTimings(item.tools);
+  if (item.kind === "tool") return item.tool;
+  return item;
+}
+
+function CollapsedTraceBlock({
+  items,
+  messageState,
+}: {
+  items: TraceTimelineItem[];
+  messageState?: ConversationState;
+}) {
+  const [open, setOpen] = useState(false);
+  const contentId = useId();
+  const { count, running, interrupted } = traceGroupDetails(items);
+  const timing = combineTimings(items.map(traceItemTiming));
+  const active = messageState === "streaming"
+    && timing.startedAt !== undefined
+    && timing.endedAt === undefined;
+  const summary = `${count} execution ${count === 1 ? "event" : "events"}${interrupted > 0 ? ` · ${interrupted} interrupted` : ""}`;
+  const status = interrupted > 0 ? "interrupted" : running > 0 ? "in progress" : "completed";
+
+  return (
+    <div
+      className={`progress-disclosure turn-trace trace-group-disclosure ${interrupted > 0 ? "has-interruption" : ""}`}
+      data-open={open}
+      role="group"
+      aria-label="Collapsed execution trace"
+    >
+      <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
+        <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
+        <span className="progress-disclosure-summary">{summary}</span>
+        <span className="trace-meta">
+          <DurationText
+            timing={timing}
+            active={active}
+            className="trace-duration"
+            label="Execution group elapsed time"
+          />
+          <span className="trace-status" aria-label={status} title={status}>
+            {interrupted > 0
+              ? <Icon name="x" size={12} />
+              : running > 0
+                ? <span className="trace-status-pulse" />
+                : <Icon name="check" size={12} />}
+          </span>
+        </span>
+      </button>
+      <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
+        <div>
+          <div className="turn-trace trace-group-items">
+            <TraceItems items={items} messageState={messageState} />
           </div>
         </div>
       </div>
@@ -4930,7 +5485,7 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
 
   return (
     <article className={`assistant-turn ${message.state ?? "complete"}`}>
-      {timelineSections.map((section) => {
+      {timelineSections.map((section, sectionIndex) => {
         if (section.kind === "response") {
           const item = section.item;
           return (
@@ -4951,32 +5506,20 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
           return item.kind !== "permission" || item.decision !== undefined;
         });
         if (items.length === 0) return null;
+        const isBetweenResponses = timelineSections[sectionIndex - 1]?.kind === "response"
+          && timelineSections[sectionIndex + 1]?.kind === "response";
+        if (isBetweenResponses) {
+          return (
+            <CollapsedTraceBlock
+              key={section.id}
+              items={items}
+              messageState={message.state}
+            />
+          );
+        }
         return (
           <div className="turn-trace" role="group" aria-label="Execution trace" key={section.id}>
-            {items.map((item) => {
-              if (item.kind === "thought") {
-                return (
-                  <ThoughtBlock
-                    key={item.id}
-                    thought={item.text}
-                    active={message.state === "streaming" && item.open}
-                    elapsedMs={item.elapsedMs}
-                  />
-                );
-              }
-              if (item.kind === "tool_group") {
-                return <ToolGroupBlock key={item.id} tools={item.tools} />;
-              }
-              if (item.kind === "tool") return <ToolBlock key={item.id} tool={item.tool} />;
-              if (!item.decision) return null;
-              return (
-                <div className={`permission-decision ${item.decision.outcome}`} key={item.id}>
-                  <Icon name={item.decision.outcome === "allowed" ? "check" : "x"} size={13} />
-                  <span>{item.decision.label}</span>
-                  <small>{item.decision.title}</small>
-                </div>
-              );
-            })}
+            <TraceItems items={items} messageState={message.state} />
           </div>
         );
       })}

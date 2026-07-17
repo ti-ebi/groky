@@ -1,10 +1,16 @@
 mod acp;
+mod file_manager;
+mod terminal;
 
 use acp::{
     normalize_stop_reason, AcpTransport, ApprovalMode, PromptResourceLink, SafeAvailableCommand,
     SessionUpdateEvent,
 };
 use chrono::{DateTime, Local};
+use file_manager::{
+    workspace_inspect_attachment, workspace_list_directory, workspace_open_folder,
+    workspace_preview_file, workspace_unwatch, workspace_watch, WorkspaceWatcherRuntime,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -21,6 +27,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
+use terminal::{terminal_resize, terminal_start, terminal_stop, terminal_write, TerminalRuntime};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -34,11 +41,14 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const AUTH_REQUIRED_ERROR: &str = "GROK_AUTH_REQUIRED";
 const DEVICE_AUTH_URL_PREFIX: &str = "https://accounts.x.ai/oauth2/device?user_code=";
 const INSTALL_GUIDE_URL: &str = "https://docs.x.ai/build/overview";
+const USAGE_URL: &str = "https://grok.com/?_s=usage";
 const SESSION_HISTORY_FILE: &str = "sessions.json";
 const WORKSPACE_HISTORY_FILE: &str = "working-directories.json";
 const DEFAULT_SESSION_TITLE: &str = "New Grok session";
 const MAX_SESSION_TITLE_CHARS: usize = 72;
 const MAX_ATTACHMENTS: usize = 10;
+const MAX_AUTH_FILE_BYTES: usize = 1024 * 1024;
+const MAX_ACCOUNT_FIELD_CHARS: usize = 320;
 static MANAGED_WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -92,6 +102,14 @@ struct OnboardingStatus {
     cli_version: Option<String>,
     suggested_workspace: Option<String>,
     message: Option<String>,
+    account_profile: Option<AccountProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountProfile {
+    display_name: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +209,11 @@ enum SessionHistoryAction {
 #[derive(Debug, Clone, Copy)]
 struct AgentCapabilities {
     load_session: bool,
+}
+
+struct InitializedAgent {
+    capabilities: AgentCapabilities,
+    response: Value,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -495,11 +518,13 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
             .cloned()
     };
     if let Some(session) = active_session {
+        let account_profile = read_account_profile().await;
         return Ok(OnboardingStatus {
             stage: "connected",
             cli_version: Some(session.cli_version.clone()),
             suggested_workspace: session.workspace.clone(),
             message: None,
+            account_profile,
         });
     }
 
@@ -512,6 +537,7 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
                 cli_version: None,
                 suggested_workspace,
                 message: Some("Grok Build CLI was not found.".to_string()),
+                account_profile: None,
             })
         }
     };
@@ -528,6 +554,7 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
                 cli_version: Some(cli.version),
                 suggested_workspace,
                 message: Some(message),
+                account_profile: None,
             })
         }
     };
@@ -536,23 +563,29 @@ async fn grok_status(state: State<'_, GrokRuntime>) -> Result<OnboardingStatus, 
     transport.shutdown().await;
 
     match auth_result {
-        Ok(_) => Ok(OnboardingStatus {
-            stage: "ready",
-            cli_version: Some(cli.version),
-            suggested_workspace,
-            message: None,
-        }),
+        Ok(_) => {
+            let account_profile = read_account_profile().await;
+            Ok(OnboardingStatus {
+                stage: "ready",
+                cli_version: Some(cli.version),
+                suggested_workspace,
+                message: None,
+                account_profile,
+            })
+        }
         Err(AuthError::NeedsLogin) => Ok(OnboardingStatus {
             stage: "needsAuth",
             cli_version: Some(cli.version),
             suggested_workspace,
             message: Some("Sign in to your Grok account to continue.".to_string()),
+            account_profile: None,
         }),
         Err(AuthError::Transport(message)) => Ok(OnboardingStatus {
             stage: "error",
             cli_version: Some(cli.version),
             suggested_workspace,
             message: Some(message),
+            account_profile: None,
         }),
     }
 }
@@ -728,6 +761,11 @@ fn attachment_resource_links(
 #[tauri::command]
 async fn open_grok_install_guide() -> Result<(), String> {
     open_url(INSTALL_GUIDE_URL)
+}
+
+#[tauri::command]
+async fn open_grok_usage() -> Result<(), String> {
+    open_url(USAGE_URL).map_err(|_| "Failed to open Grok usage.".to_string())
 }
 
 #[tauri::command]
@@ -922,8 +960,8 @@ async fn acquire_transport(
         Some(app.clone()),
     )
     .await?;
-    let capabilities = match initialize_and_authenticate(&transport).await {
-        Ok(capabilities) => capabilities,
+    let initialized = match initialize_and_authenticate(&transport).await {
+        Ok(initialized) => initialized,
         Err(error) => {
             transport.shutdown().await;
             return Err(auth_error_message(error));
@@ -931,7 +969,7 @@ async fn acquire_transport(
     };
     let candidate = ManagedTransport {
         transport: transport.clone(),
-        capabilities,
+        capabilities: initialized.capabilities,
     };
 
     let existing = {
@@ -1014,6 +1052,37 @@ async fn grok_list_commands(
         .transport;
 
     Ok(transport.command_catalog(Some(&cwd)).await)
+}
+
+#[tauri::command]
+async fn grok_list_models(
+    workspace: Option<String>,
+    approval_mode: Option<ApprovalMode>,
+) -> Result<Option<SessionModelState>, String> {
+    let approval_mode = approval_mode.unwrap_or_default();
+    let workspace_path = if let Some(workspace) = workspace {
+        let path = PathBuf::from(workspace)
+            .canonicalize()
+            .map_err(|_| "Could not open the selected working directory.".to_string())?;
+        if !path.is_dir() {
+            return Err("Choose a folder to use as the working directory.".to_string());
+        }
+        path
+    } else {
+        env::temp_dir()
+    };
+    let cli = resolve_cli().await?;
+    let transport = AcpTransport::spawn(&cli.binary, &workspace_path, approval_mode, None).await?;
+
+    let result = async {
+        let initialized = initialize_and_authenticate(&transport)
+            .await
+            .map_err(auth_error_message)?;
+        parse_initialize_models(&initialized.response)
+    }
+    .await;
+    transport.shutdown().await;
+    result
 }
 
 #[tauri::command]
@@ -1560,7 +1629,7 @@ enum AuthError {
 
 async fn initialize_and_authenticate(
     transport: &AcpTransport,
-) -> Result<AgentCapabilities, AuthError> {
+) -> Result<InitializedAgent, AuthError> {
     let init = transport
         .request(
             "initialize",
@@ -1600,7 +1669,10 @@ async fn initialize_and_authenticate(
         )
         .await
         .map_err(|_| AuthError::NeedsLogin)?;
-    Ok(capabilities)
+    Ok(InitializedAgent {
+        capabilities,
+        response: init,
+    })
 }
 
 fn agent_capabilities(initialize_result: &Value) -> AgentCapabilities {
@@ -1612,11 +1684,8 @@ fn agent_capabilities(initialize_result: &Value) -> AgentCapabilities {
     }
 }
 
-fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, String> {
-    let Some(models) = result.get("models") else {
-        return Ok(None);
-    };
-    let models = serde_json::from_value::<SessionModelState>(models.clone())
+fn parse_model_state(value: &Value) -> Result<SessionModelState, String> {
+    let models = serde_json::from_value::<SessionModelState>(value.clone())
         .map_err(|_| "Grok Build returned invalid model information.".to_string())?;
     let current_model_is_available = models
         .available_models
@@ -1626,7 +1695,18 @@ fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, Str
         return Err("Grok Build returned invalid model information.".to_string());
     }
 
-    Ok(Some(models))
+    Ok(models)
+}
+
+fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, String> {
+    result.get("models").map(parse_model_state).transpose()
+}
+
+fn parse_initialize_models(result: &Value) -> Result<Option<SessionModelState>, String> {
+    result
+        .pointer("/_meta/modelState")
+        .map(parse_model_state)
+        .transpose()
 }
 
 fn reasoning_effort_value(
@@ -1734,6 +1814,12 @@ async fn disconnect_runtime(state: &GrokRuntime) {
     }
 }
 
+async fn shutdown_app(app: &AppHandle) {
+    disconnect_runtime(&app.state::<GrokRuntime>()).await;
+    app.state::<TerminalRuntime>().shutdown();
+    app.state::<WorkspaceWatcherRuntime>().shutdown();
+}
+
 fn extract_device_auth_code(line: &str) -> Option<String> {
     let start = line.find(DEVICE_AUTH_URL_PREFIX)? + DEVICE_AUTH_URL_PREFIX.len();
     let code = line[start..]
@@ -1823,6 +1909,88 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+async fn read_account_profile() -> Option<AccountProfile> {
+    let path = home_dir()?.join(".grok").join("auth.json");
+    let bytes = tokio::fs::read(path).await.ok()?;
+    if bytes.len() > MAX_AUTH_FILE_BYTES {
+        return None;
+    }
+    let auth = serde_json::from_slice::<Value>(&bytes).ok()?;
+    account_profile_from_auth(&auth)
+}
+
+fn account_profile_from_auth(auth: &Value) -> Option<AccountProfile> {
+    auth.as_object()?
+        .values()
+        .filter_map(account_profile_candidate)
+        .max_by_key(|(created_at, _)| *created_at)
+        .map(|(_, profile)| profile)
+}
+
+fn account_profile_candidate(record: &Value) -> Option<(i64, AccountProfile)> {
+    let first_name = account_field(record, &["first_name", "firstName"]);
+    let last_name = account_field(record, &["last_name", "lastName"]);
+    let explicit_name = account_field(record, &["display_name", "displayName", "name"]);
+    let display_name = explicit_name.or_else(|| match (first_name, last_name) {
+        (Some(first), Some(last)) => Some(format!("{first} {last}")),
+        (Some(first), None) => Some(first),
+        (None, Some(last)) => Some(last),
+        (None, None) => None,
+    });
+    let email = account_field(record, &["email"]);
+    if display_name.is_none() && email.is_none() {
+        return None;
+    }
+
+    Some((
+        account_record_timestamp(record),
+        AccountProfile {
+            display_name,
+            email,
+        },
+    ))
+}
+
+fn account_field(record: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let value = record.get(*key)?.as_str()?.trim();
+        if value.is_empty()
+            || value.chars().count() > MAX_ACCOUNT_FIELD_CHARS
+            || value.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(value.to_string())
+    })
+}
+
+fn account_record_timestamp(record: &Value) -> i64 {
+    let Some(value) = record
+        .get("create_time")
+        .or_else(|| record.get("createTime"))
+    else {
+        return 0;
+    };
+    if let Some(timestamp) = value.as_i64() {
+        return timestamp;
+    }
+    if let Some(timestamp) = value.as_u64() {
+        return timestamp.min(i64::MAX as u64) as i64;
+    }
+    let Some(timestamp) = value.as_str() else {
+        return 0;
+    };
+    timestamp
+        .parse::<i64>()
+        .ok()
+        .or_else(|| {
+            DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .map(|date| date.timestamp_millis())
+        })
+        .unwrap_or(0)
 }
 
 fn session_history_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -2232,10 +2400,12 @@ fn open_url(url: &str) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(GrokRuntime::default())
         .manage(AppUpdateRuntime::default())
+        .manage(TerminalRuntime::default())
+        .manage(WorkspaceWatcherRuntime::default())
         .invoke_handler(tauri::generate_handler![
             configure_native_titlebar,
             check_app_update,
@@ -2247,6 +2417,7 @@ pub fn run() {
             choose_attachments,
             inspect_attachments,
             open_grok_install_guide,
+            open_grok_usage,
             grok_list_sessions,
             grok_rename_session,
             grok_list_workspaces,
@@ -2254,6 +2425,7 @@ pub fn run() {
             grok_remove_workspace,
             grok_mutate_sessions,
             grok_list_commands,
+            grok_list_models,
             grok_connect,
             grok_load_session,
             grok_activate_session,
@@ -2264,21 +2436,38 @@ pub fn run() {
             grok_set_model,
             grok_set_reasoning_effort,
             grok_respond_permission,
+            workspace_list_directory,
+            workspace_inspect_attachment,
+            workspace_open_folder,
+            workspace_preview_file,
+            workspace_watch,
+            workspace_unwatch,
+            terminal_start,
+            terminal_write,
+            terminal_resize,
+            terminal_stop,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            tauri::async_runtime::block_on(shutdown_app(app));
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_capabilities, apply_session_history_action, attachment_resource_links,
-        extract_device_auth_code, inspect_attachment_paths, is_context_slash_command,
-        managed_workspace_name, normalize_session_title, parse_session_models,
-        reasoning_effort_value, remove_workspace_history, rename_session_title,
-        set_session_approval_mode, set_session_unread, title_from_prompt, upsert_session_history,
-        upsert_workspace_history, ApprovalMode, PersistedSession, PersistedWorkspace,
-        SessionHistoryAction, DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
+        account_profile_from_auth, agent_capabilities, apply_session_history_action,
+        attachment_resource_links, extract_device_auth_code, inspect_attachment_paths,
+        is_context_slash_command, managed_workspace_name, normalize_session_title,
+        parse_initialize_models, parse_session_models, reasoning_effort_value,
+        remove_workspace_history, rename_session_title, set_session_approval_mode,
+        set_session_unread, title_from_prompt, upsert_session_history, upsert_workspace_history,
+        ApprovalMode, PersistedSession, PersistedWorkspace, SessionHistoryAction,
+        DEFAULT_SESSION_TITLE, MAX_SESSION_TITLE_CHARS,
     };
     use super::{record_model_selection, resolve_initial_model_selection};
     use chrono::{Local, TimeZone};
@@ -2313,6 +2502,36 @@ mod tests {
         assert!(
             extract_device_auth_code("https://accounts.x.ai/oauth2/device?user_code=TOO-LONG")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn extracts_only_safe_fields_from_the_latest_grok_account() {
+        let profile = account_profile_from_auth(&json!({
+            "https://auth.x.ai::older": {
+                "create_time": 100,
+                "first_name": "Old",
+                "email": "old@example.com"
+            },
+            "https://auth.x.ai::current": {
+                "create_time": 200,
+                "first_name": " Grace ",
+                "last_name": " Hopper ",
+                "email": "grace@example.com",
+                "key": "must-not-cross-the-tauri-boundary",
+                "refresh_token": "must-not-cross-the-tauri-boundary"
+            }
+        }))
+        .expect("the latest account should provide a profile");
+
+        assert_eq!(profile.display_name.as_deref(), Some("Grace Hopper"));
+        assert_eq!(profile.email.as_deref(), Some("grace@example.com"));
+        assert_eq!(
+            serde_json::to_value(profile).expect("profile should serialize"),
+            json!({
+                "displayName": "Grace Hopper",
+                "email": "grace@example.com"
+            })
         );
     }
 
@@ -2609,13 +2828,33 @@ mod tests {
 
     #[test]
     fn reads_session_loading_support_from_agent_capabilities() {
-        assert!(
-            agent_capabilities(&json!({
-                "agentCapabilities": { "loadSession": true }
-            }))
-            .load_session
-        );
-        assert!(!agent_capabilities(&json!({ "agentCapabilities": {} })).load_session);
+        let capabilities = agent_capabilities(&json!({
+            "agentCapabilities": { "loadSession": true }
+        }));
+        assert!(capabilities.load_session);
+
+        let capabilities = agent_capabilities(&json!({ "agentCapabilities": {} }));
+        assert!(!capabilities.load_session);
+    }
+
+    #[test]
+    fn parses_models_advertised_before_session_creation() {
+        let models = parse_initialize_models(&json!({
+            "_meta": {
+                "modelState": {
+                    "currentModelId": "grok-4.5",
+                    "availableModels": [{
+                        "modelId": "grok-4.5",
+                        "name": "Grok 4.5"
+                    }]
+                }
+            }
+        }))
+        .expect("valid initialization model state")
+        .expect("model selection should be present");
+
+        assert_eq!(models.current_model_id, "grok-4.5");
+        assert_eq!(models.available_models[0].name, "Grok 4.5");
     }
 
     #[test]

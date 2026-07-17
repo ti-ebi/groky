@@ -14,13 +14,17 @@
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test:timing": "node --test tests/timing.test.ts",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "check": "pnpm build && pnpm test:rust && pnpm check:rust"
+    "check": "pnpm build && pnpm test:timing && pnpm test:rust && pnpm check:rust"
   },
   "dependencies": {
     "@fontsource-variable/sora": "^5.2.8",
     "@tauri-apps/api": "^2.11.1",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "highlight.js": "^11.11.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",

@@ -20,6 +20,9 @@ use tokio::{
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const SHUTDOWN_CANCEL_GRACE: Duration = Duration::from_millis(100);
+#[cfg(windows)]
+const PROCESS_TREE_KILL_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_SESSION_ID_CHARS: usize = 256;
 const MAX_TOOL_CALL_ID_CHARS: usize = 256;
 const MAX_PERMISSION_OPTION_ID_CHARS: usize = 160;
@@ -324,13 +327,16 @@ impl AcpTransport {
         approval_mode: ApprovalMode,
         event_sink: Option<AppHandle>,
     ) -> Result<Self, String> {
-        let mut child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .args(approval_mode.agent_args())
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        configure_process_tree(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|_| "Failed to start Grok Build ACP.".to_string())?;
 
@@ -691,15 +697,72 @@ impl AcpTransport {
     }
 
     pub async fn shutdown(&self) {
-        self.shutdown_requested.store(true, Ordering::Release);
+        if self.shutdown_requested.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.alive.store(false, Ordering::Release);
-        let _ = self.child.lock().await.kill().await;
+        let active_session_ids = self
+            .turn_outputs
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let had_active_sessions = !active_session_ids.is_empty();
+        for session_id in active_session_ids {
+            let _ = write_message(&self.writer, &cancel_notification(&session_id)).await;
+        }
+        if had_active_sessions {
+            tokio::time::sleep(SHUTDOWN_CANCEL_GRACE).await;
+        }
+        let mut child = self.child.lock().await;
+        terminate_process_tree(&mut child).await;
     }
 
     pub async fn invalidate(&self) {
         self.alive.store(false, Ordering::Release);
-        let _ = self.child.lock().await.kill().await;
+        let mut child = self.child.lock().await;
+        terminate_process_tree(&mut child).await;
     }
+}
+
+fn configure_process_tree(command: &mut Command) {
+    #[cfg(unix)]
+    command.process_group(0);
+
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+async fn terminate_process_tree(child: &mut Child) {
+    let Some(process_id) = child.id() else {
+        return;
+    };
+
+    #[cfg(unix)]
+    if let Ok(process_group_id) = i32::try_from(process_id) {
+        // ACP is spawned as its own process-group leader, so a negative PID
+        // terminates the agent and commands it started in the same group.
+        let _ = unsafe { libc::kill(-process_group_id, libc::SIGKILL) };
+    }
+
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let process_id = process_id.to_string();
+        let mut taskkill = Command::new("taskkill");
+        taskkill
+            .args(["/PID", &process_id, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = timeout(PROCESS_TREE_KILL_TIMEOUT, taskkill.status()).await;
+    }
+
+    // Reap the ACP process and provide a direct-child fallback if tree
+    // termination is unavailable or races with process startup.
+    let _ = child.kill().await;
 }
 
 fn spawn_reader(
@@ -1632,6 +1695,54 @@ fn latest_available_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminating_acp_kills_commands_started_by_the_agent() {
+        let marker = std::env::temp_dir().join(format!(
+            "groky-acp-descendant-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after the epoch")
+                .as_nanos()
+        ));
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "(sleep 1; touch \"$GROKY_DESCENDANT_MARKER\") & echo ready; wait",
+            ])
+            .env("GROKY_DESCENDANT_MARKER", &marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        configure_process_tree(&mut command);
+        let mut child = command.spawn().expect("test process should start");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("test process should expose stdout");
+        let mut lines = BufReader::new(stdout).lines();
+
+        assert_eq!(
+            timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("test process should become ready")
+                .expect("test process output should be readable")
+                .as_deref(),
+            Some("ready")
+        );
+
+        terminate_process_tree(&mut child).await;
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        assert!(
+            !marker.exists(),
+            "a command started by the ACP process survived shutdown"
+        );
+    }
 
     #[test]
     fn grok_extension_methods_use_the_acp_wire_prefix() {
