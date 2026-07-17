@@ -1138,7 +1138,7 @@ body.is-resizing-side-panel .app-shell {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
-  padding: 34px 28px calc(var(--composer-height) + 56px);
+  padding: 26px 28px calc(var(--composer-height) + 48px);
   scrollbar-color: var(--line-strong) transparent;
   scrollbar-width: thin;
 }
@@ -1344,7 +1344,7 @@ body.is-resizing-side-panel .app-shell {
 .user-message {
   width: fit-content;
   max-width: 78%;
-  margin: 0 0 55px auto;
+  margin: 0 0 22px auto;
   padding: 10px 15px 11px;
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -4203,10 +4203,10 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .assistant-turn {
-  margin: 0 0 52px;
+  margin: 0 0 22px;
   color: var(--text);
   font-size: 14px;
-  line-height: 1.68;
+  line-height: 1.58;
 }
 
 .assistant-turn .response-copy {
@@ -4234,28 +4234,27 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .turn-trace .thought-heading {
-  min-height: 24px;
+  min-height: 22px;
 }
 
 .turn-trace .tool-group-disclosure > button,
 .turn-trace .tool-call-disclosure > button {
-  min-height: 25px;
+  min-height: 22px;
 }
 
 .turn-trace + .assistant-response {
-  margin-top: 14px;
+  margin-top: 4px;
 }
 
 .assistant-response + .turn-trace {
-  margin-top: 16px;
+  margin-top: 8px;
 }
 
 .assistant-response + .assistant-response {
-  margin-top: 16px;
+  margin-top: 6px;
 }
 
-.turn-trace + .assistant-response::before,
-.assistant-response + .turn-trace::before {
+.turn-trace + .assistant-response::before {
   display: block;
   width: 100%;
   height: 1px;
@@ -4269,18 +4268,14 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .turn-trace + .assistant-response::before {
-  margin-bottom: 20px;
-}
-
-.assistant-response + .turn-trace::before {
-  margin-bottom: 13px;
+  margin-bottom: 8px;
 }
 
 .assistant-message-actions {
   display: flex;
-  min-height: 28px;
+  min-height: 26px;
   align-items: center;
-  margin-top: 7px;
+  margin-top: 2px;
 }
 
 .response-copy > :first-child {
@@ -4292,7 +4287,7 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .response-copy p {
-  margin: 0 0 1em;
+  margin: 0 0 0.8em;
 }
 
 .response-copy h1,
@@ -4301,7 +4296,7 @@ body.is-resizing-side-panel .app-shell {
 .response-copy h4,
 .response-copy h5,
 .response-copy h6 {
-  margin: 1.55em 0 0.62em;
+  margin: 1.35em 0 0.52em;
   color: var(--text);
   font-family: var(--display);
   font-weight: 650;
@@ -4332,12 +4327,12 @@ body.is-resizing-side-panel .app-shell {
 
 .response-copy ul,
 .response-copy ol {
-  margin: 0 0 1em;
+  margin: 0 0 0.8em;
   padding-left: 1.55em;
 }
 
 .response-copy li + li {
-  margin-top: 0.28em;
+  margin-top: 0.2em;
 }
 
 .response-copy li::marker {
@@ -4345,7 +4340,7 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .response-copy li > p {
-  margin-bottom: 0.45em;
+  margin-bottom: 0.35em;
 }
 
 .response-copy .contains-task-list {
@@ -4368,7 +4363,7 @@ body.is-resizing-side-panel .app-shell {
 }
 
 .response-copy blockquote {
-  margin: 0 0 1em;
+  margin: 0 0 0.8em;
   padding: 0.15em 0 0.15em 1em;
   border-left: 2px solid var(--signal);
   color: var(--text-soft);
@@ -4402,8 +4397,8 @@ body.is-resizing-side-panel .app-shell {
 
 .response-copy pre {
   max-width: 100%;
-  margin: 0 0 1.2em;
-  padding: 13px 15px;
+  margin: 0 0 1em;
+  padding: 11px 14px;
   overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -4429,7 +4424,7 @@ body.is-resizing-side-panel .app-shell {
 .response-copy table {
   display: block;
   max-width: 100%;
-  margin: 0 0 1.2em;
+  margin: 0 0 1em;
   overflow-x: auto;
   border-spacing: 0;
   border-collapse: collapse;
@@ -4440,7 +4435,7 @@ body.is-resizing-side-panel .app-shell {
 
 .response-copy th,
 .response-copy td {
-  padding: 7px 10px;
+  padding: 6px 9px;
   border: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
@@ -4458,7 +4453,7 @@ body.is-resizing-side-panel .app-shell {
 
 .response-copy hr {
   height: 1px;
-  margin: 1.5em 0;
+  margin: 1.25em 0;
   border: 0;
   background: var(--line);
 }
@@ -4467,7 +4462,7 @@ body.is-resizing-side-panel .app-shell {
   display: block;
   max-width: 100%;
   height: auto;
-  margin: 0 0 1.2em;
+  margin: 0 0 1em;
   border: 1px solid var(--line);
   border-radius: 10px;
 }
@@ -4544,7 +4539,7 @@ body.is-resizing-side-panel .app-shell {
   transition: transform 150ms ease;
 }
 
-.progress-disclosure[data-open="true"] .progress-disclosure-label .icon {
+.progress-disclosure[data-open="true"] > button .progress-disclosure-label .icon {
   transform: rotate(0);
 }
 
@@ -4574,7 +4569,7 @@ body.is-resizing-side-panel .app-shell {
   overflow: hidden;
 }
 
-.progress-disclosure[data-open="true"] .progress-disclosure-content {
+.progress-disclosure[data-open="true"] > .progress-disclosure-content {
   grid-template-rows: 1fr;
   opacity: 1;
 }
@@ -4615,6 +4610,56 @@ body.is-resizing-side-panel .app-shell {
   width: fit-content;
   max-width: 100%;
   grid-template-columns: auto minmax(0, auto) auto;
+}
+
+.trace-group-disclosure {
+  max-width: 680px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.trace-group-disclosure > button {
+  width: fit-content;
+  max-width: 100%;
+  min-height: 22px;
+  grid-template-columns: auto minmax(0, auto) auto;
+  gap: 7px;
+  padding: 0 5px;
+  border-radius: 5px;
+  color: var(--muted);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.trace-group-disclosure > button:hover {
+  background: color-mix(in srgb, var(--surface-hover) 52%, transparent);
+  color: var(--text-soft);
+}
+
+.trace-group-disclosure > button .progress-disclosure-label {
+  color: var(--faint);
+}
+
+.trace-group-disclosure > button .progress-disclosure-summary {
+  color: inherit;
+  font: 500 10.5px/1.35 var(--mono);
+}
+
+.trace-group-disclosure.has-interruption > button .progress-disclosure-summary,
+.trace-group-disclosure.has-interruption > button .trace-status {
+  color: color-mix(in srgb, var(--accent) 74%, var(--text));
+}
+
+.trace-group-disclosure > .progress-disclosure-content > div {
+  margin: 2px 0 4px 10px;
+  padding: 2px 0 6px 14px;
+  border-left: 1px solid var(--line);
+}
+
+.trace-group-items {
+  max-width: 100%;
 }
 
 .tool-group-disclosure > button:hover,
@@ -4994,7 +5039,7 @@ body.is-resizing-side-panel .app-shell {
 .permission-card {
   display: flex;
   gap: 13px;
-  margin: -20px 0 48px;
+  margin: -14px 0 22px;
   padding: 15px;
   border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line));
   border-radius: 14px;

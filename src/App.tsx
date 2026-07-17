@@ -5066,6 +5066,98 @@ function ToolBlock({ tool }: { tool: ToolActivity }) {
   );
 }
 
+function TraceItems({ items, messageState }: { items: TraceTimelineItem[]; messageState?: ConversationState }) {
+  return items.map((item) => {
+    if (item.kind === "thought") {
+      return (
+        <ThoughtBlock
+          key={item.id}
+          thought={item.text}
+          active={messageState === "streaming" && item.open}
+          elapsedMs={item.elapsedMs}
+        />
+      );
+    }
+    if (item.kind === "tool_group") {
+      return <ToolGroupBlock key={item.id} tools={item.tools} />;
+    }
+    if (item.kind === "tool") return <ToolBlock key={item.id} tool={item.tool} />;
+    if (!item.decision) return null;
+    return (
+      <div className={`permission-decision ${item.decision.outcome}`} key={item.id}>
+        <Icon name={item.decision.outcome === "allowed" ? "check" : "x"} size={13} />
+        <span>{item.decision.label}</span>
+        <small>{item.decision.title}</small>
+      </div>
+    );
+  });
+}
+
+function traceGroupDetails(items: TraceTimelineItem[]) {
+  let count = 0;
+  let running = 0;
+  let interrupted = 0;
+  items.forEach((item) => {
+    if (item.kind === "tool_group") {
+      count += item.tools.length;
+      item.tools.forEach((tool) => {
+        if (tool.status === "pending" || tool.status === "in_progress") running += 1;
+        if (tool.status === "failed" || tool.status === "cancelled") interrupted += 1;
+      });
+      return;
+    }
+    count += 1;
+    if (item.kind === "tool") {
+      if (item.tool.status === "pending" || item.tool.status === "in_progress") running += 1;
+      if (item.tool.status === "failed" || item.tool.status === "cancelled") interrupted += 1;
+    }
+    if (item.kind === "permission" && item.decision && item.decision.outcome !== "allowed") interrupted += 1;
+  });
+  return { count, running, interrupted };
+}
+
+function CollapsedTraceBlock({
+  items,
+  messageState,
+}: {
+  items: TraceTimelineItem[];
+  messageState?: ConversationState;
+}) {
+  const [open, setOpen] = useState(false);
+  const contentId = useId();
+  const { count, running, interrupted } = traceGroupDetails(items);
+  const summary = `${count} execution ${count === 1 ? "event" : "events"}${interrupted > 0 ? ` · ${interrupted} interrupted` : ""}`;
+  const status = interrupted > 0 ? "interrupted" : running > 0 ? "in progress" : "completed";
+
+  return (
+    <div
+      className={`progress-disclosure turn-trace trace-group-disclosure ${interrupted > 0 ? "has-interruption" : ""}`}
+      data-open={open}
+      role="group"
+      aria-label="Collapsed execution trace"
+    >
+      <button type="button" aria-expanded={open} aria-controls={contentId} onClick={() => setOpen((value) => !value)}>
+        <span className="progress-disclosure-label" aria-hidden="true"><Icon name="chevron-down" size={13} /></span>
+        <span className="progress-disclosure-summary">{summary}</span>
+        <span className="trace-status" aria-label={status} title={status}>
+          {interrupted > 0
+            ? <Icon name="x" size={12} />
+            : running > 0
+              ? <span className="trace-status-pulse" />
+              : <Icon name="check" size={12} />}
+        </span>
+      </button>
+      <div className="progress-disclosure-content" id={contentId} aria-hidden={!open}>
+        <div>
+          <div className="turn-trace trace-group-items">
+            <TraceItems items={items} messageState={messageState} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TurnStatusBlock({ message }: { message: ConversationMessage }) {
   if (!message.state || message.state === "streaming") return null;
   const duration = message.elapsedMs === undefined ? null : formatDuration(message.elapsedMs);
@@ -5126,7 +5218,7 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
 
   return (
     <article className={`assistant-turn ${message.state ?? "complete"}`}>
-      {timelineSections.map((section) => {
+      {timelineSections.map((section, sectionIndex) => {
         if (section.kind === "response") {
           const item = section.item;
           return (
@@ -5147,32 +5239,20 @@ function ConversationItem({ message }: { message: ConversationMessage }) {
           return item.kind !== "permission" || item.decision !== undefined;
         });
         if (items.length === 0) return null;
+        const isBetweenResponses = timelineSections[sectionIndex - 1]?.kind === "response"
+          && timelineSections[sectionIndex + 1]?.kind === "response";
+        if (isBetweenResponses) {
+          return (
+            <CollapsedTraceBlock
+              key={section.id}
+              items={items}
+              messageState={message.state}
+            />
+          );
+        }
         return (
           <div className="turn-trace" role="group" aria-label="Execution trace" key={section.id}>
-            {items.map((item) => {
-              if (item.kind === "thought") {
-                return (
-                  <ThoughtBlock
-                    key={item.id}
-                    thought={item.text}
-                    active={message.state === "streaming" && item.open}
-                    elapsedMs={item.elapsedMs}
-                  />
-                );
-              }
-              if (item.kind === "tool_group") {
-                return <ToolGroupBlock key={item.id} tools={item.tools} />;
-              }
-              if (item.kind === "tool") return <ToolBlock key={item.id} tool={item.tool} />;
-              if (!item.decision) return null;
-              return (
-                <div className={`permission-decision ${item.decision.outcome}`} key={item.id}>
-                  <Icon name={item.decision.outcome === "allowed" ? "check" : "x"} size={13} />
-                  <span>{item.decision.label}</span>
-                  <small>{item.decision.title}</small>
-                </div>
-              );
-            })}
+            <TraceItems items={items} messageState={message.state} />
           </div>
         );
       })}
