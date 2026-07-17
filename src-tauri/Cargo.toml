@@ -1,6 +1,6 @@
 [package]
 name = "groky"
-version = "0.1.1"
+version = "0.1.2"
 description = "An open-source desktop client for Grok Build"
 authors = ["Taiga Ebihara"]
 edition = "2021"
