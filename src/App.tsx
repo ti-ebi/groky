@@ -38,6 +38,7 @@ type IconName =
   | "folder"
   | "folder-x"
   | "folder-open"
+  | "gauge"
   | "logout"
   | "panel"
   | "paperclip"
@@ -615,6 +616,7 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     folder: <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
     "folder-x": <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m10 11 4 4m0-4-4 4" /></>,
     "folder-open": <><path d="M3 9V7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1" /><path d="m3 10 2 9h14l2-9Z" /></>,
+    gauge: <><path d="M5.6 18a8 8 0 1 1 12.8 0" /><path d="m12 14 4-4" /><path d="M8 18h8" /></>,
     logout: <><path d="M10 5H5v14h5" /><path d="M14 8l4 4-4 4M8 12h10" /></>,
     panel: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M15 4v16" /></>,
     paperclip: <path d="m20.5 11.5-8.9 8.9a5 5 0 0 1-7.1-7.1l9.6-9.6a3.5 3.5 0 1 1 5 5l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9" />,
@@ -3364,6 +3366,15 @@ function App() {
     }
   }
 
+  async function openUsageDetails() {
+    setShowConnection(false);
+    try {
+      await invoke("open_grok_usage");
+    } catch (error) {
+      setConnectionNotice(String(error));
+    }
+  }
+
   async function checkForAppUpdate(manual: boolean) {
     if (updatePhase === "downloading" || updateCheckInFlight.current) return;
     updateCheckInFlight.current = true;
@@ -4436,6 +4447,15 @@ function App() {
               <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
               <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
             </dl>
+            <button
+              className="popover-settings-link popover-usage-link"
+              type="button"
+              onClick={() => void openUsageDetails()}
+            >
+              <Icon name="gauge" size={14} />
+              <span>Usage &amp; limits</span>
+              <span className="popover-settings-arrow"><Icon name="external-link" size={12} /></span>
+            </button>
             <button
               className="popover-settings-link"
               type="button"

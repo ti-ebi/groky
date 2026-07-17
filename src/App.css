@@ -3262,6 +3262,10 @@ body.is-resizing-side-panel .app-shell {
   color: var(--muted);
 }
 
+.popover-usage-link > .icon {
+  color: var(--signal);
+}
+
 .popover-settings-arrow {
   display: grid;
   place-items: center;

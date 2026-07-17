@@ -41,6 +41,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const AUTH_REQUIRED_ERROR: &str = "GROK_AUTH_REQUIRED";
 const DEVICE_AUTH_URL_PREFIX: &str = "https://accounts.x.ai/oauth2/device?user_code=";
 const INSTALL_GUIDE_URL: &str = "https://docs.x.ai/build/overview";
+const USAGE_URL: &str = "https://grok.com/?_s=usage";
 const SESSION_HISTORY_FILE: &str = "sessions.json";
 const WORKSPACE_HISTORY_FILE: &str = "working-directories.json";
 const DEFAULT_SESSION_TITLE: &str = "New Grok session";
@@ -760,6 +761,11 @@ fn attachment_resource_links(
 #[tauri::command]
 async fn open_grok_install_guide() -> Result<(), String> {
     open_url(INSTALL_GUIDE_URL)
+}
+
+#[tauri::command]
+async fn open_grok_usage() -> Result<(), String> {
+    open_url(USAGE_URL).map_err(|_| "Failed to open Grok usage.".to_string())
 }
 
 #[tauri::command]
@@ -2411,6 +2417,7 @@ pub fn run() {
             choose_attachments,
             inspect_attachments,
             open_grok_install_guide,
+            open_grok_usage,
             grok_list_sessions,
             grok_rename_session,
             grok_list_workspaces,
