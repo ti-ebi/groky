@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { workspaceName } from "./shared/path";
 
 type WorkspaceFileKind = "directory" | "file" | "symlink";
 type DirectoryStatus = "loading" | "ready" | "error";
@@ -136,12 +137,6 @@ function ExplorerIcon({ name, size = 15 }: { name: ExplorerIconName; size?: numb
       {name === "settings" && <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>}
     </svg>
   );
-}
-
-function workspaceName(path: string | null) {
-  if (!path) return "Workspace";
-  const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? path;
 }
 
 function fileVisualKind(entry: WorkspaceFileEntry) {
@@ -1118,7 +1113,7 @@ export function FileExplorer({
       <header className="file-explorer-header">
         <div className="file-explorer-heading" title={workingDirectory ?? undefined}>
           <span>WORKSPACE</span>
-          <strong>{workspaceName(workingDirectory)}</strong>
+          <strong>{workspaceName(workingDirectory, "Workspace")}</strong>
         </div>
         <div className="file-explorer-actions">
           <button
@@ -1165,7 +1160,11 @@ export function FileExplorer({
           </div>
         )}
         {rootState?.status === "ready" && rows.length > 0 && (
-          <div className="file-tree" role="tree" aria-label={`${workspaceName(workingDirectory)} files`}>
+          <div
+            className="file-tree"
+            role="tree"
+            aria-label={`${workspaceName(workingDirectory, "Workspace")} files`}
+          >
             {rows.map((row, index) => {
               const { entry, depth } = row;
               const selected = selectedPath === entry.path;

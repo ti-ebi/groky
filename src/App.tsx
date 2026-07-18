@@ -21,6 +21,16 @@ import { GlobalSearchDialog } from "./GlobalSearchDialog";
 import { TerminalPanel } from "./TerminalPanel";
 import { ConversationItem, PermissionCard, PlanBlock } from "./session/Conversation";
 import {
+  APPROVAL_MODES,
+  approvalModeOption,
+  enablesAlwaysApprove,
+} from "./session/approval";
+import {
+  currentModel,
+  selectModelInState,
+  selectReasoningInState,
+} from "./session/models";
+import {
   addFallbackThought,
   applySessionUpdateToMessage,
   finishRun,
@@ -36,7 +46,6 @@ import type {
   Connection,
   ConversationMessage,
   FileAttachment,
-  PermissionOption,
   PermissionRequest,
   ReasoningEffortInfo,
   SessionConfigOption,
@@ -58,7 +67,10 @@ import type {
   SessionHistoryAction,
 } from "./host/types";
 import { copyToClipboard } from "./shared/clipboard";
-import { formatFileSize, formatTokenCount } from "./shared/format";
+import { cleanVersion, formatFileSize, formatTokenCount } from "./shared/format";
+import { workspaceName } from "./shared/path";
+import { isDesktopHost, isMacOS, usesOverlayTitlebar } from "./shared/platform";
+import { Brand } from "./ui/Brand";
 import { DurationText } from "./ui/DurationText";
 import { Icon } from "./ui/Icon";
 
@@ -123,82 +135,6 @@ type AppView = "session" | "settings";
 type SettingsSection = "application" | "grok" | "account" | "archived";
 type ArchivedSessionSort = "updated-desc" | "updated-asc" | "title-asc" | "workspace-asc";
 
-interface ApprovalModeOption {
-  id: ApprovalMode;
-  label: string;
-  shortDescription: string;
-  description: string;
-  glyph: string;
-  tag?: string;
-}
-
-const APPROVAL_MODES: ApprovalModeOption[] = [
-  {
-    id: "ask",
-    label: "Ask",
-    shortDescription: "Review actions",
-    description: "Ask before actions that are not already allowed.",
-    glyph: "?",
-    tag: "Recommended",
-  },
-  {
-    id: "alwaysApprove",
-    label: "Always approve",
-    shortDescription: "Approval prompts skipped",
-    description: "Skip prompts unless a policy rule still requires approval.",
-    glyph: "!",
-  },
-];
-
-const approvalModeOption = (mode: ApprovalMode) =>
-  APPROVAL_MODES.find((option) => option.id === mode) ?? APPROVAL_MODES[0];
-
-function currentModel(models: SessionModelState | null) {
-  if (!models) return null;
-  return models.availableModels.find((model) => model.modelId === models.currentModelId) ?? null;
-}
-
-function selectModelInState(models: SessionModelState, modelId: string): SessionModelState {
-  return {
-    ...models,
-    currentModelId: modelId,
-  };
-}
-
-function selectReasoningInState(
-  models: SessionModelState,
-  reasoningEffort: string,
-): SessionModelState {
-  return {
-    ...models,
-    availableModels: models.availableModels.map((model) =>
-      model.modelId === models.currentModelId && model.metadata
-        ? {
-            ...model,
-            metadata: {
-              ...model.metadata,
-              reasoningEffort,
-            },
-          }
-        : model
-    ),
-  };
-}
-
-function enablesAlwaysApprove(option: PermissionOption | undefined) {
-  if (!option || option.kind !== "allow_always") return false;
-
-  const id = option.optionId.toLowerCase().replace(/_/g, "-");
-  const name = option.name.toLowerCase();
-  return id.includes("always-approve")
-    || name.includes("always approve")
-    || name.includes("all sessions")
-    || name.includes("all tool");
-}
-
-const isTauri = () => "__TAURI_INTERNALS__" in window;
-const isMacOS = () => /Macintosh|Mac OS X|MacIntel/.test(`${navigator.userAgent} ${navigator.platform}`);
-const usesOverlayTitlebar = () => isTauri() && isMacOS();
 const AUTH_REQUIRED_ERROR = "GROK_AUTH_REQUIRED";
 const SIDEBAR_WIDTH_KEY = "groky.sidebar.width";
 const SIDEBAR_COLLAPSED_KEY = "groky.sidebar.collapsed";
@@ -261,21 +197,6 @@ function storedSidePanelOpen() {
   } catch {
     return false;
   }
-}
-
-function Brand() {
-  return (
-    <div className="brand-identity">
-      <span className="groky-mark" aria-hidden="true"><span /><span /></span>
-      <strong>Groky</strong>
-    </div>
-  );
-}
-
-function workspaceName(path: string | null) {
-  if (!path) return "No working directory";
-  const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? path;
 }
 
 function sidebarSessionPriority(session: SidebarSessionSummary) {
@@ -590,10 +511,6 @@ function SessionLocationSelector({
       )}
     </div>
   );
-}
-
-function cleanVersion(version: string | null) {
-  return version?.replace(/^grok\s+/, "") ?? "not detected";
 }
 
 function accountAvatarLabel(profile: AccountProfile | null) {
@@ -1907,7 +1824,7 @@ function App() {
     }
     setSessionViews(sessionViewsRef.current);
     setActiveSessionId(sessionId);
-    if (isTauri()) {
+    if (isDesktopHost()) {
       void host.grok.sessions.activate(sessionId).catch(() => undefined);
     }
   }
@@ -2041,7 +1958,7 @@ function App() {
   }
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isDesktopHost()) return;
 
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -2374,7 +2291,7 @@ function App() {
   }
 
   async function refreshSessionHistory() {
-    if (!isTauri()) return;
+    if (!isDesktopHost()) return;
     try {
       const [sessions, workspaces] = await Promise.all([
         host.grok.sessions.list(),
@@ -2389,7 +2306,7 @@ function App() {
 
   async function refreshStatus() {
     setSetupError(null);
-    if (!isTauri()) {
+    if (!isDesktopHost()) {
       setStage("webOnly");
       return;
     }
@@ -2415,7 +2332,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isDesktopHost()) return;
     let disposed = false;
     let unlisten: (() => void) | null = null;
 
@@ -2465,7 +2382,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isDesktopHost()) return;
     let disposed = false;
     const unlisteners: Array<() => void> = [];
 
@@ -3404,7 +3321,7 @@ function App() {
   }
 
   async function loadCommandCatalogForComposer() {
-    if (!isTauri() || activeSessionIdRef.current) return;
+    if (!isDesktopHost() || activeSessionIdRef.current) return;
     const key = workspace ?? "__standalone__";
     const hasCachedCatalog = commandCatalogs[key] !== undefined
       || Object.values(sessionViewsRef.current).some((session) => session.connection.workspace === workspace);

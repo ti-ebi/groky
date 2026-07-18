@@ -15,6 +15,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import "./TerminalPanel.css";
 import { FileExplorer, type WorkspaceFileAttachment } from "./FileExplorer";
+import { isDesktopHost } from "./shared/platform";
 
 interface TerminalInfo {
   terminalId: string;
@@ -82,10 +83,6 @@ const DARK_TERMINAL_THEME = {
   brightCyan: "#9ae9ec",
   brightWhite: "#f4f8f6",
 };
-
-function isTauri() {
-  return "__TAURI_INTERNALS__" in window;
-}
 
 function compactPath(path: string | null) {
   if (!path) return "Terminal";
@@ -248,7 +245,7 @@ function TerminalSurface({
     const start = async () => {
       if (startRequested) return;
       startRequested = true;
-      if (!isTauri()) {
+      if (!isDesktopHost()) {
         onStatusChange("error", "The terminal is available in the Groky desktop app.");
         return;
       }

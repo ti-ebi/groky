@@ -19,3 +19,7 @@ export function formatTokenCount(value: number) {
     notation: value >= 10_000 ? "compact" : "standard",
   }).format(value);
 }
+
+export function cleanVersion(version: string | null) {
+  return version?.replace(/^grok\s+/, "") ?? "not detected";
+}
