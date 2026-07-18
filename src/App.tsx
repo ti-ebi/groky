@@ -15,8 +15,6 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@fontsource-variable/sora/index.css";
 import "./App.css";
@@ -46,11 +44,9 @@ import type {
   ConversationMessage,
   ConversationState,
   FileAttachment,
-  LoadSessionResult,
   PermissionOption,
   PermissionRequest,
   PlanEntry,
-  PromptResult,
   ReasoningEffortInfo,
   SessionConfigOption,
   SessionModelState,
@@ -61,6 +57,17 @@ import type {
   ToolActivity,
   TurnTimelineItem,
 } from "./session/types";
+import { host } from "./host";
+import type {
+  AccountProfile,
+  AppUpdateInfo,
+  AppUpdateProgress,
+  OnboardingStage,
+  OnboardingStatus,
+  PersistedSessionSummary,
+  PersistedWorkspaceSummary,
+  SessionHistoryAction,
+} from "./host/types";
 
 const INITIAL_UPDATE_CHECK_DELAY_MS = 1_200;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1_000;
@@ -94,29 +101,6 @@ type IconName =
   | "trash"
   | "x";
 
-type OnboardingStage =
-  | "checking"
-  | "missingCli"
-  | "needsAuth"
-  | "ready"
-  | "connecting"
-  | "connected"
-  | "error"
-  | "webOnly";
-
-interface OnboardingStatus {
-  stage: Exclude<OnboardingStage, "checking" | "connecting" | "webOnly">;
-  cliVersion: string | null;
-  suggestedWorkspace: string | null;
-  message: string | null;
-  accountProfile: AccountProfile | null;
-}
-
-interface AccountProfile {
-  displayName: string | null;
-  email: string | null;
-}
-
 const demoAccountProfile: AccountProfile | null = import.meta.env.DEV
   && import.meta.env.VITE_DEMO_PROFILE === "1"
   ? { displayName: "Alex Morgan", email: "alex@example.com" }
@@ -134,16 +118,6 @@ function commandTokenAtEnd(draft: string): CommandToken | null {
     query: match[2],
     start: (match.index ?? 0) + match[1].length,
   };
-}
-
-interface ConnectionEvent {
-  status: "connected" | "disconnected";
-  message?: string | null;
-  sessionIds?: string[];
-}
-
-interface DeviceAuthCodeEvent {
-  code: string;
 }
 
 interface ConversationTurnPreview {
@@ -168,19 +142,6 @@ interface SidebarWorkspaceGroup {
   sessions: SidebarSessionSummary[];
 }
 
-interface PersistedSessionSummary {
-  sessionId: string;
-  title: string;
-  workspace: string | null;
-  updatedAt: number;
-  archived: boolean;
-  unread: boolean;
-}
-
-interface PersistedWorkspaceSummary {
-  path: string;
-}
-
 type SidebarMenu =
   | { kind: "workspace"; path: string }
   | { kind: "session"; sessionId: string }
@@ -191,15 +152,6 @@ interface DeleteConfirmation {
   workspace?: string;
   title: string;
   description: string;
-}
-
-type SessionHistoryAction = "archive" | "restore" | "delete";
-
-interface AppUpdateInfo {
-  currentVersion: string;
-  version: string;
-  body: string | null;
-  date: string | null;
 }
 
 function formatDuration(elapsedMs: number) {
@@ -269,12 +221,6 @@ function DurationText({
       {prefix}{duration}
     </span>
   );
-}
-
-interface AppUpdateProgress {
-  stage: "downloading" | "downloaded" | "installing";
-  downloaded: number;
-  total: number | null;
 }
 
 type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "error";
@@ -2201,7 +2147,7 @@ function App() {
     setSessionViews(sessionViewsRef.current);
     setActiveSessionId(sessionId);
     if (isTauri()) {
-      void invoke("grok_activate_session", { sessionId }).catch(() => undefined);
+      void host.grok.sessions.activate(sessionId).catch(() => undefined);
     }
   }
 
@@ -2290,9 +2236,10 @@ function App() {
     const targetSessionId = activeSessionIdRef.current;
     setAttachmentBusy(true);
     try {
-      const inspected = await invoke<FileAttachment[]>("inspect_attachments", {
-        paths: [...attachments.map((attachment) => attachment.path), ...paths],
-      });
+      const inspected = await host.attachments.inspect([
+        ...attachments.map((attachment) => attachment.path),
+        ...paths,
+      ]);
       if (targetSessionId) {
         updateSessionView(targetSessionId, (session) => ({ ...session, attachments: inspected }));
       } else {
@@ -2321,7 +2268,7 @@ function App() {
     if (attachmentDisabled || attachmentBusy) return;
     setAttachmentBusy(true);
     try {
-      const selected = await invoke<FileAttachment[]>("choose_attachments");
+      const selected = await host.attachments.choose();
       if (selected.length > 0) {
         await addAttachmentPaths(selected.map((attachment) => attachment.path));
       }
@@ -2374,7 +2321,7 @@ function App() {
     let disposed = false;
     let animationFrame = 0;
     const updateTitlebarHeight = () => {
-      void invoke<number | null>("configure_native_titlebar")
+      void host.configureNativeTitlebar()
         .then((height) => {
           if (!disposed && height !== null && height > 0 && height <= 96) {
             setNativeTitlebarHeight(height);
@@ -2669,8 +2616,8 @@ function App() {
     if (!isTauri()) return;
     try {
       const [sessions, workspaces] = await Promise.all([
-        invoke<PersistedSessionSummary[]>("grok_list_sessions"),
-        invoke<PersistedWorkspaceSummary[]>("grok_list_workspaces"),
+        host.grok.sessions.list(),
+        host.grok.workspaces.list(),
       ]);
       setSessionHistory(sessions);
       setWorkspaceHistory(workspaces);
@@ -2688,7 +2635,7 @@ function App() {
 
     setStage("checking");
     try {
-      const next = await invoke<OnboardingStatus>("grok_status");
+      const next = await host.grok.status();
       setStatus(next);
       if (next.stage === "connected") {
         setStage("ready");
@@ -2719,7 +2666,7 @@ function App() {
       if (disposed || updateCheckInFlight.current || updateInstallationInFlight.current) return;
       updateCheckInFlight.current = true;
       setUpdatePhase("checking");
-      void invoke<AppUpdateInfo | null>("check_app_update")
+      void host.updates.check()
         .then((next) => {
           if (disposed) return;
           setAppUpdate(next);
@@ -2740,7 +2687,7 @@ function App() {
       AUTOMATIC_UPDATE_CHECK_INTERVAL_MS,
     );
 
-    void listen<AppUpdateProgress>("groky://update-progress", ({ payload }) => {
+    void host.updates.onProgress((payload) => {
       setUpdateProgress(payload);
       setUpdatePhase("downloading");
     }).then((stopListening) => {
@@ -2762,7 +2709,7 @@ function App() {
     const unlisteners: Array<() => void> = [];
 
     void Promise.all([
-      listen<SessionUpdate>("grok://session-update", ({ payload }) => {
+      host.grok.events.onSessionUpdate((payload) => {
         if (payload.kind === "available_commands_update") {
           updateSessionView(payload.sessionId, (session) => ({
             ...session,
@@ -2808,7 +2755,7 @@ function App() {
           return applySessionUpdateToMessage(message, payload, Date.now());
         }));
       }),
-      listen<PermissionRequest>("grok://permission-request", ({ payload }) => {
+      host.grok.events.onPermissionRequest((payload) => {
         const messageId = activeAssistantIds.current.get(payload.sessionId);
         if (messageId) {
           const requestedAt = Date.now();
@@ -2830,7 +2777,7 @@ function App() {
           setConnectionNotice("A background session is waiting for approval.");
         }
       }),
-      listen<ConnectionEvent>("grok://connection", ({ payload }) => {
+      host.grok.events.onConnection((payload) => {
         if (payload.status !== "disconnected") return;
         const affectedSessionIds = payload.sessionIds ?? [];
         const endedAt = Date.now();
@@ -2859,7 +2806,7 @@ function App() {
           setConnectionNotice(payload.message ?? "Grok Build disconnected.");
         }
       }),
-      listen<DeviceAuthCodeEvent>("grok://device-auth-code", ({ payload }) => {
+      host.grok.events.onDeviceAuthCode((payload) => {
         setDeviceAuthCode(payload.code);
       }),
     ]).then((items) => {
@@ -2999,7 +2946,7 @@ function App() {
 
   async function openInstallGuide() {
     try {
-      await invoke("open_grok_install_guide");
+      await host.grok.openInstallGuide();
     } catch (error) {
       setSetupError(String(error));
     }
@@ -3008,7 +2955,7 @@ function App() {
   async function openUsageDetails() {
     setShowConnection(false);
     try {
-      await invoke("open_grok_usage");
+      await host.grok.openUsage();
     } catch (error) {
       setConnectionNotice(String(error));
     }
@@ -3022,7 +2969,7 @@ function App() {
     if (manual) setUpdateCheckNotice("Checking for updates…");
 
     try {
-      const next = await invoke<AppUpdateInfo | null>("check_app_update");
+      const next = await host.updates.check();
       setAppUpdate(next);
       setUpdateProgress(null);
       setUpdatePhase(next ? "available" : "idle");
@@ -3053,7 +3000,7 @@ function App() {
     setUpdatePhase("downloading");
 
     try {
-      await invoke("install_app_update");
+      await host.updates.install();
     } catch (error) {
       const message = String(error);
       setUpdateError(message);
@@ -3068,7 +3015,7 @@ function App() {
     setDeviceAuthCode(null);
     setBusyLabel("Waiting for approval…");
     try {
-      await invoke("grok_login");
+      await host.grok.login();
       setBusyLabel("Checking session…");
       await refreshStatus();
     } catch (error) {
@@ -3083,7 +3030,7 @@ function App() {
     setSetupError(null);
     setConnectionNotice(null);
     try {
-      return await invoke<string | null>("choose_workspace");
+      return await host.grok.workspaces.choose();
     } catch (error) {
       setSetupError(String(error));
       return null;
@@ -3097,7 +3044,7 @@ function App() {
     setStage("connecting");
     try {
       const requestedModel = currentModel(pendingModels);
-      const next = await invoke<Connection>("grok_connect", {
+      const next = await host.grok.connect({
         workspace,
         approvalMode,
         modelId: pendingModels?.currentModelId,
@@ -3149,9 +3096,7 @@ function App() {
     }
 
     try {
-      const loaded = await invoke<LoadSessionResult>("grok_load_session", {
-        sessionId: session.sessionId,
-      });
+      const loaded = await host.grok.sessions.load(session.sessionId);
       const alreadyCached = Boolean(sessionViewsRef.current[session.sessionId]);
       const replay = alreadyCached
         ? undefined
@@ -3174,9 +3119,7 @@ function App() {
         setWorkspace(loaded.connection.workspace);
         setApprovalMode(loaded.connection.approvalMode);
       }
-      void invoke("grok_activate_session", {
-        sessionId: activeSessionIdRef.current,
-      }).catch(() => undefined);
+      void host.grok.sessions.activate(activeSessionIdRef.current).catch(() => undefined);
       setStatus((current) => current ? {
         ...current,
         stage: "connected",
@@ -3195,9 +3138,7 @@ function App() {
         setSetupError(authRequired ? null : message);
         setStage(authRequired ? "needsAuth" : previousSessionId ? "connected" : "ready");
       } else {
-        void invoke("grok_activate_session", {
-          sessionId: activeSessionIdRef.current,
-        }).catch(() => undefined);
+        void host.grok.sessions.activate(activeSessionIdRef.current).catch(() => undefined);
       }
     } finally {
       setLoadingSessionIds((current) => {
@@ -3214,9 +3155,7 @@ function App() {
     if (!selected) return null;
 
     try {
-      const added = await invoke<PersistedWorkspaceSummary>("grok_add_workspace", {
-        workspace: selected,
-      });
+      const added = await host.grok.workspaces.add(selected);
       setWorkspaceHistory((current) => current.some((entry) => entry.path === added.path)
         ? current
         : [...current, added]);
@@ -3241,11 +3180,9 @@ function App() {
     setConnectionNotice(null);
 
     try {
-      const workspaces = await invoke<PersistedWorkspaceSummary[]>("grok_remove_workspace", {
-        workspace: path,
-      });
+      const workspaces = await host.grok.workspaces.remove(path);
       if (disconnectsActiveSession) {
-        await invoke("grok_deactivate_session", { sessionId: connection?.sessionId }).catch(() => undefined);
+        await host.grok.sessions.deactivate(connection.sessionId).catch(() => undefined);
         activateSession(null);
         setPendingDraft("");
         setPendingAttachments([]);
@@ -3287,7 +3224,7 @@ function App() {
     setHistoryMutating(true);
     setConnectionNotice(null);
     try {
-      const sessions = await invoke<PersistedSessionSummary[]>("grok_mutate_sessions", {
+      const sessions = await host.grok.sessions.mutate({
         action,
         sessionId: target.sessionId,
         workspace: target.workspace,
@@ -3343,10 +3280,7 @@ function App() {
     setRenamingSessionId(sessionId);
     setConnectionNotice(null);
     try {
-      const renamed = await invoke<PersistedSessionSummary>("grok_rename_session", {
-        sessionId,
-        title: normalizedTitle,
-      });
+      const renamed = await host.grok.sessions.rename(sessionId, normalizedTitle);
       setSessionHistory((current) => current.map((candidate) =>
         candidate.sessionId === renamed.sessionId ? renamed : candidate
       ));
@@ -3404,12 +3338,11 @@ function App() {
     const nextMode: ApprovalMode = "ask";
     setSidebarMenu(null);
     setActiveView("session");
-    const previousSessionId = connection?.sessionId;
     activateSession(null);
     setPendingDraft("");
     setPendingAttachments([]);
     if (connection) {
-      void invoke("grok_deactivate_session", { sessionId: previousSessionId }).catch(() => undefined);
+      void host.grok.sessions.deactivate(connection.sessionId).catch(() => undefined);
     }
     if (targetWorkspace) {
       setCollapsedWorkspaces((current) => {
@@ -3452,10 +3385,7 @@ function App() {
     }));
     if (activeSessionIdRef.current === sessionId) setApprovalMode(nextMode);
     try {
-      const switched = await invoke<Connection>("grok_set_approval_mode", {
-        sessionId,
-        approvalMode: nextMode,
-      });
+      const switched = await host.grok.sessions.setApprovalMode(sessionId, nextMode);
       upsertSessionView(switched);
       if (activeSessionIdRef.current === sessionId) {
         setWorkspace(switched.workspace);
@@ -3489,7 +3419,7 @@ function App() {
     connectionTransitioning.current = true;
     setLoadingSessionIds((current) => new Set(current).add(sessionId));
     try {
-      const loaded = await invoke<LoadSessionResult>("grok_load_session", { sessionId });
+      const loaded = await host.grok.sessions.load(sessionId);
       upsertSessionView(loaded.connection);
       setWorkspace(loaded.connection.workspace);
       setApprovalMode(loaded.connection.approvalMode);
@@ -3517,7 +3447,7 @@ function App() {
     if (pendingModels) return true;
     setConnectionNotice(null);
     try {
-      const models = await invoke<SessionModelState | null>("grok_list_models", {
+      const models = await host.grok.listModels({
         workspace,
         approvalMode,
       });
@@ -3542,7 +3472,7 @@ function App() {
     }
     setConnectionNotice(null);
     try {
-      const models = await invoke<SessionModelState>("grok_set_model", { sessionId, modelId });
+      const models = await host.grok.sessions.setModel(sessionId, modelId);
       updateSessionView(sessionId, (session) => ({
         ...session,
         connection: { ...session.connection, models },
@@ -3565,7 +3495,7 @@ function App() {
     }
     setConnectionNotice(null);
     try {
-      const models = await invoke<SessionModelState>("grok_set_reasoning_effort", { sessionId, reasoningEffort });
+      const models = await host.grok.sessions.setReasoningEffort(sessionId, reasoningEffort);
       updateSessionView(sessionId, (session) => ({
         ...session,
         connection: { ...session.connection, models },
@@ -3638,7 +3568,7 @@ function App() {
     }));
 
     try {
-      const result = await invoke<PromptResult>("grok_prompt", {
+      const result = await host.grok.prompt({
         sessionId,
         prompt,
         attachmentPaths: sentAttachments.map((attachment) => attachment.path),
@@ -3722,7 +3652,7 @@ function App() {
 
     commandCatalogRequests.current.add(requestKey);
     try {
-      const commands = await invoke<AvailableCommand[]>("grok_list_commands", {
+      const commands = await host.grok.listCommands({
         workspace,
         approvalMode,
       });
@@ -3758,7 +3688,7 @@ function App() {
     const sessionId = connection?.sessionId;
     if (!sessionId) return;
     try {
-      await invoke("grok_cancel", { sessionId });
+      await host.grok.sessions.cancel(sessionId);
       const messageId = activeAssistantIds.current.get(sessionId);
       const endedAt = Date.now();
       setSessionMessages(sessionId, (current) => current.map((message) =>
@@ -3781,11 +3711,11 @@ function App() {
     const selectedOption = current.options.find((option) => option.optionId === optionId);
     setRespondingPermissionId(current.requestId);
     try {
-      await invoke("grok_respond_permission", {
-        sessionId: current.sessionId,
-        requestId: current.requestId,
+      await host.grok.sessions.respondToPermission(
+        current.sessionId,
+        current.requestId,
         optionId,
-      });
+      );
       resolveSessionPermission(current.sessionId, current.requestId);
       if (enablesAlwaysApprove(selectedOption)) {
         setApprovalMode("alwaysApprove");
@@ -3809,7 +3739,7 @@ function App() {
     setApprovalMode("ask");
     setStage("checking");
     try {
-      await invoke("grok_logout");
+      await host.grok.logout();
       await refreshStatus();
     } catch (error) {
       setSetupError(String(error));
