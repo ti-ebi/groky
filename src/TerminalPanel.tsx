@@ -8,97 +8,20 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
-import "@xterm/xterm/css/xterm.css";
 import "./TerminalPanel.css";
-import { FileExplorer, type WorkspaceFileAttachment } from "./FileExplorer";
-
-interface TerminalInfo {
-  terminalId: string;
-  workingDirectory: string;
-  shell: string;
-}
-
-interface TerminalOutputEvent {
-  terminalId: string;
-  data: number[];
-}
-
-interface TerminalExitEvent {
-  terminalId: string;
-  exitCode: number | null;
-  signal: string | null;
-}
-
-type TerminalStatus = "starting" | "running" | "exited" | "error";
-
-const LIGHT_TERMINAL_THEME = {
-  background: "#f7faf9",
-  foreground: "#25302c",
-  cursor: "#117568",
-  cursorAccent: "#f7faf9",
-  selectionBackground: "#9cd5c466",
-  black: "#17201d",
-  red: "#b94736",
-  green: "#117568",
-  yellow: "#8a6515",
-  blue: "#326d9f",
-  magenta: "#7a5597",
-  cyan: "#17747a",
-  white: "#e7eeeb",
-  brightBlack: "#71807a",
-  brightRed: "#d15d49",
-  brightGreen: "#0d8b78",
-  brightYellow: "#a77b1c",
-  brightBlue: "#3d82bd",
-  brightMagenta: "#966ab8",
-  brightCyan: "#208b91",
-  brightWhite: "#ffffff",
-};
-
-const DARK_TERMINAL_THEME = {
-  background: "#0b0f0e",
-  foreground: "#d9e3df",
-  cursor: "#8fe3c1",
-  cursorAccent: "#0b0f0e",
-  selectionBackground: "#24544799",
-  black: "#111614",
-  red: "#ff7e68",
-  green: "#8fe3c1",
-  yellow: "#e6c56f",
-  blue: "#83b8ff",
-  magenta: "#c9a0ff",
-  cyan: "#72d7dc",
-  white: "#d9e3df",
-  brightBlack: "#63706b",
-  brightRed: "#ff9b89",
-  brightGreen: "#b5f1d8",
-  brightYellow: "#f2d98f",
-  brightBlue: "#a7ceff",
-  brightMagenta: "#ddc2ff",
-  brightCyan: "#9ae9ec",
-  brightWhite: "#f4f8f6",
-};
-
-function isTauri() {
-  return "__TAURI_INTERNALS__" in window;
-}
-
-function compactPath(path: string | null) {
-  if (!path) return "Terminal";
-  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
-  if (!normalized) return "/";
-
-  const homeMatch = normalized.match(/^\/(?:Users|home)\/[^/]+/);
-  const displayPath = homeMatch ? `~${normalized.slice(homeMatch[0].length)}` : normalized;
-  const prefix = displayPath.startsWith("~/") ? "~/" : displayPath.startsWith("/") ? "/" : "";
-  const segments = displayPath.replace(/^~?\//, "").split("/").filter(Boolean);
-  if (segments.length <= 2) return displayPath;
-  return `${prefix}${segments.slice(0, -1).map((segment) => segment[0]).join("/")}/${segments[segments.length - 1]}`;
-}
+import type { ResolvedAppearance } from "./appearance";
+import { FileExplorer } from "./FileExplorer";
+import type { TerminalInfo, WorkspaceFileAttachment } from "./host/types";
+import {
+  removeUnavailableFileTabs,
+  type TerminalToolTabState as TerminalToolTab,
+  type ToolPanelAttachmentResult,
+  type ToolPanelState,
+  type ToolPanelStateUpdate,
+  type ToolPanelTabState as ToolTab,
+} from "./session/toolPanel";
+import { compactPath } from "./shared/path";
+import { TerminalSurface, type TerminalStatus } from "./terminal/TerminalSurface";
 
 function PanelIcon({ name, size = 15 }: { name: "files" | "plus" | "terminal" | "x"; size?: number }) {
   return (
@@ -120,226 +43,6 @@ function PanelIcon({ name, size = 15 }: { name: "files" | "plus" | "terminal" | 
     </svg>
   );
 }
-
-function TerminalSurface({
-  active,
-  panelOpen,
-  workingDirectory,
-  restartToken,
-  onInfoChange,
-  onStatusChange,
-}: {
-  active: boolean;
-  panelOpen: boolean;
-  workingDirectory: string | null;
-  restartToken: number;
-  onInfoChange: (info: TerminalInfo | null) => void;
-  onStatusChange: (status: TerminalStatus, message?: string) => void;
-}) {
-  const container = useRef<HTMLDivElement | null>(null);
-  const terminalInstance = useRef<Terminal | null>(null);
-  const panelOpenRef = useRef(panelOpen);
-  const requestFit = useRef<(() => void) | null>(null);
-  const [renderReady, setRenderReady] = useState(false);
-
-  useLayoutEffect(() => {
-    panelOpenRef.current = panelOpen;
-    if (!panelOpen) {
-      setRenderReady(false);
-      return;
-    }
-
-    const animationFrame = window.requestAnimationFrame(() => requestFit.current?.());
-    return () => window.cancelAnimationFrame(animationFrame);
-  }, [panelOpen]);
-
-  useEffect(() => {
-    if (!active || !panelOpen || !renderReady) return;
-    const animationFrame = window.requestAnimationFrame(() => terminalInstance.current?.focus());
-    return () => window.cancelAnimationFrame(animationFrame);
-  }, [active, panelOpen, renderReady]);
-
-  useEffect(() => {
-    const target = container.current;
-    if (!target) return;
-
-    let active = true;
-    let started = false;
-    let startRequested = false;
-    let exited = false;
-    let resizeFrame = 0;
-    let resizeTimer = 0;
-    const terminalId = `terminal-${crypto.randomUUID()}`;
-    const running = { current: false };
-    const unlisteners: UnlistenFn[] = [];
-    const encoder = new TextEncoder();
-    let writeQueue = Promise.resolve();
-    const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
-    const terminal = new Terminal({
-      allowProposedApi: false,
-      cursorBlink: true,
-      cursorStyle: "bar",
-      cursorWidth: 1,
-      drawBoldTextInBrightColors: false,
-      fontFamily: '"SFMono-Regular", "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 12,
-      fontWeight: 430,
-      fontWeightBold: 650,
-      letterSpacing: 0.15,
-      lineHeight: 1.22,
-      minimumContrastRatio: 4.5,
-      scrollback: 5000,
-      theme: colorScheme.matches ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME,
-    });
-    const updateTerminalTheme = (event: MediaQueryListEvent) => {
-      terminal.options.theme = event.matches ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME;
-    };
-    colorScheme.addEventListener("change", updateTerminalTheme);
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(target);
-    terminalInstance.current = terminal;
-
-    const fit = () => {
-      window.cancelAnimationFrame(resizeFrame);
-      resizeFrame = window.requestAnimationFrame(() => {
-        if (!active || target.clientWidth === 0 || target.clientHeight === 0) return;
-        try {
-          const dimensions = fitAddon.proposeDimensions();
-          if (!dimensions || dimensions.cols < 20 || dimensions.rows < 2) return;
-          if (dimensions.cols !== terminal.cols || dimensions.rows !== terminal.rows) {
-            terminal.resize(dimensions.cols, dimensions.rows);
-          }
-          if (panelOpenRef.current) {
-            setRenderReady(true);
-            if (!startRequested) void start();
-          }
-        } catch {
-          // xterm can be between layout and disposal while the pane is closing.
-        }
-      });
-    };
-    const scheduleFit = () => {
-      window.clearTimeout(resizeTimer);
-      // The panel animates its width. Fitting on every animation frame makes
-      // interactive shells redraw their prompt into scrollback repeatedly.
-      resizeTimer = window.setTimeout(fit, 90);
-    };
-    requestFit.current = scheduleFit;
-
-    const enqueueInput = (data: number[]) => {
-      if (!running.current || data.length === 0) return;
-      writeQueue = writeQueue
-        .then(() => invoke<void>("terminal_write", { terminalId, data }))
-        .catch(() => undefined);
-    };
-    const dataSubscription = terminal.onData((data) => enqueueInput(Array.from(encoder.encode(data))));
-    const binarySubscription = terminal.onBinary((data) => {
-      enqueueInput(Array.from(data, (character) => character.charCodeAt(0) & 0xff));
-    });
-    const resizeSubscription = terminal.onResize(({ cols, rows }) => {
-      if (!running.current) return;
-      void invoke("terminal_resize", { terminalId, cols, rows }).catch(() => undefined);
-    });
-
-    onInfoChange(null);
-    onStatusChange("starting");
-
-    const start = async () => {
-      if (startRequested) return;
-      startRequested = true;
-      if (!isTauri()) {
-        onStatusChange("error", "The terminal is available in the Groky desktop app.");
-        return;
-      }
-
-      try {
-        const listeners = await Promise.all([
-          listen<TerminalOutputEvent>("groky://terminal-output", ({ payload }) => {
-            if (payload.terminalId === terminalId) terminal.write(Uint8Array.from(payload.data));
-          }),
-          listen<TerminalExitEvent>("groky://terminal-exit", ({ payload }) => {
-            if (payload.terminalId !== terminalId || !active) return;
-            exited = true;
-            running.current = false;
-            const detail = payload.signal
-              ? `Shell stopped (${payload.signal}).`
-              : payload.exitCode === null || payload.exitCode === 0
-                ? "Shell exited."
-                : `Shell exited with code ${payload.exitCode}.`;
-            onStatusChange("exited", detail);
-          }),
-        ]);
-        if (!active) {
-          listeners.forEach((unlisten) => unlisten());
-          return;
-        }
-        unlisteners.push(...listeners);
-
-        const info = await invoke<TerminalInfo>("terminal_start", {
-          terminalId,
-          workingDirectory,
-          cols: Math.max(2, terminal.cols),
-          rows: Math.max(2, terminal.rows),
-        });
-        started = true;
-        if (!active) {
-          void invoke("terminal_stop", { terminalId }).catch(() => undefined);
-          return;
-        }
-        onInfoChange(info);
-        if (exited) return;
-        running.current = true;
-        onStatusChange("running");
-        terminal.focus();
-      } catch (error) {
-        if (active) onStatusChange("error", String(error));
-      }
-    };
-    const resizeObserver = new ResizeObserver(scheduleFit);
-    resizeObserver.observe(target);
-    scheduleFit();
-
-    return () => {
-      active = false;
-      running.current = false;
-      requestFit.current = null;
-      window.clearTimeout(resizeTimer);
-      window.cancelAnimationFrame(resizeFrame);
-      resizeObserver.disconnect();
-      dataSubscription.dispose();
-      binarySubscription.dispose();
-      resizeSubscription.dispose();
-      colorScheme.removeEventListener("change", updateTerminalTheme);
-      unlisteners.forEach((unlisten) => unlisten());
-      if (started) void invoke("terminal_stop", { terminalId }).catch(() => undefined);
-      if (terminalInstance.current === terminal) terminalInstance.current = null;
-      terminal.dispose();
-    };
-  }, [restartToken]);
-
-  return (
-    <div
-      className="terminal-surface"
-      ref={container}
-      data-render-ready={renderReady}
-      aria-label="Interactive terminal"
-    />
-  );
-}
-
-interface TerminalToolTab {
-  id: string;
-  type: "terminal";
-  workingDirectory: string | null;
-}
-
-interface FileToolTab {
-  id: string;
-  type: "files";
-}
-
-type ToolTab = FileToolTab | TerminalToolTab;
 
 interface TabPointerDrag {
   tabId: string;
@@ -420,11 +123,13 @@ interface TerminalTabMeta {
 function TerminalToolView({
   tab,
   active,
+  appearance,
   panelOpen,
   onMetaChange,
 }: {
   tab: TerminalToolTab;
   active: boolean;
+  appearance: ResolvedAppearance;
   panelOpen: boolean;
   onMetaChange: (tabId: string, meta: TerminalTabMeta) => void;
 }) {
@@ -457,6 +162,7 @@ function TerminalToolView({
     >
         <TerminalSurface
           active={active}
+          appearance={appearance}
           panelOpen={panelOpen}
           workingDirectory={tab.workingDirectory}
           restartToken={restartToken}
@@ -479,22 +185,30 @@ function TerminalToolView({
 }
 
 export function TerminalPanel({
-  open,
+  active,
+  appearance,
+  panelKey,
+  state,
   sessionId,
+  workspace,
   workingDirectory,
   attachmentDisabled,
   onAttach,
+  onStateChange,
 }: {
-  open: boolean;
+  active: boolean;
+  appearance: ResolvedAppearance;
+  panelKey: string;
+  state: ToolPanelState;
   sessionId: string | null;
+  workspace: string | null;
   workingDirectory: string | null;
   attachmentDisabled: boolean;
-  onAttach: (attachment: WorkspaceFileAttachment) => boolean;
+  onAttach: (attachment: WorkspaceFileAttachment) => ToolPanelAttachmentResult;
+  onStateChange: (key: string, update: ToolPanelStateUpdate) => void;
 }) {
-  const [initialTabs] = useState<ToolTab[]>(() => [
-    { id: crypto.randomUUID(), type: "files" },
-    { id: crypto.randomUUID(), type: "terminal", workingDirectory },
-  ]);
+  const { tabs, activeTabId } = state;
+  const open = active && state.open;
   const tabHeader = useRef<HTMLDivElement | null>(null);
   const tabList = useRef<HTMLDivElement | null>(null);
   const addMenuRoot = useRef<HTMLDivElement | null>(null);
@@ -506,15 +220,16 @@ export function TerminalPanel({
   const tabDragFrame = useRef<number | null>(null);
   const suppressTabClick = useRef(false);
   const suppressTabClickTimer = useRef<number | null>(null);
-  const [tabs, setTabs] = useState<ToolTab[]>(initialTabs);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const [tabMeta, setTabMeta] = useState<Record<string, TerminalTabMeta>>({});
-  const [activeTabId, setActiveTabId] = useState<string | null>(initialTabs[0]?.id ?? null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [addMenuLeft, setAddMenuLeft] = useState(8);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [tabOrderAnnouncement, setTabOrderAnnouncement] = useState("");
+  const changeState = useCallback((update: ToolPanelStateUpdate) => {
+    onStateChange(panelKey, update);
+  }, [onStateChange, panelKey]);
 
   const clearTabDrag = useCallback(() => {
     if (tabDragFrame.current !== null) {
@@ -538,6 +253,12 @@ export function TerminalPanel({
     if (suppressTabClickTimer.current !== null) window.clearTimeout(suppressTabClickTimer.current);
     document.body.classList.remove("is-dragging-tool-tab");
   }, []);
+
+  useEffect(() => {
+    if (active) return;
+    clearTabDrag();
+    setAddMenuOpen(false);
+  }, [active, clearTabDrag]);
 
   useLayoutEffect(() => {
     if (!addMenuOpen) return;
@@ -571,7 +292,10 @@ export function TerminalPanel({
   useEffect(() => {
     if (!addMenuOpen) return;
 
-    const focusFrame = window.requestAnimationFrame(() => addFilesItem.current?.focus());
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (workspace) addFilesItem.current?.focus();
+      else addTerminalItem.current?.focus();
+    });
     const handlePointerDown = (event: PointerEvent) => {
       if (
         !(event.target instanceof Node)
@@ -597,7 +321,13 @@ export function TerminalPanel({
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [addMenuOpen]);
+  }, [addMenuOpen, workspace]);
+
+  useEffect(() => {
+    if (workspace || !tabsRef.current.some((tab) => tab.type === "files")) return;
+    changeState((current) => removeUnavailableFileTabs(current, workspace));
+    setAddMenuOpen(false);
+  }, [changeState, workspace]);
 
   const updateTabMeta = useCallback((tabId: string, meta: TerminalTabMeta) => {
     setTabMeta((current) => {
@@ -616,21 +346,28 @@ export function TerminalPanel({
 
   function openTerminal() {
     const id = crypto.randomUUID();
-    setTabs((current) => [...current, { id, type: "terminal", workingDirectory }]);
-    setActiveTabId(id);
+    changeState((current) => ({
+      ...current,
+      tabs: [...current.tabs, { id, type: "terminal", workingDirectory }],
+      activeTabId: id,
+    }));
     setAddMenuOpen(false);
   }
 
   function openFiles() {
+    if (!workspace) return;
     const existing = tabs.find((tab) => tab.type === "files");
     if (existing) {
-      setActiveTabId(existing.id);
+      changeState((current) => ({ ...current, activeTabId: existing.id }));
       setAddMenuOpen(false);
       return;
     }
     const id = crypto.randomUUID();
-    setTabs((current) => [{ id, type: "files" }, ...current]);
-    setActiveTabId(id);
+    changeState((current) => ({
+      ...current,
+      tabs: [{ id, type: "files" }, ...current.tabs],
+      activeTabId: id,
+    }));
     setAddMenuOpen(false);
   }
 
@@ -639,7 +376,9 @@ export function TerminalPanel({
       suppressTabClick.current = false;
       return;
     }
-    setActiveTabId(tabId);
+    changeState((current) => current.activeTabId === tabId
+      ? current
+      : { ...current, activeTabId: tabId });
     setAddMenuOpen(false);
   }
 
@@ -652,8 +391,11 @@ export function TerminalPanel({
       ? remainingTabs[Math.min(closingIndex, remainingTabs.length - 1)]?.id ?? null
       : activeTabId;
 
-    setTabs(remainingTabs);
-    setActiveTabId(nextActiveId);
+    changeState((current) => ({
+      ...current,
+      tabs: remainingTabs,
+      activeTabId: nextActiveId,
+    }));
     setAddMenuOpen(false);
     setTabMeta((current) => {
       const next = { ...current };
@@ -812,7 +554,7 @@ export function TerminalPanel({
           drag.element.style.removeProperty("--tool-tab-drag-x");
           const nextTabs = reorderTab(currentTabs, drag.tabId, finalIndex);
           tabsRef.current = nextTabs;
-          flushSync(() => setTabs(nextTabs));
+          flushSync(() => changeState((current) => ({ ...current, tabs: nextTabs })));
           window.requestAnimationFrame(() => list?.removeAttribute("data-reorder-committing"));
           setTabOrderAnnouncement(`Moved tab to position ${finalIndex + 1} of ${nextTabs.length}.`);
         }
@@ -841,7 +583,7 @@ export function TerminalPanel({
     if (!tab) return;
     nextTabs.splice(nextIndex, 0, tab);
     tabsRef.current = nextTabs;
-    setTabs(nextTabs);
+    changeState((current) => ({ ...current, tabs: nextTabs }));
     setTabOrderAnnouncement(`Moved tab to position ${nextIndex + 1} of ${nextTabs.length}.`);
   }
 
@@ -861,7 +603,12 @@ export function TerminalPanel({
   }
 
   return (
-    <aside id="tools-panel" className="right-side-panel" aria-label="Tools">
+    <aside
+      id={active ? "tools-panel" : undefined}
+      className="right-side-panel"
+      aria-label="Tools"
+      hidden={!active}
+    >
       <div className="side-panel-tabs" ref={tabHeader} data-tauri-drag-region="deep">
         <div className="side-panel-tab-rail">
           <div
@@ -955,7 +702,14 @@ export function TerminalPanel({
             aria-label="Add tool tab"
             style={{ left: addMenuLeft }}
           >
-            <button ref={addFilesItem} type="button" role="menuitem" onClick={openFiles}>
+            <button
+              ref={addFilesItem}
+              type="button"
+              role="menuitem"
+              disabled={!workspace}
+              title={workspace ? undefined : "Choose a working directory to browse files"}
+              onClick={openFiles}
+            >
               <PanelIcon name="files" size={14} />
               <span>Files</span>
             </button>
@@ -987,6 +741,7 @@ export function TerminalPanel({
             <FileExplorer
               active={open && activeTabId === tab.id}
               sessionId={sessionId}
+              workspace={workspace}
               workingDirectory={workingDirectory}
               attachmentDisabled={attachmentDisabled}
               onAttach={onAttach}
@@ -996,7 +751,8 @@ export function TerminalPanel({
           <TerminalToolView
             key={tab.id}
             tab={tab}
-            active={activeTabId === tab.id}
+            active={active && activeTabId === tab.id}
+            appearance={appearance}
             panelOpen={open}
             onMetaChange={updateTabMeta}
           />

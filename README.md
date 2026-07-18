@@ -146,6 +146,8 @@ Session titles start from the first message or attachment name and can be rename
 
 The tools panel's **Files** tab follows the active session, watches its working directory for changes, previews supported files without leaving Groky, and can attach a selected file to the next message. Each new **Terminal** tab runs your system shell in the working directory that was active when the tab opened. You can open multiple terminals, close tool tabs, and reorder tabs by dragging them or pressing <kbd>Alt</kbd> + <kbd>←</kbd>/<kbd>→</kbd> while a tab is focused.
 
+When you switch sessions, Groky restores that session's panel visibility, width, open tabs, tab order, and selected tab. Running terminals and their scrollback stay attached to the session until you close the terminal tab or quit Groky.
+
 Useful keyboard controls:
 
 - <kbd>Command</kbd>/<kbd>Ctrl</kbd> + <kbd>K</kbd> searches sessions and common actions.
