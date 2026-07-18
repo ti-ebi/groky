@@ -9,6 +9,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import "./TerminalPanel.css";
+import type { ResolvedAppearance } from "./appearance";
 import { FileExplorer } from "./FileExplorer";
 import type { TerminalInfo, WorkspaceFileAttachment } from "./host/types";
 import { compactPath } from "./shared/path";
@@ -127,11 +128,13 @@ interface TerminalTabMeta {
 function TerminalToolView({
   tab,
   active,
+  appearance,
   panelOpen,
   onMetaChange,
 }: {
   tab: TerminalToolTab;
   active: boolean;
+  appearance: ResolvedAppearance;
   panelOpen: boolean;
   onMetaChange: (tabId: string, meta: TerminalTabMeta) => void;
 }) {
@@ -164,6 +167,7 @@ function TerminalToolView({
     >
         <TerminalSurface
           active={active}
+          appearance={appearance}
           panelOpen={panelOpen}
           workingDirectory={tab.workingDirectory}
           restartToken={restartToken}
@@ -187,6 +191,7 @@ function TerminalToolView({
 
 export function TerminalPanel({
   open,
+  appearance,
   sessionId,
   workspace,
   workingDirectory,
@@ -194,6 +199,7 @@ export function TerminalPanel({
   onAttach,
 }: {
   open: boolean;
+  appearance: ResolvedAppearance;
   sessionId: string | null;
   workspace: string | null;
   workingDirectory: string | null;
@@ -733,6 +739,7 @@ export function TerminalPanel({
             key={tab.id}
             tab={tab}
             active={activeTabId === tab.id}
+            appearance={appearance}
             panelOpen={open}
             onMetaChange={updateTabMeta}
           />
