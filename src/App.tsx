@@ -29,7 +29,11 @@ import {
 import { ConversationItem, PermissionCard } from "./session/Conversation";
 import { MessageHistoryNav, conversationTurnPreviews } from "./session/MessageHistoryNav";
 import { SessionComposer } from "./session/SessionComposer";
-import { approvalModeOption, enablesAlwaysApprove } from "./session/approval";
+import {
+  APPROVAL_MODE_STORAGE_KEY,
+  enablesAlwaysApprove,
+  normalizeApprovalMode,
+} from "./session/approval";
 import {
   editQueuedPrompt,
   FOLLOW_UP_BEHAVIOR_STORAGE_KEY,
@@ -167,9 +171,6 @@ function describePendingSettings(
 ) {
   if (!pending) return [];
   const labels: string[] = [];
-  if (pending.approvalMode) {
-    labels.push(`Approval: ${approvalModeOption(pending.approvalMode).label}`);
-  }
   if (pending.modelId) {
     const model = models?.availableModels.find((item) => item.modelId === pending.modelId);
     labels.push(`Model: ${model?.name ?? pending.modelId}`);
@@ -200,7 +201,7 @@ function App() {
   const [sessionViews, setSessionViews] = useState<Record<string, SessionViewState>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(() => new Set());
-  const [approvalModeChangingIds, setApprovalModeChangingIds] = useState<Set<string>>(() => new Set());
+  const [approvalModeChanging, setApprovalModeChanging] = useState(false);
   const [steeringSessionIds, setSteeringSessionIds] = useState<Set<string>>(() => new Set());
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
@@ -228,7 +229,13 @@ function App() {
   const [updateCheckNotice, setUpdateCheckNotice] = useState<string | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [activeHistoryMessageId, setActiveHistoryMessageId] = useState<string | null>(null);
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => {
+    try {
+      return normalizeApprovalMode(window.localStorage.getItem(APPROVAL_MODE_STORAGE_KEY));
+    } catch {
+      return "normal";
+    }
+  });
   const [followUpBehavior, setFollowUpBehavior] = useState<FollowUpBehavior>(() => {
     try {
       return normalizeFollowUpBehavior(window.localStorage.getItem(FOLLOW_UP_BEHAVIOR_STORAGE_KEY));
@@ -349,8 +356,7 @@ function App() {
   const permission = activeSession?.permissions[0] ?? null;
   const plan = activeSession?.plan ?? [];
   const activeSessionLoading = activeSessionId !== null && loadingSessionIds.has(activeSessionId);
-  const activeApprovalModeChanging = activeSessionId !== null
-    && approvalModeChangingIds.has(activeSessionId);
+  const activeApprovalModeChanging = approvalModeChanging;
   const anySessionRunning = Object.values(sessionViews).some((session) => session.running);
   const sessionTransitioning = activeSessionLoading || stage === "connecting";
   const commandCatalogKey = workspace ?? "__standalone__";
@@ -406,6 +412,18 @@ function App() {
     const next = { ...current, [sessionId]: update(session) };
     sessionViewsRef.current = next;
     if (render) setSessionViews(next);
+  }
+
+  function setAllSessionApprovalModes(mode: ApprovalMode) {
+    const next = Object.fromEntries(Object.entries(sessionViewsRef.current).map(([sessionId, session]) => [
+      sessionId,
+      {
+        ...session,
+        connection: { ...session.connection, approvalMode: mode },
+      },
+    ]));
+    sessionViewsRef.current = next;
+    setSessionViews(next);
   }
 
   function setSessionMessages(
@@ -560,7 +578,7 @@ function App() {
     setActiveSessionId(null);
     setSessionViews({});
     setLoadingSessionIds(new Set());
-    setApprovalModeChangingIds(new Set());
+    setApprovalModeChanging(false);
     steeringSessionIdsRef.current = new Set();
     setSteeringSessionIds(new Set());
     setPendingModels(null);
@@ -1399,10 +1417,7 @@ function App() {
     setSetupError(null);
     setConnectionNotice(null);
     setWorkspace(cached?.connection.workspace ?? session.workspace);
-    if (cached) {
-      setApprovalMode(cached.pendingSettings?.approvalMode ?? cached.connection.approvalMode);
-    }
-    else {
+    if (!cached) {
       setPendingDraft("");
       setPendingAttachments([]);
     }
@@ -1412,7 +1427,7 @@ function App() {
     }
 
     try {
-      const loaded = await host.grok.sessions.load(session.sessionId);
+      const loaded = await host.grok.sessions.load(session.sessionId, approvalMode);
       const alreadyCached = Boolean(sessionViewsRef.current[session.sessionId]);
       const replay = alreadyCached
         ? undefined
@@ -1433,10 +1448,6 @@ function App() {
       }
       if (activeSessionIdRef.current === session.sessionId) {
         setWorkspace(loaded.connection.workspace);
-        setApprovalMode(
-          sessionViewsRef.current[session.sessionId]?.pendingSettings?.approvalMode
-          ?? loaded.connection.approvalMode,
-        );
       }
       void host.grok.sessions.activate(activeSessionIdRef.current).catch(() => undefined);
       setStatus((current) => current ? {
@@ -1453,7 +1464,6 @@ function App() {
         activateSession(previousSessionId);
         const previous = previousSessionId ? sessionViewsRef.current[previousSessionId] : undefined;
         setWorkspace(previous?.connection.workspace ?? workspace);
-        setApprovalMode(previous?.connection.approvalMode ?? "ask");
         setSetupError(authRequired ? null : message);
         setStage(authRequired ? "needsAuth" : previousSessionId ? "connected" : "ready");
       } else {
@@ -1506,7 +1516,6 @@ function App() {
         activateSession(null);
         setPendingDraft("");
         setPendingAttachments([]);
-        setApprovalMode("ask");
         setStage("ready");
       }
       if (removesCurrentLocation) setWorkspace(null);
@@ -1568,7 +1577,6 @@ function App() {
         activateSession(null);
         setPendingDraft("");
         setPendingAttachments([]);
-        setApprovalMode("ask");
         setStage("ready");
       }
     } catch (error) {
@@ -1671,7 +1679,6 @@ function App() {
 
   async function startNewTask(targetWorkspace: string | null = workspace) {
     if (sidebarActionsDisabled) return;
-    const nextMode: ApprovalMode = "ask";
     setSidebarMenu(null);
     setActiveView("session");
     resetPendingToolPanel();
@@ -1688,7 +1695,6 @@ function App() {
         return next;
       });
     }
-    setApprovalMode(nextMode);
     setSetupError(null);
     setConnectionNotice(null);
     setWorkspace(targetWorkspace);
@@ -1703,68 +1709,30 @@ function App() {
       || appUpdating
       || stage === "connecting"
     ) return;
-    const sessionId = activeSessionIdRef.current;
-    if (!sessionId) {
-      setApprovalMode(nextMode);
-      return;
-    }
-
-    const currentSession = sessionViewsRef.current[sessionId];
-    if (currentSession?.running) {
-      updateSessionView(sessionId, (session) => {
-        const nextPending: PendingSessionSettings = { ...(session.pendingSettings ?? {}) };
-        if (nextMode === session.connection.approvalMode) delete nextPending.approvalMode;
-        else nextPending.approvalMode = nextMode;
-        return {
-          ...session,
-          pendingSettings: hasPendingSettings(nextPending) ? nextPending : null,
-        };
-      });
-      setApprovalMode(nextMode);
-      return;
-    }
-
-    const activeConnection = connection ?? await reconnectActiveSession();
-    if (!activeConnection || activeConnection.sessionId !== sessionId) return;
-
-    const previousMode = activeConnection.approvalMode;
+    const previousMode = approvalMode;
     connectionTransitioning.current = true;
-    setApprovalModeChangingIds((current) => new Set(current).add(sessionId));
+    setApprovalModeChanging(true);
     setConnectionNotice(null);
-    updateSessionView(sessionId, (session) => ({
-      ...session,
-      connection: { ...session.connection, approvalMode: nextMode },
-    }));
-    if (activeSessionIdRef.current === sessionId) setApprovalMode(nextMode);
+    setApprovalMode(nextMode);
+    setAllSessionApprovalModes(nextMode);
     try {
-      const switched = await host.grok.sessions.setApprovalMode(sessionId, nextMode);
-      upsertSessionView(switched);
-      updateSessionView(sessionId, (session) => {
-        const nextPending = { ...(session.pendingSettings ?? {}) };
-        delete nextPending.approvalMode;
-        return {
-          ...session,
-          pendingSettings: hasPendingSettings(nextPending) ? nextPending : null,
-        };
-      });
-      if (activeSessionIdRef.current === sessionId) {
-        setWorkspace(switched.workspace);
-        setApprovalMode(switched.approvalMode);
+      const appliedMode = isDesktopHost()
+        ? await host.grok.sessions.setApprovalMode(nextMode)
+        : nextMode;
+      setApprovalMode(appliedMode);
+      setAllSessionApprovalModes(appliedMode);
+      try {
+        window.localStorage.setItem(APPROVAL_MODE_STORAGE_KEY, appliedMode);
+      } catch {
+        // The mode is still active for this app run when browser storage is unavailable.
       }
     } catch (error) {
-      updateSessionView(sessionId, (session) => ({
-        ...session,
-        connection: { ...session.connection, approvalMode: previousMode },
-      }));
-      if (activeSessionIdRef.current === sessionId) setApprovalMode(previousMode);
+      setApprovalMode(previousMode);
+      setAllSessionApprovalModes(previousMode);
       setConnectionNotice(String(error));
     } finally {
       connectionTransitioning.current = false;
-      setApprovalModeChangingIds((current) => {
-        const next = new Set(current);
-        next.delete(sessionId);
-        return next;
-      });
+      setApprovalModeChanging(false);
     }
   }
 
@@ -1776,14 +1744,10 @@ function App() {
     connectionTransitioning.current = true;
     setLoadingSessionIds((current) => new Set(current).add(sessionId));
     try {
-      const loaded = await host.grok.sessions.load(sessionId);
+      const loaded = await host.grok.sessions.load(sessionId, approvalMode);
       upsertSessionView(loaded.connection);
       if (activeSessionIdRef.current === sessionId) {
         setWorkspace(loaded.connection.workspace);
-        setApprovalMode(
-          sessionViewsRef.current[sessionId]?.pendingSettings?.approvalMode
-          ?? loaded.connection.approvalMode,
-        );
         setConnectionNotice(null);
       }
       return loaded.connection;
@@ -2025,14 +1989,6 @@ function App() {
     setConnectionNotice(null);
 
     try {
-      if (remaining.approvalMode) {
-        nextConnection = await host.grok.sessions.setApprovalMode(
-          sessionId,
-          remaining.approvalMode,
-        );
-        nextModels = nextConnection.models;
-        delete remaining.approvalMode;
-      }
       if (remaining.modelId) {
         nextModels = await host.grok.sessions.setModel(sessionId, remaining.modelId);
         delete remaining.modelId;
@@ -2053,9 +2009,6 @@ function App() {
         settingsApplying: false,
       }));
       setPendingModels(nextModels);
-      if (activeSessionIdRef.current === sessionId) {
-        setApprovalMode(resolvedConnection.approvalMode);
-      }
       return true;
     } catch (error) {
       const resolvedConnection = { ...nextConnection, models: nextModels };
@@ -2067,9 +2020,6 @@ function App() {
         queuePaused: true,
       }));
       setPendingModels(nextModels);
-      if (activeSessionIdRef.current === sessionId) {
-        setApprovalMode(remaining.approvalMode ?? resolvedConnection.approvalMode);
-      }
       setConnectionNotice(`Queued settings could not be applied. The follow-up queue is paused. ${String(error)}`);
       return false;
     }
@@ -2546,16 +2496,7 @@ function App() {
       );
       resolveSessionPermission(current.sessionId, current.requestId);
       if (enablesAlwaysApprove(selectedOption)) {
-        updateSessionView(current.sessionId, (session) => ({
-          ...session,
-          connection: { ...session.connection, approvalMode: "alwaysApprove" },
-        }));
-        if (activeSessionIdRef.current === current.sessionId) {
-          setApprovalMode(
-            sessionViewsRef.current[current.sessionId]?.pendingSettings?.approvalMode
-            ?? "alwaysApprove",
-          );
-        }
+        await changeApprovalMode("alwaysApprove");
       }
     } catch (error) {
       setConnectionNotice(String(error));
@@ -2569,7 +2510,6 @@ function App() {
     setActiveView("session");
     clearAllSessionViews();
     setPendingDraft("");
-    setApprovalMode("ask");
     setStage("checking");
     try {
       await host.grok.logout();

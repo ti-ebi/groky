@@ -282,7 +282,6 @@ export function SessionComposer({
             mode={approvalMode}
             busy={promptDisabled || settingsApplying}
             changing={approvalModeChanging}
-            pending={pendingSettingLabels.some((label) => label.startsWith("Approval:"))}
             onChange={onApprovalModeChange}
           />
           <span className="toolbar-spacer" />

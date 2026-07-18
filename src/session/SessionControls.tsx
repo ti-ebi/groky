@@ -9,13 +9,11 @@ export function ApprovalModeSelector({
   mode,
   busy,
   changing,
-  pending,
   onChange,
 }: {
   mode: ApprovalMode;
   busy: boolean;
   changing: boolean;
-  pending: boolean;
   onChange: (mode: ApprovalMode) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -51,22 +49,23 @@ export function ApprovalModeSelector({
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={`Approval mode: ${selected.label}${pending ? ", applies next turn" : ""}${changing ? ", updating" : ""}`}
+        aria-label={`Grok Build mode: ${selected.label}${changing ? ", updating all sessions" : ""}`}
         aria-busy={changing}
         disabled={busy || changing}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="shield-mark" aria-hidden="true">{selected.glyph}</span>
+        <span className="shield-mark" aria-hidden="true">
+          <Icon name={selected.icon} size={16} />
+        </span>
         <span>{selected.label}</span>
-        {pending && <span className="control-pending-mark">NEXT</span>}
         <Icon name="chevron-down" size={13} />
       </button>
 
       {open && (
-        <div className="approval-menu" role="listbox" aria-label="Session approval mode">
+        <div className="approval-menu" role="listbox" aria-label="Grok Build mode">
           <div className="approval-menu-heading">
-            <span>APPROVAL MODE</span>
-            <small>Choose when Grok asks</small>
+            <span>GROK BUILD MODE</span>
+            <small>Shared across all sessions</small>
           </div>
           <div className="approval-menu-options">
             {APPROVAL_MODES.map((option) => {
@@ -84,7 +83,9 @@ export function ApprovalModeSelector({
                     onChange(option.id);
                   }}
                 >
-                  <span className="approval-option-glyph" aria-hidden="true">{option.glyph}</span>
+                  <span className="approval-option-glyph" aria-hidden="true">
+                    <Icon name={option.icon} size={17} />
+                  </span>
                   <span className="approval-option-copy">
                     <span>
                       <strong>{option.label}</strong>
@@ -99,9 +100,7 @@ export function ApprovalModeSelector({
           </div>
           <div className="approval-menu-note">
             <span>{selected.shortDescription}</span>
-            <small>{pending
-              ? "This selection is queued for the next turn."
-              : "Changes apply before the next request in this session."}</small>
+            <small>This mode applies to every open session and carries into future tasks.</small>
           </div>
         </div>
       )}

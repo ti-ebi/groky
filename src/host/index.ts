@@ -149,7 +149,9 @@ export const host = {
 
     sessions: {
       list: () => command<PersistedSessionSummary[]>("grok_list_sessions"),
-      load: (sessionId: string) => command<LoadSessionResult>("grok_load_session", { sessionId }),
+      load: (sessionId: string, approvalMode: ApprovalMode) => (
+        command<LoadSessionResult>("grok_load_session", { sessionId, approvalMode })
+      ),
       activate: (sessionId: string | null) => command<void>("grok_activate_session", { sessionId }),
       deactivate: (sessionId: string) => command<void>("grok_deactivate_session", { sessionId }),
       rename: (sessionId: string, title: string) => (
@@ -161,8 +163,8 @@ export const host = {
         workspace?: string;
         allArchived?: boolean;
       }) => command<PersistedSessionSummary[]>("grok_mutate_sessions", options),
-      setApprovalMode: (sessionId: string, approvalMode: ApprovalMode) => (
-        command<Connection>("grok_set_approval_mode", { sessionId, approvalMode })
+      setApprovalMode: (approvalMode: ApprovalMode) => (
+        command<ApprovalMode>("grok_set_approval_mode", { approvalMode })
       ),
       setModel: (sessionId: string, modelId: string) => (
         command<SessionModelState>("grok_set_model", { sessionId, modelId })
