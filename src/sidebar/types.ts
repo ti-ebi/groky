@@ -8,3 +8,8 @@ export interface SidebarSessionSummary {
   archived: boolean;
   unread: boolean;
 }
+
+export type SidebarMenu =
+  | { kind: "workspace"; path: string }
+  | { kind: "session"; sessionId: string }
+  | null;

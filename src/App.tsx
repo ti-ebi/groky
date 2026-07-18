@@ -9,7 +9,6 @@ import {
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
   type SetStateAction,
 } from "react";
 import { getVersion } from "@tauri-apps/api/app";
@@ -24,9 +23,9 @@ import {
   SettingsSidebar,
   type SettingsSection,
 } from "./settings/Settings";
-import { ConversationItem, PermissionCard, PlanBlock } from "./session/Conversation";
+import { ConversationItem, PermissionCard } from "./session/Conversation";
 import { MessageHistoryNav, conversationTurnPreviews } from "./session/MessageHistoryNav";
-import { ApprovalModeSelector, ModelSelector } from "./session/SessionControls";
+import { SessionComposer } from "./session/SessionComposer";
 import { enablesAlwaysApprove } from "./session/approval";
 import {
   currentModel,
@@ -66,20 +65,24 @@ import type {
   PersistedWorkspaceSummary,
   SessionHistoryAction,
 } from "./host/types";
-import { cleanVersion, formatFileSize } from "./shared/format";
+import {
+  MAX_SIDEBAR_WIDTH,
+  MAX_SIDE_PANEL_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  MIN_SIDE_PANEL_WIDTH,
+  usePanelLayout,
+} from "./layout/usePanelLayout";
+import { cleanVersion } from "./shared/format";
 import { workspaceName } from "./shared/path";
 import { isDesktopHost, isMacOS, usesOverlayTitlebar } from "./shared/platform";
-import { SessionLocationSelector } from "./sidebar/SessionLocationSelector";
-import { SidebarSessionRow } from "./sidebar/SidebarSessionRow";
+import { AppSidebar } from "./sidebar/AppSidebar";
 import {
   compareSidebarSessions,
   groupSidebarSessions,
   type SidebarWorkspaceGroup,
 } from "./sidebar/sessionList";
-import type { SidebarSessionSummary } from "./sidebar/types";
-import { SidebarUpdateCard } from "./update/SidebarUpdateCard";
+import type { SidebarMenu, SidebarSessionSummary } from "./sidebar/types";
 import type { AppUpdatePhase } from "./update/types";
-import { Brand } from "./ui/Brand";
 import { DurationText } from "./ui/DurationText";
 import { Icon } from "./ui/Icon";
 
@@ -105,11 +108,6 @@ function commandTokenAtEnd(draft: string): CommandToken | null {
   };
 }
 
-type SidebarMenu =
-  | { kind: "workspace"; path: string }
-  | { kind: "session"; sessionId: string }
-  | null;
-
 interface DeleteConfirmation {
   sessionId?: string;
   workspace?: string;
@@ -120,72 +118,7 @@ interface DeleteConfirmation {
 type AppView = "session" | "settings";
 
 const AUTH_REQUIRED_ERROR = "GROK_AUTH_REQUIRED";
-const SIDEBAR_WIDTH_KEY = "groky.sidebar.width";
-const SIDEBAR_COLLAPSED_KEY = "groky.sidebar.collapsed";
-const SIDE_PANEL_WIDTH_KEY = "groky.side-panel.width";
-const SIDE_PANEL_OPEN_KEY = "groky.side-panel.open";
-const DEFAULT_SIDEBAR_WIDTH = 258;
-const MIN_SIDEBAR_WIDTH = 220;
-const MAX_SIDEBAR_WIDTH = 420;
-const FALLBACK_SIDE_PANEL_WIDTH = 480;
-const DEFAULT_SIDE_PANEL_WIDTH_RATIO = 0.42;
-const MIN_SIDE_PANEL_WIDTH = 340;
-const MAX_SIDE_PANEL_WIDTH = 760;
 const MAX_MESSAGE_ATTACHMENTS = 10;
-
-function clampSidebarWidth(width: number) {
-  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
-}
-
-function storedSidebarWidth() {
-  try {
-    const width = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
-    return Number.isFinite(width) && width > 0 ? clampSidebarWidth(width) : DEFAULT_SIDEBAR_WIDTH;
-  } catch {
-    return DEFAULT_SIDEBAR_WIDTH;
-  }
-}
-
-function storedSidebarCollapsed() {
-  try {
-    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function clampSidePanelWidth(width: number) {
-  return Math.min(MAX_SIDE_PANEL_WIDTH, Math.max(MIN_SIDE_PANEL_WIDTH, width));
-}
-
-function defaultSidePanelWidth() {
-  const viewportWidth = typeof window === "undefined" ? 0 : window.innerWidth;
-  return clampSidePanelWidth(
-    viewportWidth > 0 ? Math.round(viewportWidth * DEFAULT_SIDE_PANEL_WIDTH_RATIO) : FALLBACK_SIDE_PANEL_WIDTH,
-  );
-}
-
-function storedSidePanelWidth() {
-  try {
-    const width = Number(window.localStorage.getItem(SIDE_PANEL_WIDTH_KEY));
-    return Number.isFinite(width) && width > 0 ? clampSidePanelWidth(width) : defaultSidePanelWidth();
-  } catch {
-    return defaultSidePanelWidth();
-  }
-}
-
-function storedSidePanelOpen() {
-  try {
-    return window.localStorage.getItem(SIDE_PANEL_OPEN_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function accountAvatarLabel(profile: AccountProfile | null) {
-  const label = profile?.displayName ?? profile?.email ?? "G";
-  return Array.from(label.trim())[0]?.toLocaleUpperCase() ?? "G";
-}
 
 function resizeTextareaToContent(textarea: HTMLTextAreaElement | null) {
   if (!textarea) return;
@@ -238,11 +171,25 @@ function App() {
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [activeHistoryMessageId, setActiveHistoryMessageId] = useState<string | null>(null);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
-  const [sidebarWidth, setSidebarWidth] = useState(storedSidebarWidth);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(storedSidebarCollapsed);
-  const [sidePanelWidth, setSidePanelWidth] = useState(storedSidePanelWidth);
-  const [sidePanelOpen, setSidePanelOpen] = useState(storedSidePanelOpen);
-  const [sidePanelMounted, setSidePanelMounted] = useState(storedSidePanelOpen);
+  const {
+    sidebarWidth,
+    sidebarCollapsed,
+    sidePanelWidth,
+    sidePanelOpen,
+    sidePanelMounted,
+    toggleSidebar,
+    toggleSidePanel,
+    resetSidebarWidth,
+    resetSidePanelWidth,
+    startSidebarResize,
+    resizeSidebar,
+    finishSidebarResize,
+    resizeSidebarWithKeyboard,
+    startSidePanelResize,
+    resizeSidePanel,
+    finishSidePanelResize,
+    resizeSidePanelWithKeyboard,
+  } = usePanelLayout({ onSidebarToggle: () => setShowConnection(false) });
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
@@ -253,10 +200,6 @@ function App() {
   const [nativeTitlebarHeight, setNativeTitlebarHeight] = useState<number | null>(null);
   const [commandSuggestionsOpen, setCommandSuggestionsOpen] = useState(true);
   const [activeCommandSuggestion, setActiveCommandSuggestion] = useState(0);
-  const toggleSidePanel = useCallback(() => {
-    setSidePanelMounted(true);
-    setSidePanelOpen((current) => !current);
-  }, []);
   const commandSuggestionsId = useId();
   const activeSessionIdRef = useRef<string | null>(null);
   const activeAssistantIds = useRef<Map<string, string>>(new Map());
@@ -271,8 +214,6 @@ function App() {
   const updateCheckInFlight = useRef(false);
   const updateInstallationInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
-  const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
-  const sidePanelResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
 
   const activeSession = activeSessionId ? sessionViews[activeSessionId] : undefined;
   const connection = activeSession && !activeSession.disconnected ? activeSession.connection : null;
@@ -486,6 +427,14 @@ function App() {
     path,
     sessions: sessionsByWorkspace.get(path) ?? [],
   }));
+  const sessionCountByWorkspace = new Map<string, number>();
+  sessionHistory.forEach((session) => {
+    if (!session.workspace) return;
+    sessionCountByWorkspace.set(
+      session.workspace,
+      (sessionCountByWorkspace.get(session.workspace) ?? 0) + 1,
+    );
+  });
   const sidebarActionsDisabled = appUpdating || stage === "connecting" || historyMutating || renamingSessionId !== null;
   const sessionLocationEditable = !activeSessionLoading && connection === null && messages.length === 0 && !running;
   const attachmentDisabled = activeSessionLoading || running || appUpdating || stage === "connecting";
@@ -603,53 +552,6 @@ function App() {
   }, [overlayTitlebar]);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
-    } catch {
-      // Persistence is optional when storage is unavailable.
-    }
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
-    } catch {
-      // Persistence is optional when storage is unavailable.
-    }
-  }, [sidebarCollapsed]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth));
-    } catch {
-      // Persistence is optional when storage is unavailable.
-    }
-  }, [sidePanelWidth]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SIDE_PANEL_OPEN_KEY, String(sidePanelOpen));
-    } catch {
-      // Persistence is optional when storage is unavailable.
-    }
-  }, [sidePanelOpen]);
-
-  useEffect(() => {
-    const handleSidebarShortcut = (event: globalThis.KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "b") return;
-      event.preventDefault();
-      setSidebarCollapsed((current) => !current);
-      setShowConnection(false);
-    };
-
-    window.addEventListener("keydown", handleSidebarShortcut);
-    return () => {
-      window.removeEventListener("keydown", handleSidebarShortcut);
-      document.body.classList.remove("is-resizing-sidebar");
-    };
-  }, []);
-
-  useEffect(() => {
     const handleSearchShortcut = (event: globalThis.KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "k") return;
       event.preventDefault();
@@ -667,20 +569,6 @@ function App() {
     window.addEventListener("keydown", handleSearchShortcut);
     return () => window.removeEventListener("keydown", handleSearchShortcut);
   }, [deleteConfirmation, globalSearchOpen, stage]);
-
-  useEffect(() => {
-    const handleSidePanelShortcut = (event: globalThis.KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "j") return;
-      event.preventDefault();
-      toggleSidePanel();
-    };
-
-    window.addEventListener("keydown", handleSidePanelShortcut);
-    return () => {
-      window.removeEventListener("keydown", handleSidePanelShortcut);
-      document.body.classList.remove("is-resizing-side-panel");
-    };
-  }, [toggleSidePanel]);
 
   useEffect(() => {
     if ((stage !== "ready" && stage !== "connected") || deleteConfirmation) {
@@ -777,11 +665,6 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [deleteConfirmation, historyMutating]);
 
-  function toggleSidebar() {
-    if (!sidebarCollapsed) setShowConnection(false);
-    setSidebarCollapsed((current) => !current);
-  }
-
   function openGlobalSearch() {
     if ((stage !== "ready" && stage !== "connected") || deleteConfirmation) return;
     setShowConnection(false);
@@ -798,77 +681,6 @@ function App() {
       else next.add(path);
       return next;
     });
-  }
-
-  function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || sidebarCollapsed) return;
-    event.preventDefault();
-    sidebarResizeStart.current = { pointerX: event.clientX, width: sidebarWidth };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    document.body.classList.add("is-resizing-sidebar");
-  }
-
-  function resizeSidebar(event: ReactPointerEvent<HTMLDivElement>) {
-    const start = sidebarResizeStart.current;
-    if (!start) return;
-    setSidebarWidth(clampSidebarWidth(start.width + event.clientX - start.pointerX));
-  }
-
-  function finishSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!sidebarResizeStart.current) return;
-    sidebarResizeStart.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    document.body.classList.remove("is-resizing-sidebar");
-  }
-
-  function resizeSidebarWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
-    const step = event.shiftKey ? 32 : 12;
-    let nextWidth: number | null = null;
-    if (event.key === "ArrowLeft") nextWidth = sidebarWidth - step;
-    if (event.key === "ArrowRight") nextWidth = sidebarWidth + step;
-    if (event.key === "Home") nextWidth = MIN_SIDEBAR_WIDTH;
-    if (event.key === "End") nextWidth = MAX_SIDEBAR_WIDTH;
-    if (nextWidth === null) return;
-    event.preventDefault();
-    setSidebarWidth(clampSidebarWidth(nextWidth));
-  }
-
-  function startSidePanelResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || !sidePanelOpen) return;
-    event.preventDefault();
-    event.currentTarget.focus();
-    sidePanelResizeStart.current = { pointerX: event.clientX, width: sidePanelWidth };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    document.body.classList.add("is-resizing-side-panel");
-  }
-
-  function resizeSidePanel(event: ReactPointerEvent<HTMLDivElement>) {
-    const start = sidePanelResizeStart.current;
-    if (!start) return;
-    setSidePanelWidth(clampSidePanelWidth(start.width - event.clientX + start.pointerX));
-  }
-
-  function finishSidePanelResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!sidePanelResizeStart.current) return;
-    sidePanelResizeStart.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    document.body.classList.remove("is-resizing-side-panel");
-  }
-
-  function resizeSidePanelWithKeyboard(event: KeyboardEvent<HTMLDivElement>) {
-    const step = event.shiftKey ? 32 : 12;
-    let nextWidth: number | null = null;
-    if (event.key === "ArrowLeft") nextWidth = sidePanelWidth + step;
-    if (event.key === "ArrowRight") nextWidth = sidePanelWidth - step;
-    if (event.key === "Home") nextWidth = MIN_SIDE_PANEL_WIDTH;
-    if (event.key === "End") nextWidth = MAX_SIDE_PANEL_WIDTH;
-    if (nextWidth === null) return;
-    event.preventDefault();
-    setSidePanelWidth(clampSidePanelWidth(nextWidth));
   }
 
   async function refreshSessionHistory() {
@@ -2048,281 +1860,63 @@ function App() {
           onBack={() => setActiveView("session")}
         />
       ) : (
-      <aside className="sidebar">
-        <div className="window-nav" {...dragRegionProps}>
-          <button className="icon-button sidebar-toggle" type="button" aria-label="Hide sidebar" title={`Hide sidebar (${sidebarShortcutLabel})`} onClick={toggleSidebar}><Icon name="panel" /></button>
-        </div>
-
-        <div className="brand-row">
-          <Brand />
-          <button
-            className="icon-button brand-search"
-            type="button"
-            aria-label="Search sessions and actions"
-            aria-haspopup="dialog"
-            aria-expanded={globalSearchOpen}
-            title={`Search sessions and actions (${searchShortcutLabel})`}
-            onClick={openGlobalSearch}
-          >
-            <Icon name="search" size={18} />
-          </button>
-        </div>
-
-        <nav className="primary-nav" aria-label="Primary">
-          <button type="button" onClick={() => void startNewTask()} disabled={sidebarActionsDisabled}>
-            <Icon name="compose" /><span>New session</span>
-          </button>
-        </nav>
-
-        <div className="project-scroll">
-          <div className="project-section-header">
-            <span>Working directories</span>
-            <button
-              className="project-add-workspace"
-              type="button"
-              aria-label="Add working directory"
-              title="Add working directory"
-              disabled={sidebarActionsDisabled}
-              onClick={() => void chooseAndAddWorkspace()}
-            >
-              <Icon name="plus" size={15} />
-            </button>
-          </div>
-
-          {workspaceGroups.map((group) => {
-            const expanded = !collapsedWorkspaces.has(group.path);
-            const workspaceMenuOpen = sidebarMenu?.kind === "workspace" && sidebarMenu.path === group.path;
-            const allSessionCount = sessionHistory.filter((session) => session.workspace === group.path).length;
-            return (
-              <section className="project-group" key={group.path}>
-                <div
-                  className={`project-heading-row ${workspaceMenuOpen ? "actions-visible" : ""}`}
-                  data-open={expanded}
-                  data-sidebar-menu-root
-                >
-                  <button
-                    className="project-heading"
-                    type="button"
-                    aria-expanded={expanded}
-                    title={group.path}
-                    onClick={() => toggleWorkspaceGroup(group.path)}
-                  >
-                    <Icon name={expanded ? "folder-open" : "folder"} />
-                    <span>{workspaceName(group.path)}</span>
-                  </button>
-                  <div className="project-row-actions">
-                    <button
-                      className="project-more"
-                      type="button"
-                      aria-label={`Actions for ${workspaceName(group.path)}`}
-                      aria-haspopup="menu"
-                      aria-expanded={workspaceMenuOpen}
-                      disabled={sidebarActionsDisabled}
-                      onClick={() => setSidebarMenu((current) =>
-                        current?.kind === "workspace" && current.path === group.path
-                          ? null
-                          : { kind: "workspace", path: group.path }
-                      )}
-                    >
-                      <Icon name="dots" size={15} />
-                    </button>
-                    <button
-                      className="project-new-session"
-                      type="button"
-                      aria-label={`New session in ${workspaceName(group.path)}`}
-                      title={`New session in ${workspaceName(group.path)}`}
-                      disabled={sidebarActionsDisabled}
-                      onClick={() => void startNewTask(group.path)}
-                    >
-                      <Icon name="plus" size={15} />
-                    </button>
-                  </div>
-                  {workspaceMenuOpen && (
-                    <div className="sidebar-context-menu workspace-context-menu" role="menu" aria-label={`Actions for ${workspaceName(group.path)}`}>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        disabled={group.sessions.length === 0}
-                        onClick={() => void mutateSessionHistory("archive", { workspace: group.path })}
-                      >
-                        <Icon name="archive" size={14} />
-                        <span>Archive all sessions</span>
-                      </button>
-                      <button
-                        className="danger-menu-item"
-                        type="button"
-                        role="menuitem"
-                        disabled={allSessionCount === 0}
-                        onClick={() => requestWorkspaceDelete(group.path)}
-                      >
-                        <Icon name="trash" size={14} />
-                        <span>Delete all sessions</span>
-                      </button>
-                      <button
-                        className="remove-workspace-menu-item"
-                        type="button"
-                        role="menuitem"
-                        onClick={() => void removeWorkspace(group.path)}
-                      >
-                        <Icon name="folder-x" size={14} />
-                        <span>Remove from Groky</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <div className={`project-session-reveal ${expanded ? "is-open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
-                  <div className="project-session-reveal-inner">
-                    {group.sessions.length > 0 ? (
-                      <div className="task-list" aria-label={`Sessions in ${workspaceName(group.path)}`}>
-                        {group.sessions.map((session) => (
-                          <SidebarSessionRow
-                            key={session.sessionId}
-                            session={session}
-                            selected={activeSessionId === session.sessionId}
-                            disabled={sidebarActionsDisabled}
-                            editing={editingSessionId === session.sessionId}
-                            renaming={renamingSessionId === session.sessionId}
-                            menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
-                            onSelect={() => void loadSession(session)}
-                            onToggleMenu={() => setSidebarMenu((current) =>
-                              current?.kind === "session" && current.sessionId === session.sessionId
-                                ? null
-                                : { kind: "session", sessionId: session.sessionId }
-                            )}
-                            onStartRename={() => startSessionRename(session.sessionId)}
-                            onRename={(title) => void renameSession(session.sessionId, title)}
-                            onCancelRename={() => setEditingSessionId(null)}
-                            onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
-                            onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
-                            onDelete={() => requestSessionDelete(session)}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="project-empty-state">No sessions yet</p>
-                    )}
-                  </div>
-                </div>
-              </section>
-            );
-          })}
-
-          {groupedSidebarSessions.ungrouped.length > 0 && (
-            <section className="unassigned-tasks">
-              <p className="section-label">Standalone sessions</p>
-              <div className="task-list ungrouped-task-list" aria-label="Standalone sessions">
-                {groupedSidebarSessions.ungrouped.map((session) => (
-                  <SidebarSessionRow
-                    key={session.sessionId}
-                    session={session}
-                    selected={activeSessionId === session.sessionId}
-                    disabled={sidebarActionsDisabled}
-                    editing={editingSessionId === session.sessionId}
-                    renaming={renamingSessionId === session.sessionId}
-                    menuOpen={sidebarMenu?.kind === "session" && sidebarMenu.sessionId === session.sessionId}
-                    onSelect={() => void loadSession(session)}
-                    onToggleMenu={() => setSidebarMenu((current) =>
-                      current?.kind === "session" && current.sessionId === session.sessionId
-                        ? null
-                        : { kind: "session", sessionId: session.sessionId }
-                    )}
-                    onStartRename={() => startSessionRename(session.sessionId)}
-                    onRename={(title) => void renameSession(session.sessionId, title)}
-                    onCancelRename={() => setEditingSessionId(null)}
-                    onArchive={() => void mutateSessionHistory("archive", { sessionId: session.sessionId })}
-                    onRestore={() => void mutateSessionHistory("restore", { sessionId: session.sessionId })}
-                    onDelete={() => requestSessionDelete(session)}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-
-        </div>
-
-        {appUpdate && (
-          <SidebarUpdateCard
-            update={appUpdate}
-            phase={updatePhase}
-            progress={updateProgress}
-            error={updateError}
-            taskRunning={anySessionRunning}
-            onInstall={() => void installAppUpdate()}
-          />
-        )}
-
-        <button
-          className="profile-row"
-          type="button"
-          aria-haspopup="dialog"
-          aria-expanded={showConnection}
-          data-connection-popover-root
-          onClick={() => setShowConnection((current) => !current)}
-        >
-          <span className="avatar" aria-hidden="true">{accountAvatarLabel(accountProfile)}</span>
-          <span className="profile-copy">
-            <strong>{accountName}</strong>
-            <small title={accountDetail}>{accountDetail}</small>
-          </span>
-          {connection && <span className="connection-pill">live</span>}
-        </button>
-
-        {showConnection && (
-          <div className="connection-popover" role="dialog" aria-label="Grok Build statistics and account" data-connection-popover-root>
-            <dl>
-              <div><dt>Groky</dt><dd>{appVersion ? `Version ${appVersion}` : "Version unavailable"}</dd></div>
-              <div><dt>Engine</dt><dd>{connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}</dd></div>
-            </dl>
-            <button
-              className="popover-settings-link popover-usage-link"
-              type="button"
-              onClick={() => void openUsageDetails()}
-            >
-              <Icon name="gauge" size={14} />
-              <span>Usage &amp; limits</span>
-              <span className="popover-settings-arrow"><Icon name="external-link" size={12} /></span>
-            </button>
-            <button
-              className="popover-settings-link"
-              type="button"
-              onClick={() => {
-                setShowConnection(false);
-                setSidebarMenu(null);
-                setActiveSettingsSection("application");
-                setActiveView("settings");
-              }}
-            >
-              <Icon name="sliders" size={14} />
-              <span>Settings</span>
-              <span className="popover-settings-arrow"><Icon name="arrow-right" size={12} /></span>
-            </button>
-            <div className={`popover-update ${appUpdate ? "available" : ""}`}>
-              <button
-                type="button"
-                onClick={appUpdate ? () => void installAppUpdate() : () => void checkForAppUpdate(true)}
-                disabled={updatePhase === "checking" || updatePhase === "downloading" || (appUpdate !== null && anySessionRunning)}
-              >
-                <Icon name={appUpdate ? "download" : "refresh"} size={13} />
-                {appUpdate
-                  ? updatePhase === "downloading"
-                    ? "Updating…"
-                    : anySessionRunning
-                      ? "Finish current turn first"
-                      : "Update & restart"
-                  : updatePhase === "checking"
-                    ? "Checking…"
-                    : "Check now"}
-              </button>
-              <small aria-live="polite">{appUpdate
-                ? `Version ${appUpdate.version} was found automatically.`
-                : updateCheckNotice ?? "Automatic update checks are on."}</small>
-            </div>
-            <div className="popover-actions">
-              <button className="danger-action" type="button" onClick={() => void signOut()}><Icon name="logout" size={14} /> Sign out</button>
-            </div>
-          </div>
-        )}
-      </aside>
+      <AppSidebar
+        overlayTitlebar={overlayTitlebar}
+        sidebarShortcutLabel={sidebarShortcutLabel}
+        searchShortcutLabel={searchShortcutLabel}
+        searchOpen={globalSearchOpen}
+        actionsDisabled={sidebarActionsDisabled}
+        workspaceGroups={workspaceGroups}
+        standaloneSessions={groupedSidebarSessions.ungrouped}
+        collapsedWorkspaces={collapsedWorkspaces}
+        sessionCountByWorkspace={sessionCountByWorkspace}
+        menu={sidebarMenu}
+        activeSessionId={activeSessionId}
+        editingSessionId={editingSessionId}
+        renamingSessionId={renamingSessionId}
+        update={appUpdate}
+        updatePhase={updatePhase}
+        updateProgress={updateProgress}
+        updateError={updateError}
+        updateNotice={updateCheckNotice}
+        taskRunning={anySessionRunning}
+        accountProfile={accountProfile}
+        accountName={accountName}
+        accountDetail={accountDetail}
+        appVersion={appVersion}
+        engineVersion={connection?.cliVersion ?? status?.cliVersion ?? "Grok Build"}
+        connected={connection !== null}
+        connectionOpen={showConnection}
+        actions={{
+          onToggle: toggleSidebar,
+          onOpenSearch: openGlobalSearch,
+          onNewSession: (targetWorkspace) => void startNewTask(targetWorkspace),
+          onAddWorkspace: () => void chooseAndAddWorkspace(),
+          onToggleWorkspace: toggleWorkspaceGroup,
+          onMenuChange: setSidebarMenu,
+          onArchiveWorkspace: (path) => void mutateSessionHistory("archive", { workspace: path }),
+          onDeleteWorkspace: requestWorkspaceDelete,
+          onRemoveWorkspace: (path) => void removeWorkspace(path),
+          onSelectSession: (session) => void loadSession(session),
+          onStartRename: startSessionRename,
+          onRename: (sessionId, title) => void renameSession(sessionId, title),
+          onCancelRename: () => setEditingSessionId(null),
+          onArchiveSession: (sessionId) => void mutateSessionHistory("archive", { sessionId }),
+          onRestoreSession: (sessionId) => void mutateSessionHistory("restore", { sessionId }),
+          onDeleteSession: requestSessionDelete,
+          onInstallUpdate: () => void installAppUpdate(),
+          onToggleConnection: () => setShowConnection((current) => !current),
+          onOpenUsage: () => void openUsageDetails(),
+          onOpenSettings: () => {
+            setShowConnection(false);
+            setSidebarMenu(null);
+            setActiveSettingsSection("application");
+            setActiveView("settings");
+          },
+          onCheckForUpdates: () => void checkForAppUpdate(true),
+          onSignOut: () => void signOut(),
+        }}
+      />
       )}
 
       {activeView === "session" && !sidebarCollapsed && (
@@ -2335,7 +1929,7 @@ function App() {
           aria-valuemax={MAX_SIDEBAR_WIDTH}
           aria-valuenow={Math.round(sidebarWidth)}
           tabIndex={0}
-          onDoubleClick={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+          onDoubleClick={resetSidebarWidth}
           onKeyDown={resizeSidebarWithKeyboard}
           onPointerDown={startSidebarResize}
           onPointerMove={resizeSidebar}
@@ -2463,145 +2057,54 @@ function App() {
           onNavigate={scrollToHistoryMessage}
         />
 
-        <div ref={composerDock} className="composer-dock">
-          {showScrollToLatest && (
-            <button
-              className="scroll-to-latest"
-              type="button"
-              aria-label="Scroll to latest message"
-              aria-controls="task-conversation"
-              onClick={scrollToLatest}
-            >
-              <Icon name="arrow-down" size={14} />
-              <span>Latest</span>
-            </button>
-          )}
-
-          {sessionLocationEditable && (
-            <section className="session-start-config" aria-label="Session location">
-              <SessionLocationSelector
-                value={workspace}
-                workspaces={workspaceGroups.map((group) => group.path)}
-                disabled={sidebarActionsDisabled}
-                onChange={selectPendingSessionLocation}
-                onAddWorkspace={chooseAndAddWorkspace}
-              />
-            </section>
-          )}
-          <form className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`} onSubmit={submitTask}>
-          {plan.length > 0 && <PlanBlock entries={plan} active={running} />}
-          {attachments.length > 0 && (
-            <div className="attachment-tray" aria-label="Files attached to this message">
-              {attachments.map((attachment) => (
-                <div className="attachment-chip" key={attachment.path}>
-                  <span className="attachment-chip-icon"><Icon name="paperclip" size={13} /></span>
-                  <span className="attachment-chip-copy">
-                    <strong>{attachment.name}</strong>
-                    <small>{formatFileSize(attachment.size)}</small>
-                  </span>
-                  <button
-                    type="button"
-                    aria-label={`Remove ${attachment.name}`}
-                    disabled={attachmentDisabled}
-                    onClick={() => setAttachments(attachments.filter((item) => item.path !== attachment.path))}
-                  >
-                    <Icon name="x" size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          {commandSuggestions.length > 0 && (
-            <div
-              ref={commandSuggestionsList}
-              className="command-suggestions"
-              id={commandSuggestionsId}
-              role="listbox"
-              aria-label="Available Grok commands"
-            >
-              <div className="command-suggestions-heading">
-                <span className="command-suggestions-label">COMMANDS</span>
-                <small>{commandSuggestions.length} available</small>
-              </div>
-              {commandSuggestions.map((command, index) => (
-                <button
-                  type="button"
-                  role="option"
-                  id={`${commandSuggestionsId}-option-${index}`}
-                  key={command.name}
-                  data-command-index={index}
-                  aria-selected={index === activeCommandSuggestion}
-                  tabIndex={-1}
-                  onPointerMove={() => setActiveCommandSuggestion(index)}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => selectAvailableCommand(command)}
-                >
-                  <code>/{command.name}</code>
-                  <span>{command.description}</span>
-                  {command.inputHint && <small>{command.inputHint}</small>}
-                </button>
-              ))}
-              <div className="command-suggestions-help" aria-hidden="true">
-                <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
-                <span><kbd>Enter</kbd> choose</span>
-                <span><kbd>Esc</kbd> close</span>
-              </div>
-            </div>
-          )}
-          <div className="prompt-row">
-            <span className="prompt-symbol" aria-hidden="true">❯</span>
-            <textarea
-              ref={composerTextarea}
-              aria-label="Session prompt"
-              value={draft}
-              onChange={(event) => handleComposerChange(event.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              aria-autocomplete="list"
-              aria-controls={commandSuggestions.length > 0 ? commandSuggestionsId : undefined}
-              aria-expanded={commandSuggestions.length > 0}
-              aria-activedescendant={commandSuggestions.length > 0
-                ? `${commandSuggestionsId}-option-${activeCommandSuggestion}`
-                : undefined}
-              placeholder={appUpdating ? "Groky is installing an update…" : running ? "Grok is working…" : "Ask Groky to build, debug, or review"}
-              rows={2}
-              disabled={running || appUpdating || sessionTransitioning}
-            />
-          </div>
-          <div className="composer-toolbar">
-            <button
-              className="icon-button attachment-button add-context"
-              type="button"
-              aria-label="Attach files"
-              title="Attach files"
-              aria-busy={attachmentBusy}
-              disabled={attachmentDisabled || attachmentBusy}
-              onClick={() => void chooseAttachmentFiles()}
-            >
-              <Icon name="paperclip" size={16} />
-            </button>
-            <ApprovalModeSelector
-              mode={approvalMode}
-              busy={running || appUpdating || sessionTransitioning}
-              changing={activeApprovalModeChanging}
-              onChange={(nextMode) => void changeApprovalMode(nextMode)}
-            />
-            <span className="toolbar-spacer" />
-            <ModelSelector
-              connected={connection !== null}
-              models={connection?.models ?? pendingModels}
-              busy={running || appUpdating || sessionTransitioning || activeApprovalModeChanging}
-              onLoad={loadModels}
-              onChange={changeModel}
-              onReasoningChange={changeReasoningEffort}
-            />
-            {running ? (
-              <button className="send-button stop-button" type="button" aria-label="Stop" onClick={() => void cancelRun()}><Icon name="stop" size={15} /></button>
-            ) : (
-              <button className="send-button" type="submit" aria-label="Send" disabled={(!draft.trim() && attachments.length === 0) || appUpdating || sessionTransitioning || activeApprovalModeChanging}><Icon name="arrow-up" size={17} /></button>
-            )}
-          </div>
-          </form>
-        </div>
+        <SessionComposer
+          dockRef={composerDock}
+          textareaRef={composerTextarea}
+          showScrollToLatest={showScrollToLatest}
+          onScrollToLatest={scrollToLatest}
+          location={sessionLocationEditable ? {
+            value: workspace,
+            workspaces: workspaceGroups.map((group) => group.path),
+            disabled: sidebarActionsDisabled,
+            onChange: selectPendingSessionLocation,
+            onAddWorkspace: chooseAndAddWorkspace,
+          } : null}
+          running={running}
+          appUpdating={appUpdating}
+          sessionTransitioning={sessionTransitioning}
+          plan={plan}
+          attachments={attachments}
+          attachmentBusy={attachmentBusy}
+          attachmentDisabled={attachmentDisabled}
+          onChooseAttachments={() => void chooseAttachmentFiles()}
+          onRemoveAttachment={(path) => {
+            setAttachments(attachments.filter((attachment) => attachment.path !== path));
+          }}
+          commands={{
+            id: commandSuggestionsId,
+            suggestions: commandSuggestions,
+            activeIndex: activeCommandSuggestion,
+            listRef: commandSuggestionsList,
+            onActiveIndexChange: setActiveCommandSuggestion,
+            onSelect: selectAvailableCommand,
+          }}
+          draft={draft}
+          onDraftChange={handleComposerChange}
+          onPromptKeyDown={handleComposerKeyDown}
+          approvalMode={approvalMode}
+          approvalModeChanging={activeApprovalModeChanging}
+          onApprovalModeChange={(nextMode) => void changeApprovalMode(nextMode)}
+          model={{
+            connected: connection !== null,
+            models: connection?.models ?? pendingModels,
+            busy: running || appUpdating || sessionTransitioning || activeApprovalModeChanging,
+            onLoad: loadModels,
+            onChange: changeModel,
+            onReasoningChange: changeReasoningEffort,
+          }}
+          onCancel={() => void cancelRun()}
+          onSubmit={submitTask}
+        />
         </>
         )}
       </main>
@@ -2615,7 +2118,7 @@ function App() {
             aria-valuemax={MAX_SIDE_PANEL_WIDTH}
             aria-valuenow={Math.round(sidePanelWidth)}
             tabIndex={0}
-            onDoubleClick={() => setSidePanelWidth(defaultSidePanelWidth())}
+            onDoubleClick={resetSidePanelWidth}
             onKeyDown={resizeSidePanelWithKeyboard}
             onPointerDown={startSidePanelResize}
             onPointerMove={resizeSidePanel}
