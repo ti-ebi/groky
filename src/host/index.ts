@@ -20,6 +20,13 @@ import type {
   PersistedSessionSummary,
   PersistedWorkspaceSummary,
   SessionHistoryAction,
+  TerminalExitEvent,
+  TerminalInfo,
+  TerminalOutputEvent,
+  WorkspaceChangedEvent,
+  WorkspaceDirectoryListing,
+  WorkspaceFileAttachment,
+  WorkspaceFilePreview,
 } from "./types";
 
 type EventHandler<T> = (payload: T) => void;
@@ -46,6 +53,52 @@ export const host = {
   attachments: {
     choose: () => command<FileAttachment[]>("choose_attachments"),
     inspect: (paths: string[]) => command<FileAttachment[]>("inspect_attachments", { paths }),
+  },
+
+  terminal: {
+    start: (options: {
+      terminalId: string;
+      workingDirectory: string | null;
+      cols: number;
+      rows: number;
+    }) => command<TerminalInfo>("terminal_start", options),
+    write: (terminalId: string, data: number[]) => (
+      command<void>("terminal_write", { terminalId, data })
+    ),
+    resize: (terminalId: string, cols: number, rows: number) => (
+      command<void>("terminal_resize", { terminalId, cols, rows })
+    ),
+    stop: (terminalId: string) => command<void>("terminal_stop", { terminalId }),
+    onOutput: (handler: EventHandler<TerminalOutputEvent>) => (
+      subscribe("groky://terminal-output", handler)
+    ),
+    onExit: (handler: EventHandler<TerminalExitEvent>) => (
+      subscribe("groky://terminal-exit", handler)
+    ),
+  },
+
+  workspaceFiles: {
+    list: (sessionId: string, path: string) => (
+      command<WorkspaceDirectoryListing>("workspace_list_directory", { sessionId, path })
+    ),
+    preview: (sessionId: string, path: string) => (
+      command<WorkspaceFilePreview>("workspace_preview_file", { sessionId, path })
+    ),
+    watch: (sessionId: string, watchId: string) => (
+      command<void>("workspace_watch", { sessionId, watchId })
+    ),
+    unwatch: (sessionId: string, watchId: string) => (
+      command<void>("workspace_unwatch", { sessionId, watchId })
+    ),
+    openFolder: (sessionId: string, path: string) => (
+      command<void>("workspace_open_folder", { sessionId, path })
+    ),
+    inspectAttachment: (sessionId: string, path: string) => (
+      command<WorkspaceFileAttachment>("workspace_inspect_attachment", { sessionId, path })
+    ),
+    onChanged: (handler: EventHandler<WorkspaceChangedEvent>) => (
+      subscribe("groky://workspace-changed", handler)
+    ),
   },
 
   grok: {

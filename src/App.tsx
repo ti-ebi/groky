@@ -15,6 +15,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@fontsource-variable/sora/index.css";
 import "./App.css";
+import "./styles/onboarding.css";
+import "./styles/workspace.css";
 import { GlobalSearchDialog } from "./GlobalSearchDialog";
 import { TerminalPanel } from "./TerminalPanel";
 import { Onboarding } from "./onboarding/Onboarding";

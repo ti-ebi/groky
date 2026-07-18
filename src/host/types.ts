@@ -58,3 +58,61 @@ export interface ConnectionEvent {
 export interface DeviceAuthCodeEvent {
   code: string;
 }
+
+export interface TerminalInfo {
+  terminalId: string;
+  workingDirectory: string;
+  shell: string;
+}
+
+export interface TerminalOutputEvent {
+  terminalId: string;
+  data: number[];
+}
+
+export interface TerminalExitEvent {
+  terminalId: string;
+  exitCode: number | null;
+  signal: string | null;
+}
+
+export type WorkspaceFileKind = "directory" | "file" | "symlink";
+export type WorkspacePreviewKind = "font" | "image" | "pdf" | "text" | "unsupported";
+
+export interface WorkspaceFileEntry {
+  name: string;
+  path: string;
+  kind: WorkspaceFileKind;
+  size: number | null;
+  modifiedAt: number | null;
+  hidden: boolean;
+}
+
+export interface WorkspaceDirectoryListing {
+  path: string;
+  entries: WorkspaceFileEntry[];
+  truncated: boolean;
+}
+
+export interface WorkspaceChangedEvent {
+  sessionId: string;
+  paths: string[];
+}
+
+export interface WorkspaceFilePreview {
+  path: string;
+  name: string;
+  kind: WorkspacePreviewKind;
+  mimeType: string | null;
+  size: number;
+  content: string | null;
+  dataUrl: string | null;
+  truncated: boolean;
+}
+
+export interface WorkspaceFileAttachment {
+  path: string;
+  name: string;
+  size: number;
+  mimeType?: string | null;
+}

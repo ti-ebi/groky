@@ -4,19 +4,27 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentProps,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import "./files/FileExplorer.css";
+import { FilePreviewPane, type FilePreviewState } from "./files/FilePreview";
+import { host } from "./host";
+import type {
+  WorkspaceDirectoryListing,
+  WorkspaceFileAttachment,
+  WorkspaceFileEntry,
+} from "./host/types";
+import {
+  ExplorerIcon,
+  fileIconName,
+  fileVisualKind,
+  formatWorkspaceFileSize,
+  parentPath,
+} from "./files/fileVisuals";
 import { workspaceName } from "./shared/path";
 
-type WorkspaceFileKind = "directory" | "file" | "symlink";
 type DirectoryStatus = "loading" | "ready" | "error";
-type WorkspacePreviewKind = "font" | "image" | "pdf" | "text" | "unsupported";
 
 const DEFAULT_PREVIEW_WIDTH_RATIO = 0.62;
 const MIN_PREVIEW_PANE_WIDTH = 190;
@@ -41,21 +49,6 @@ function defaultPreviewPaneWidth(containerWidth: number) {
   return clampPreviewPaneWidth(containerWidth * DEFAULT_PREVIEW_WIDTH_RATIO, containerWidth);
 }
 
-interface WorkspaceFileEntry {
-  name: string;
-  path: string;
-  kind: WorkspaceFileKind;
-  size: number | null;
-  modifiedAt: number | null;
-  hidden: boolean;
-}
-
-interface WorkspaceDirectoryListing {
-  path: string;
-  entries: WorkspaceFileEntry[];
-  truncated: boolean;
-}
-
 interface DirectoryState {
   status: DirectoryStatus;
   entries: WorkspaceFileEntry[];
@@ -63,101 +56,9 @@ interface DirectoryState {
   error?: string;
 }
 
-interface WorkspaceChangedEvent {
-  sessionId: string;
-  paths: string[];
-}
-
-interface WorkspaceFilePreview {
-  path: string;
-  name: string;
-  kind: WorkspacePreviewKind;
-  mimeType: string | null;
-  size: number;
-  content: string | null;
-  dataUrl: string | null;
-  truncated: boolean;
-}
-
-type FilePreviewState =
-  | { status: "loading"; entry: WorkspaceFileEntry }
-  | { status: "ready"; entry: WorkspaceFileEntry; preview: WorkspaceFilePreview }
-  | { status: "error"; entry: WorkspaceFileEntry; error: string };
-
-export interface WorkspaceFileAttachment {
-  path: string;
-  name: string;
-  size: number;
-  mimeType?: string | null;
-}
-
 interface VisibleFileRow {
   entry: WorkspaceFileEntry;
   depth: number;
-}
-
-type ExplorerIconName =
-  | "chevron"
-  | "code"
-  | "eye"
-  | "eye-off"
-  | "file"
-  | "folder"
-  | "folder-open"
-  | "image"
-  | "link"
-  | "open"
-  | "paperclip"
-  | "settings";
-
-function ExplorerIcon({ name, size = 15 }: { name: ExplorerIconName; size?: number }) {
-  return (
-    <svg
-      aria-hidden="true"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      {name === "chevron" && <path d="m9 6 6 6-6 6" />}
-      {name === "code" && <><path d="m9 8-4 4 4 4" /><path d="m15 8 4 4-4 4" /></>}
-      {name === "eye" && <><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></>}
-      {name === "eye-off" && <><path d="m4 4 16 16" /><path d="M10.6 6.2A9 9 0 0 1 12 6c6.1 0 9.5 6 9.5 6a13 13 0 0 1-2.1 2.8M6.2 7.2C3.8 9 2.5 12 2.5 12s3.4 6 9.5 6a9 9 0 0 0 3.1-.5" /><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" /></>}
-      {name === "file" && <><path d="M6 3h8l4 4v14H6Z" /><path d="M14 3v5h5" /></>}
-      {name === "folder" && <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />}
-      {name === "folder-open" && <><path d="M3 9V7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1" /><path d="m3 10 2 9h14l2-9Z" /></>}
-      {name === "image" && <><rect x="4" y="4" width="16" height="16" rx="2" /><circle cx="9" cy="9" r="1.5" /><path d="m5 17 4-4 3 3 2-2 5 4" /></>}
-      {name === "link" && <><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1" /><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1" /></>}
-      {name === "open" && <><path d="M14 4h6v6" /><path d="m20 4-9 9" /><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" /></>}
-      {name === "paperclip" && <path d="m20 11.5-8.6 8.6a5 5 0 0 1-7-7l9.3-9.3a3.5 3.5 0 1 1 5 5l-8.7 8.7a2 2 0 0 1-2.8-2.8l8-8" />}
-      {name === "settings" && <><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></>}
-    </svg>
-  );
-}
-
-function fileVisualKind(entry: WorkspaceFileEntry) {
-  if (entry.kind === "directory") return "folder";
-  if (entry.kind === "symlink") return "link";
-  const extension = entry.name.split(".").pop()?.toLowerCase() ?? "";
-  if (["avif", "gif", "ico", "jpeg", "jpg", "png", "svg", "webp"].includes(extension)) return "image";
-  if (["c", "cpp", "css", "go", "html", "java", "js", "jsx", "json", "md", "py", "rs", "sh", "sql", "toml", "ts", "tsx", "vue", "yaml", "yml"].includes(extension)) return "code";
-  if (["env", "ini", "lock", "properties", "xml"].includes(extension) || entry.name.startsWith(".")) return "settings";
-  return "file";
-}
-
-function fileIconName(entry: WorkspaceFileEntry, expanded: boolean): ExplorerIconName {
-  const visualKind = fileVisualKind(entry);
-  if (visualKind === "folder") return expanded ? "folder-open" : "folder";
-  return visualKind;
-}
-
-function parentPath(path: string) {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? "" : path.slice(0, separator);
 }
 
 function directoryMatchesListing(
@@ -177,473 +78,6 @@ function directoryMatchesListing(
         && entry.modifiedAt === next.modifiedAt
         && entry.hidden === next.hidden;
     });
-}
-
-function formatFileSize(bytes: number | null) {
-  if (bytes === null) return "";
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(bytes < 10_240 ? 1 : 0)} KB`;
-  return `${(bytes / 1_048_576).toFixed(bytes < 10_485_760 ? 1 : 0)} MB`;
-}
-
-function previewDescription(preview: WorkspaceFilePreview) {
-  if (preview.kind === "text") {
-    const lineCount = (preview.content?.match(/\n/g)?.length ?? 0) + 1;
-    return `${lineCount.toLocaleString()} ${lineCount === 1 ? "line" : "lines"}`;
-  }
-  return preview.mimeType ?? "Unknown format";
-}
-
-function unsupportedPreviewMessage(preview: WorkspaceFilePreview) {
-  if (preview.mimeType?.startsWith("audio/")) return "Audio preview is not supported.";
-  if (preview.mimeType?.startsWith("video/")) return "Video preview is not supported.";
-  if (preview.truncated) return "This file is too large for an in-app preview.";
-  return "You can still attach this file to your next message.";
-}
-
-interface SyntaxHighlightWorkerResponse {
-  id: number;
-  html?: string;
-  language?: string;
-  error?: string;
-}
-
-interface SyntaxHighlightResult {
-  html: string;
-  language: string;
-}
-
-let syntaxHighlightWorker: Worker | null = null;
-let syntaxHighlightRequestId = 0;
-const syntaxHighlightRequests = new Map<
-  number,
-  { resolve: (result: SyntaxHighlightResult) => void; reject: (error: Error) => void }
->();
-
-function getSyntaxHighlightWorker() {
-  if (syntaxHighlightWorker) return syntaxHighlightWorker;
-  const worker = new Worker(new URL("./syntaxHighlight.worker.ts", import.meta.url), { type: "module" });
-  worker.addEventListener("message", (event: MessageEvent<SyntaxHighlightWorkerResponse>) => {
-    const request = syntaxHighlightRequests.get(event.data.id);
-    if (!request) return;
-    syntaxHighlightRequests.delete(event.data.id);
-    if (event.data.error || event.data.html === undefined) {
-      request.reject(new Error(event.data.error ?? "Syntax highlighting failed."));
-      return;
-    }
-    request.resolve({
-      html: event.data.html,
-      language: event.data.language ?? "plaintext",
-    });
-  });
-  worker.addEventListener("error", () => {
-    syntaxHighlightRequests.forEach(({ reject }) => reject(new Error("Syntax highlighting failed.")));
-    syntaxHighlightRequests.clear();
-    worker.terminate();
-    if (syntaxHighlightWorker === worker) syntaxHighlightWorker = null;
-  });
-  syntaxHighlightWorker = worker;
-  return worker;
-}
-
-function requestSyntaxHighlight(code: string, language: string | null) {
-  const id = ++syntaxHighlightRequestId;
-  const promise = new Promise<SyntaxHighlightResult>((resolve, reject) => {
-    syntaxHighlightRequests.set(id, { resolve, reject });
-  });
-  getSyntaxHighlightWorker().postMessage({ id, code, language });
-  return promise;
-}
-
-const LANGUAGE_BY_EXTENSION: Record<string, string> = {
-  astro: "xml",
-  bash: "bash",
-  c: "c",
-  cc: "cpp",
-  clj: "clojure",
-  cljs: "clojure",
-  cmake: "cmake",
-  conf: "ini",
-  cpp: "cpp",
-  cs: "csharp",
-  css: "css",
-  diff: "diff",
-  dockerfile: "dockerfile",
-  ex: "elixir",
-  exs: "elixir",
-  fs: "fsharp",
-  fsx: "fsharp",
-  go: "go",
-  graphql: "graphql",
-  gql: "graphql",
-  h: "c",
-  hpp: "cpp",
-  hs: "haskell",
-  htm: "xml",
-  html: "xml",
-  http: "http",
-  ini: "ini",
-  java: "java",
-  js: "javascript",
-  jsx: "javascript",
-  json: "json",
-  json5: "json",
-  kt: "kotlin",
-  kts: "kotlin",
-  less: "less",
-  lua: "lua",
-  m: "objectivec",
-  mjs: "javascript",
-  mm: "objectivec",
-  php: "php",
-  pl: "perl",
-  pm: "perl",
-  ps1: "powershell",
-  py: "python",
-  r: "r",
-  rb: "ruby",
-  rs: "rust",
-  sass: "scss",
-  scala: "scala",
-  scss: "scss",
-  sh: "bash",
-  sql: "sql",
-  svelte: "xml",
-  swift: "swift",
-  toml: "toml",
-  ts: "typescript",
-  tsx: "typescript",
-  vue: "xml",
-  wasm: "wasm",
-  xml: "xml",
-  yaml: "yaml",
-  yml: "yaml",
-  zsh: "bash",
-};
-
-function fileExtension(name: string) {
-  const separator = name.lastIndexOf(".");
-  return separator > 0 ? name.slice(separator + 1).toLowerCase() : "";
-}
-
-function isMarkdownFile(name: string) {
-  return ["markdown", "md", "mdown", "mdx", "mkdn"].includes(fileExtension(name));
-}
-
-function syntaxLanguageForFile(name: string) {
-  const normalizedName = name.toLowerCase();
-  if (["dockerfile", "containerfile"].includes(normalizedName)) return "dockerfile";
-  if (["makefile", "gnumakefile"].includes(normalizedName)) return "makefile";
-  if (normalizedName === "cmakelists.txt") return "cmake";
-  if (normalizedName === "cargo.lock") return "toml";
-  if (normalizedName === "package-lock.json") return "json";
-  if (["pnpm-lock.yaml", "yarn.lock"].includes(normalizedName)) return "yaml";
-  if (normalizedName === ".env" || normalizedName.startsWith(".env.")) return "bash";
-  const extension = fileExtension(normalizedName);
-  if (["csv", "log", "text", "tsv", "txt"].includes(extension)) return "plaintext";
-  if (normalizedName.startsWith(".")) return "plaintext";
-  return LANGUAGE_BY_EXTENSION[extension] ?? null;
-}
-
-function useSyntaxHighlight(code: string, language: string | null) {
-  const [highlighted, setHighlighted] = useState<SyntaxHighlightResult | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    setHighlighted(null);
-    setFailed(false);
-    void requestSyntaxHighlight(code, language)
-      .then((result) => {
-        if (active) setHighlighted(result);
-      })
-      .catch(() => {
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, [code, language]);
-
-  return { failed, highlighted };
-}
-
-function SyntaxHighlightedCode({ code, name }: { code: string; name: string }) {
-  const { failed, highlighted } = useSyntaxHighlight(code, syntaxLanguageForFile(name));
-
-  return (
-    <div className="file-preview-text-stage" data-highlighting={!highlighted && !failed || undefined}>
-      <pre tabIndex={0}>
-        {highlighted ? (
-          <code
-            className={`hljs language-${highlighted.language}`}
-            dangerouslySetInnerHTML={{ __html: highlighted.html }}
-          />
-        ) : <code>{code}</code>}
-      </pre>
-      {!highlighted && !failed && <span className="file-preview-highlighting">Highlighting…</span>}
-    </div>
-  );
-}
-
-function MarkdownHighlightedCode({ code, language }: { code: string; language: string }) {
-  const { highlighted } = useSyntaxHighlight(code, language);
-  if (!highlighted) return <code className={`language-${language}`}>{code}</code>;
-  return (
-    <code
-      className={`hljs language-${highlighted.language}`}
-      dangerouslySetInnerHTML={{ __html: highlighted.html }}
-    />
-  );
-}
-
-function MarkdownCode({ children, className, ...props }: ComponentProps<"code">) {
-  const match = /language-([\w-]+)/.exec(className ?? "");
-  if (!match) return <code className={className} {...props}>{children}</code>;
-  const code = String(children).replace(/\n$/, "");
-  return <MarkdownHighlightedCode code={code} language={match[1]} />;
-}
-
-function resolveMarkdownAssetPath(markdownPath: string, source: string) {
-  if (!source || source.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(source)) return null;
-  let decodedSource: string;
-  try {
-    decodedSource = decodeURIComponent(source.split(/[?#]/, 1)[0]);
-  } catch {
-    return null;
-  }
-  const segments = parentPath(markdownPath).split("/").filter(Boolean);
-  for (const segment of decodedSource.replace(/\\/g, "/").split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === "..") {
-      if (segments.length === 0) return null;
-      segments.pop();
-    } else {
-      segments.push(segment);
-    }
-  }
-  return segments.join("/");
-}
-
-function WorkspaceMarkdownImage({
-  alt,
-  markdownPath,
-  sessionId,
-  source,
-  title,
-}: {
-  alt: string;
-  markdownPath: string;
-  sessionId: string;
-  source: string;
-  title?: string;
-}) {
-  const [dataUrl, setDataUrl] = useState<string | null>(source.startsWith("data:image/") ? source : null);
-  const [unavailable, setUnavailable] = useState(false);
-
-  useEffect(() => {
-    if (source.startsWith("data:image/")) {
-      setDataUrl(source);
-      setUnavailable(false);
-      return;
-    }
-    const path = resolveMarkdownAssetPath(markdownPath, source);
-    if (!path) {
-      setDataUrl(null);
-      setUnavailable(true);
-      return;
-    }
-    let active = true;
-    setDataUrl(null);
-    setUnavailable(false);
-    void invoke<WorkspaceFilePreview>("workspace_preview_file", { sessionId, path })
-      .then((preview) => {
-        if (!active) return;
-        if (preview.kind === "image" && preview.dataUrl) setDataUrl(preview.dataUrl);
-        else setUnavailable(true);
-      })
-      .catch(() => {
-        if (active) setUnavailable(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, [markdownPath, sessionId, source]);
-
-  if (dataUrl) return <img alt={alt} src={dataUrl} title={title} loading="lazy" />;
-  return (
-    <span className="file-preview-markdown-media" title={source}>
-      {unavailable ? "Image unavailable" : "Loading image…"}{alt ? ` · ${alt}` : ""}
-    </span>
-  );
-}
-
-function WorkspaceMarkdown({
-  children,
-  path,
-  sessionId,
-}: {
-  children: string;
-  path: string;
-  sessionId: string;
-}) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      skipHtml
-      components={{
-        a: ({ children: linkText, href, title }) => href && /^(https?|mailto):/i.test(href) ? (
-          <a href={href} title={title} target="_blank" rel="noopener noreferrer">{linkText}</a>
-        ) : <span className="file-preview-markdown-link" title={href}>{linkText}</span>,
-        code: MarkdownCode,
-        img: ({ alt, src, title }) => src ? (
-          <WorkspaceMarkdownImage
-            alt={alt ?? ""}
-            markdownPath={path}
-            sessionId={sessionId}
-            source={src}
-            title={title}
-          />
-        ) : null,
-      }}
-    >
-      {children}
-    </ReactMarkdown>
-  );
-}
-
-function FontPreview({ dataUrl, name }: { dataUrl: string; name: string }) {
-  const [family] = useState(() => `GrokyPreviewFont-${Math.random().toString(36).slice(2)}`);
-  const [loaded, setLoaded] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    const previewFont = new FontFace(family, `url("${dataUrl}")`);
-    void previewFont.load().then((font) => {
-      if (!active) return;
-      document.fonts.add(font);
-      setLoaded(true);
-    }).catch(() => {
-      if (active) setLoaded(false);
-    });
-    return () => {
-      active = false;
-      document.fonts.delete(previewFont);
-    };
-  }, [dataUrl, family]);
-
-  return (
-    <div className="file-preview-font-stage" style={loaded ? { fontFamily: `"${family}"` } : undefined}>
-      <small>{loaded ? name : "Loading font…"}</small>
-      <strong>Aa</strong>
-      <p>Sphinx of black quartz, judge my vow.</p>
-      <span>ABCDEFGHIJKLMNOPQRSTUVWXYZ</span>
-      <span>abcdefghijklmnopqrstuvwxyz</span>
-      <span>0123456789 !?&amp;@#%$</span>
-    </div>
-  );
-}
-
-function FilePreviewPane({
-  state,
-  sessionId,
-  attachmentDisabled,
-  attaching,
-  onAttach,
-}: {
-  state: FilePreviewState | null;
-  sessionId: string;
-  attachmentDisabled: boolean;
-  attaching: boolean;
-  onAttach: (entry: WorkspaceFileEntry) => void;
-}) {
-  const entry = state?.entry ?? null;
-  const preview = state?.status === "ready" ? state.preview : null;
-  const previewSize = preview?.size ?? entry?.size ?? null;
-
-  return (
-    <aside className="file-preview-pane" aria-label={entry ? `Preview of ${entry.name}` : "File preview"}>
-      <header className="file-preview-header">
-        <span className="file-preview-kind" data-file-kind={entry ? fileVisualKind(entry) : "file"}>
-          <ExplorerIcon name={entry ? fileIconName(entry, false) : "file"} size={16} />
-        </span>
-        <div className="file-preview-heading" title={entry?.path}>
-          <span>PREVIEW</span>
-          <strong>{entry?.name ?? "Select a file"}</strong>
-        </div>
-        {entry?.kind === "file" && (
-          <button
-            type="button"
-            className="file-preview-attach"
-            disabled={attachmentDisabled || attaching}
-            onClick={() => onAttach(entry)}
-          >
-            <ExplorerIcon name="paperclip" size={13} />
-            <span>{attaching ? "Attaching…" : "Attach"}</span>
-          </button>
-        )}
-      </header>
-
-      <div className="file-preview-content" data-preview-kind={preview?.kind} data-preview-status={state?.status}>
-        {!state && (
-          <div className="file-preview-message file-preview-welcome" role="status">
-            <span><ExplorerIcon name="file" size={20} /></span>
-            <strong>Select a file to preview</strong>
-            <p>The preview stays open while you browse folders in the tree.</p>
-          </div>
-        )}
-        {state?.status === "loading" && entry && (
-          <div className="file-preview-loading" role="status" aria-live="polite">
-            <span className="file-preview-loading-mark"><ExplorerIcon name={fileIconName(entry, false)} size={22} /></span>
-            <strong>Preparing preview…</strong>
-            <small>{entry.name}</small>
-          </div>
-        )}
-        {state?.status === "error" && (
-          <div className="file-preview-message" role="alert">
-            <span><ExplorerIcon name="file" size={20} /></span>
-            <strong>Preview unavailable</strong>
-            <p>{state.error}</p>
-          </div>
-        )}
-        {preview?.kind === "image" && preview.dataUrl && (
-          <div className="file-preview-image-stage">
-            <img src={preview.dataUrl} alt={`Preview of ${preview.name}`} />
-          </div>
-        )}
-        {preview?.kind === "pdf" && preview.dataUrl && (
-          <iframe className="file-preview-pdf-stage" src={preview.dataUrl} title={`Preview of ${preview.name}`} />
-        )}
-        {preview?.kind === "font" && preview.dataUrl && (
-          <FontPreview dataUrl={preview.dataUrl} name={preview.name} />
-        )}
-        {preview?.kind === "text" && preview.content !== null && isMarkdownFile(preview.name) && (
-          <article className="file-preview-markdown">
-            <WorkspaceMarkdown path={preview.path} sessionId={sessionId}>{preview.content}</WorkspaceMarkdown>
-          </article>
-        )}
-        {preview?.kind === "text" && preview.content !== null && !isMarkdownFile(preview.name) && (
-          <SyntaxHighlightedCode code={preview.content} name={preview.name} />
-        )}
-        {preview?.kind === "unsupported" && (
-          <div className="file-preview-message" role="status">
-            <span><ExplorerIcon name={entry ? fileIconName(entry, false) : "file"} size={20} /></span>
-            <strong>{preview.truncated ? "File is too large to preview" : "No preview available"}</strong>
-            <p>{unsupportedPreviewMessage(preview)}</p>
-          </div>
-        )}
-      </div>
-
-      <footer className="file-preview-footer">
-        <span title={entry?.path}>{entry?.path ?? "Choose a file from the tree"}</span>
-        <div>
-          {preview?.truncated && preview.kind === "text" && <em>First 512 KB</em>}
-          {preview && <small>{previewDescription(preview)}</small>}
-          {previewSize !== null && <small>{formatFileSize(previewSize)}</small>}
-        </div>
-      </footer>
-    </aside>
-  );
 }
 
 export function FileExplorer({
@@ -735,10 +169,7 @@ export function FileExplorer({
     }
 
     try {
-      const listing = await invoke<WorkspaceDirectoryListing>("workspace_list_directory", {
-        sessionId,
-        path,
-      });
+      const listing = await host.workspaceFiles.list(sessionId, path);
       if (generation !== requestGeneration.current) return;
       commitDirectories((current) => {
         const previous = current[path];
@@ -853,10 +284,7 @@ export function FileExplorer({
     setSelectedPath(entry.path);
     if (!background) setPreviewState({ status: "loading", entry });
     try {
-      const preview = await invoke<WorkspaceFilePreview>("workspace_preview_file", {
-        sessionId,
-        path: entry.path,
-      });
+      const preview = await host.workspaceFiles.preview(sessionId, entry.path);
       if (generation === previewGeneration.current) {
         setPreviewState({ status: "ready", entry, preview });
       }
@@ -871,7 +299,7 @@ export function FileExplorer({
     if (!active || !sessionId) return;
 
     let disposed = false;
-    let unlisten: UnlistenFn | undefined;
+    let unlisten: (() => void) | undefined;
     let refreshTimer = 0;
     let refreshAll = false;
     const changedPaths = new Set<string>();
@@ -916,13 +344,13 @@ export function FileExplorer({
       }, 140);
     };
 
-    void listen<WorkspaceChangedEvent>("groky://workspace-changed", ({ payload }) => {
+    void host.workspaceFiles.onChanged((payload) => {
       if (payload.sessionId === sessionId) scheduleRefresh(payload.paths);
     }).then((stopListening) => {
       if (disposed) stopListening();
       else unlisten = stopListening;
     });
-    void invoke("workspace_watch", { sessionId, watchId }).catch(() => undefined);
+    void host.workspaceFiles.watch(sessionId, watchId).catch(() => undefined);
 
     const reconciliationTimer = window.setInterval(() => scheduleRefresh([]), 15_000);
     return () => {
@@ -930,7 +358,7 @@ export function FileExplorer({
       window.clearTimeout(refreshTimer);
       window.clearInterval(reconciliationTimer);
       unlisten?.();
-      void invoke("workspace_unwatch", { sessionId, watchId }).catch(() => undefined);
+      void host.workspaceFiles.unwatch(sessionId, watchId).catch(() => undefined);
     };
   }, [active, loadDirectory, previewFile, sessionId]);
 
@@ -948,7 +376,7 @@ export function FileExplorer({
     setOpeningFolder(true);
     setNotice(null);
     try {
-      await invoke("workspace_open_folder", { sessionId, path: folderToOpen });
+      await host.workspaceFiles.openFolder(sessionId, folderToOpen);
       setNotice(selectedEntry && selectedEntry.kind !== "directory"
         ? `Opened the folder containing ${selectedEntry.name}.`
         : "Opened the selected folder in the system file manager.");
@@ -965,10 +393,7 @@ export function FileExplorer({
     setAttachingPath(entry.path);
     setNotice(null);
     try {
-      const attachment = await invoke<WorkspaceFileAttachment>("workspace_inspect_attachment", {
-        sessionId,
-        path: entry.path,
-      });
+      const attachment = await host.workspaceFiles.inspectAttachment(sessionId, entry.path);
       if (generation !== requestGeneration.current) return;
       const added = onAttach(attachment);
       setNotice(added ? `${entry.name} attached to the next message.` : `${entry.name} is already attached.`);
@@ -1232,7 +657,7 @@ export function FileExplorer({
                 <ExplorerIcon name={fileIconName(selectedEntry, expanded.has(selectedEntry.path))} size={13} />
               </span>
               <span>{selectedEntry.path}</span>
-              {selectedEntry.kind === "file" && <small>{formatFileSize(selectedEntry.size)}</small>}
+              {selectedEntry.kind === "file" && <small>{formatWorkspaceFileSize(selectedEntry.size)}</small>}
             </>
           ) : <span>No file selected</span>}
         </div>
