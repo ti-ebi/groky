@@ -115,6 +115,7 @@ export function SettingsScreen({
   onSignOut,
   onRestoreArchived,
   onDeleteArchived,
+  onDeleteAllArchived,
 }: {
   overlayTitlebar: boolean;
   section: SettingsSection;
@@ -135,6 +136,7 @@ export function SettingsScreen({
   onSignOut: () => void;
   onRestoreArchived: (sessionId: string) => void;
   onDeleteArchived: (session: SidebarSessionSummary) => void;
+  onDeleteAllArchived: () => void;
 }) {
   const [archivedQuery, setArchivedQuery] = useState("");
   const [archivedSort, setArchivedSort] = useState<ArchivedSessionSort>("updated-desc");
@@ -294,6 +296,18 @@ export function SettingsScreen({
                 <h2 id="archived-settings-title">Archived chats</h2>
                 <p>Chats kept outside the main sidebar.</p>
               </div>
+              {archivedSessions.length > 0 && (
+                <button
+                  className="archived-delete-all"
+                  type="button"
+                  aria-label={`Delete all ${archivedSessions.length} archived ${archivedSessions.length === 1 ? "chat" : "chats"}`}
+                  disabled={archivedActionsDisabled}
+                  onClick={onDeleteAllArchived}
+                >
+                  <Icon name="trash" size={13} />
+                  Delete all
+                </button>
+              )}
             </header>
             {archivedSessions.length > 0 ? (
               <div className="archived-settings-browser">

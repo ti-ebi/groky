@@ -113,6 +113,7 @@ function commandTokenAtEnd(draft: string): CommandToken | null {
 interface DeleteConfirmation {
   sessionId?: string;
   workspace?: string;
+  allArchived?: boolean;
   title: string;
   description: string;
 }
@@ -1280,19 +1281,17 @@ function App() {
 
   async function mutateSessionHistory(
     action: SessionHistoryAction,
-    target: { sessionId?: string; workspace?: string },
+    target: { sessionId?: string; workspace?: string; allArchived?: boolean },
   ) {
     if (sidebarActionsDisabled) return;
-    const affectsActive = connection !== null && (
-      target.sessionId === connection.sessionId
-      || (target.workspace !== undefined && target.workspace === connection.workspace)
-    );
     const affectedSessionIds = sessionHistory
       .filter((session) =>
         target.sessionId === session.sessionId
         || (target.workspace !== undefined && target.workspace === session.workspace)
+        || (target.allArchived === true && session.archived)
       )
       .map((session) => session.sessionId);
+    const affectsActive = connection !== null && affectedSessionIds.includes(connection.sessionId);
     setSidebarMenu(null);
     setHistoryMutating(true);
     setConnectionNotice(null);
@@ -1301,6 +1300,7 @@ function App() {
         action,
         sessionId: target.sessionId,
         workspace: target.workspace,
+        allArchived: target.allArchived,
       });
       setSessionHistory(sessions);
       if (action === "delete") {
@@ -1384,6 +1384,16 @@ function App() {
     });
   }
 
+  function requestArchivedSessionsDelete() {
+    const count = archivedSidebarSessions.length;
+    if (count === 0) return;
+    setDeleteConfirmation({
+      allArchived: true,
+      title: count === 1 ? "Delete the archived chat?" : `Delete all ${count} archived chats?`,
+      description: `${count} archived ${count === 1 ? "chat" : "chats"} will be removed from Groky history. This cannot be undone.`,
+    });
+  }
+
   async function confirmDelete() {
     const target = deleteConfirmation;
     if (!target) return;
@@ -1391,6 +1401,7 @@ function App() {
     await mutateSessionHistory("delete", {
       sessionId: target.sessionId,
       workspace: target.workspace,
+      allArchived: target.allArchived,
     });
   }
 
@@ -1962,6 +1973,7 @@ function App() {
             onSignOut={() => void signOut()}
             onRestoreArchived={(sessionId) => void mutateSessionHistory("restore", { sessionId })}
             onDeleteArchived={(session) => requestSessionDelete(session)}
+            onDeleteAllArchived={requestArchivedSessionsDelete}
           />
         ) : (
         <>
