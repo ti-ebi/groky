@@ -26,10 +26,41 @@ import { TerminalPanel } from "./TerminalPanel";
 import {
   combineTimings,
   elapsedForTiming,
-  finishTiming,
-  startTiming,
   type EventTiming,
 } from "./timing";
+import {
+  addFallbackThought,
+  applySessionUpdateToMessage,
+  finishRun,
+  isActiveToolStatus,
+  makeMessageId,
+  reconcileFallbackResponse,
+  sessionReplayProjection,
+  stateFromStopReason,
+  terminalToolStatus,
+} from "./session/projection";
+import type {
+  ApprovalMode,
+  AvailableCommand,
+  Connection,
+  ConversationMessage,
+  ConversationState,
+  FileAttachment,
+  LoadSessionResult,
+  PermissionOption,
+  PermissionRequest,
+  PlanEntry,
+  PromptResult,
+  ReasoningEffortInfo,
+  SessionConfigOption,
+  SessionModelState,
+  SessionReplayProjection,
+  SessionUpdate,
+  SessionUsage,
+  SessionViewState,
+  ToolActivity,
+  TurnTimelineItem,
+} from "./session/types";
 
 const INITIAL_UPDATE_CHECK_DELAY_MS = 1_200;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1_000;
@@ -91,65 +122,6 @@ const demoAccountProfile: AccountProfile | null = import.meta.env.DEV
   ? { displayName: "Alex Morgan", email: "alex@example.com" }
   : null;
 
-interface Connection {
-  sessionId: string;
-  workspace: string | null;
-  workingDirectory: string;
-  cliVersion: string;
-  approvalMode: ApprovalMode;
-  models: SessionModelState | null;
-  availableCommands: AvailableCommand[];
-}
-
-interface SessionModelState {
-  currentModelId: string;
-  availableModels: ModelInfo[];
-}
-
-interface ModelInfo {
-  modelId: string;
-  name: string;
-  description?: string | null;
-  metadata?: ModelMetadata | null;
-}
-
-interface ModelMetadata {
-  totalContextTokens?: number | null;
-  agentType?: string | null;
-  supportsReasoningEffort?: boolean | null;
-  reasoningEffort?: string | null;
-  reasoningEfforts?: ReasoningEffortInfo[] | null;
-}
-
-interface ReasoningEffortInfo {
-  id: string;
-  value: string;
-  label: string;
-  description?: string | null;
-  default?: boolean;
-}
-
-interface PromptResult {
-  stopReason: StopReason;
-  text: string;
-  thought: string;
-}
-
-type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled" | "unknown";
-type ToolStatus = "pending" | "in_progress" | "completed" | "failed" | "cancelled";
-type ConversationState = "streaming" | "historical" | "complete" | "cancelled" | "refused" | "limited" | "error";
-
-interface ToolLocation {
-  path: string;
-  line?: number | null;
-}
-
-interface AvailableCommand {
-  name: string;
-  description: string;
-  inputHint?: string | null;
-}
-
 interface CommandToken {
   query: string;
   start: number;
@@ -164,64 +136,6 @@ function commandTokenAtEnd(draft: string): CommandToken | null {
   };
 }
 
-interface SessionConfigOption {
-  id: string;
-  name: string;
-  description?: string | null;
-  category?: string | null;
-  value?: boolean | null;
-}
-
-interface SessionUsage {
-  used: number;
-  size: number;
-  cost?: { amount: number; currency: string } | null;
-}
-
-interface TurnMetrics {
-  totalTokens?: number | null;
-  outputTokens?: number | null;
-  reasoningTokens?: number | null;
-  modelCalls?: number | null;
-  apiDurationMs?: number | null;
-}
-
-type SessionUpdate = { sessionId: string } & (
-  | { kind: "user_message_chunk"; text: string; attachments?: MessageAttachment[] }
-  | { kind: "agent_message_chunk" | "agent_thought_chunk"; text: string }
-  | {
-      kind: "tool_call" | "tool_call_update";
-      toolCallId: string;
-      title?: string | null;
-      toolKind?: string | null;
-      status?: ToolStatus | null;
-      locations?: ToolLocation[] | null;
-    }
-  | { kind: "plan"; entries: PlanEntry[] }
-  | { kind: "available_commands_update"; availableCommands: AvailableCommand[] }
-  | { kind: "current_mode_update"; currentModeId: string }
-  | { kind: "config_option_update"; configOptions: SessionConfigOption[] }
-  | { kind: "session_info_update"; title?: string | null; updatedAt?: string | null }
-  | { kind: "usage_update"; used: number; size: number; cost?: SessionUsage["cost"] }
-  | { kind: "turn_completed"; stopReason: StopReason; metrics?: TurnMetrics | null }
-  | {
-      kind: "permission_requested";
-      requestId: string;
-      toolCallId: string;
-      title: string;
-      toolKind?: string | null;
-      options: PermissionOption[];
-    }
-  | {
-      kind: "permission_decision";
-      requestId: string;
-      toolCallId: string;
-      title: string;
-      label: string;
-      outcome: PermissionDecision["outcome"];
-    }
-);
-
 interface ConnectionEvent {
   status: "connected" | "disconnected";
   message?: string | null;
@@ -230,100 +144,6 @@ interface ConnectionEvent {
 
 interface DeviceAuthCodeEvent {
   code: string;
-}
-
-interface PermissionOption {
-  optionId: string;
-  name: string;
-  kind: string;
-}
-
-interface PermissionRequest {
-  requestId: string;
-  sessionId: string;
-  toolCallId: string;
-  title: string;
-  toolKind?: string | null;
-  options: PermissionOption[];
-}
-
-interface ToolActivity extends EventTiming {
-  id: string;
-  title: string;
-  kind?: string;
-  status: ToolStatus;
-  locations?: ToolLocation[];
-}
-
-interface PlanEntry {
-  content: string;
-  status: "pending" | "in_progress" | "completed";
-  priority?: "low" | "medium" | "high" | null;
-}
-
-interface PermissionDecision {
-  requestId: string;
-  toolCallId: string;
-  title: string;
-  label: string;
-  outcome: "allowed" | "rejected" | "dismissed";
-}
-
-type TurnTimelineItem =
-  | ({
-      id: string;
-      kind: "thought";
-      text: string;
-      open: boolean;
-    } & EventTiming)
-  | { id: string; kind: "response"; text: string }
-  | { id: string; kind: "tool"; tool: ToolActivity }
-  | ({
-      id: string;
-      kind: "permission";
-      requestId: string;
-      toolCallId: string;
-      title: string;
-      decision?: PermissionDecision;
-    } & EventTiming);
-
-interface MessageAttachment {
-  name: string;
-  size: number;
-  mimeType?: string | null;
-}
-
-interface FileAttachment extends MessageAttachment {
-  path: string;
-}
-
-interface ConversationMessage {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  startedAt?: number;
-  elapsedMs?: number;
-  timeline?: TurnTimelineItem[];
-  attachments?: MessageAttachment[];
-  metrics?: TurnMetrics;
-  stopReason?: StopReason;
-  state?: ConversationState;
-  error?: string;
-}
-
-interface SessionViewState {
-  connection: Connection;
-  disconnected: boolean;
-  messages: ConversationMessage[];
-  draft: string;
-  attachments: FileAttachment[];
-  running: boolean;
-  permissions: PermissionRequest[];
-  availableCommands: AvailableCommand[];
-  currentModeId: string | null;
-  configOptions: SessionConfigOption[];
-  usage: SessionUsage | null;
-  plan: PlanEntry[];
 }
 
 interface ConversationTurnPreview {
@@ -361,11 +181,6 @@ interface PersistedWorkspaceSummary {
   path: string;
 }
 
-interface LoadSessionResult {
-  connection: Connection;
-  updates: SessionUpdate[];
-}
-
 type SidebarMenu =
   | { kind: "workspace"; path: string }
   | { kind: "session"; sessionId: string }
@@ -385,89 +200,6 @@ interface AppUpdateInfo {
   version: string;
   body: string | null;
   date: string | null;
-}
-
-function finishThought(message: ConversationMessage, endedAt: number) {
-  const timeline = message.timeline?.flatMap((item) => {
-    if (item.kind !== "thought" || !item.open) return [item];
-    if (!item.text.trim()) return [];
-    return [{
-      ...item,
-      open: false,
-      ...finishTiming(item, endedAt),
-    }];
-  });
-  return {
-    ...message,
-    timeline,
-  };
-}
-
-function addFallbackThought(message: ConversationMessage, thought: string) {
-  if (!thought || message.timeline?.some((item) => item.kind === "thought")) return message;
-  return {
-    ...message,
-    timeline: [
-      { id: makeMessageId("thought"), kind: "thought" as const, text: thought, open: false },
-      ...(message.timeline ?? []),
-    ],
-  };
-}
-
-function reconcileFallbackResponse(message: ConversationMessage, text: string) {
-  const resolvedText = text || message.text;
-  if (!resolvedText) return message;
-
-  const timeline = [...(message.timeline ?? [])];
-  const responseIndexes = timeline.flatMap((item, index) => item.kind === "response" ? [index] : []);
-  if (responseIndexes.length === 0) {
-    timeline.push({ id: makeMessageId("response"), kind: "response", text: resolvedText });
-  } else if (resolvedText.startsWith(message.text) && resolvedText.length > message.text.length) {
-    const index = responseIndexes[responseIndexes.length - 1];
-    const response = timeline[index];
-    if (response.kind === "response") {
-      timeline[index] = { ...response, text: response.text + resolvedText.slice(message.text.length) };
-    }
-  }
-  return { ...message, text: resolvedText, timeline };
-}
-
-function isActiveToolStatus(status: ToolStatus) {
-  return status === "pending" || status === "in_progress";
-}
-
-function finishActiveTimelineTools(
-  timeline: TurnTimelineItem[] | undefined,
-  endedAt: number,
-  status: Extract<ToolStatus, "completed" | "failed" | "cancelled">,
-) {
-  return timeline?.map((item) => item.kind === "tool"
-    ? {
-        ...item,
-        tool: isActiveToolStatus(item.tool.status)
-          ? { ...item.tool, ...finishTiming(item.tool, endedAt), status }
-          : item.tool,
-      }
-    : item);
-}
-
-function terminalToolStatus(state: ConversationState) {
-  if (state === "complete") return "completed" as const;
-  if (state === "error") return "failed" as const;
-  return "cancelled" as const;
-}
-
-function finishRun(
-  message: ConversationMessage,
-  endedAt: number,
-  unfinishedToolStatus: Extract<ToolStatus, "completed" | "failed" | "cancelled"> = "completed",
-) {
-  const finished = finishThought(message, endedAt);
-  return {
-    ...finished,
-    timeline: finishActiveTimelineTools(finished.timeline, endedAt, unfinishedToolStatus),
-    elapsedMs: message.startedAt === undefined ? undefined : Math.max(0, endedAt - message.startedAt),
-  };
 }
 
 function formatDuration(elapsedMs: number) {
@@ -546,7 +278,6 @@ interface AppUpdateProgress {
 }
 
 type AppUpdatePhase = "idle" | "checking" | "available" | "downloading" | "error";
-type ApprovalMode = "ask" | "alwaysApprove";
 type AppView = "session" | "settings";
 type SettingsSection = "application" | "grok" | "account" | "archived";
 type ArchivedSessionSort = "updated-desc" | "updated-asc" | "title-asc" | "workspace-asc";
@@ -1078,10 +809,6 @@ function accountAvatarLabel(profile: AccountProfile | null) {
   return Array.from(label.trim())[0]?.toLocaleUpperCase() ?? "G";
 }
 
-function makeMessageId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 function resizeTextareaToContent(textarea: HTMLTextAreaElement | null) {
   if (!textarea) return;
   textarea.style.height = "auto";
@@ -1105,279 +832,6 @@ function formatFileSize(bytes: number) {
     unitIndex += 1;
   }
   return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
-}
-
-function stateFromStopReason(stopReason: StopReason): ConversationState {
-  switch (stopReason) {
-    case "end_turn":
-      return "complete";
-    case "cancelled":
-      return "cancelled";
-    case "refusal":
-      return "refused";
-    case "max_tokens":
-    case "max_turn_requests":
-      return "limited";
-    default:
-      return "error";
-  }
-}
-
-function toolTimingForUpdate(
-  existing: ToolActivity | undefined,
-  status: ToolStatus,
-  now: number,
-  trackTiming: boolean,
-): EventTiming {
-  const existingTiming: EventTiming = {
-    startedAt: existing?.startedAt,
-    endedAt: existing?.endedAt,
-    elapsedMs: existing?.elapsedMs,
-  };
-  if (isActiveToolStatus(status)) {
-    if (existing && isActiveToolStatus(existing.status)) return existingTiming;
-    return trackTiming ? startTiming(now) : {};
-  }
-  if (existing && isActiveToolStatus(existing.status)) return finishTiming(existingTiming, now);
-  return existingTiming;
-}
-
-function applySessionUpdateToMessage(
-  message: ConversationMessage,
-  update: SessionUpdate,
-  now: number,
-): ConversationMessage {
-  switch (update.kind) {
-    case "agent_message_chunk": {
-      const finished = finishThought(message, now);
-      const timeline = [...(finished.timeline ?? [])];
-      const last = timeline[timeline.length - 1];
-      if (last?.kind === "response") {
-        timeline[timeline.length - 1] = { ...last, text: last.text + update.text };
-      } else if (update.text) {
-        timeline.push({ id: makeMessageId("response"), kind: "response", text: update.text });
-      }
-      return { ...finished, text: message.text + update.text, timeline };
-    }
-    case "agent_thought_chunk": {
-      const timeline = [...(message.timeline ?? [])];
-      const last = timeline[timeline.length - 1];
-      if (last?.kind === "thought" && last.open) {
-        timeline[timeline.length - 1] = { ...last, text: last.text + update.text };
-      } else {
-        timeline.push({
-          id: makeMessageId("thought"),
-          kind: "thought",
-          text: update.text,
-          open: true,
-          startedAt: message.state === "streaming" ? now : undefined,
-        });
-      }
-      return {
-        ...message,
-        timeline,
-      };
-    }
-    case "tool_call":
-    case "tool_call_update": {
-      const finished = finishThought(message, now);
-      const timeline = [...(finished.timeline ?? [])];
-      const toolIndex = timeline.findIndex((item) => item.kind === "tool" && item.tool.id === update.toolCallId);
-      const existingItem = toolIndex >= 0 ? timeline[toolIndex] : undefined;
-      const existing = existingItem?.kind === "tool" ? existingItem.tool : undefined;
-      const status = update.status ?? existing?.status ?? "in_progress";
-      const nextTool: ToolActivity = {
-        id: update.toolCallId,
-        title: update.title ?? existing?.title ?? "Working with a local tool",
-        kind: update.toolKind ?? existing?.kind ?? undefined,
-        status,
-        locations: update.locations ?? existing?.locations ?? [],
-        ...toolTimingForUpdate(existing, status, now, message.state === "streaming"),
-      };
-      if (toolIndex >= 0 && existingItem?.kind === "tool") {
-        timeline[toolIndex] = { ...existingItem, tool: nextTool };
-      } else {
-        timeline.push({ id: makeMessageId("tool"), kind: "tool", tool: nextTool });
-      }
-      return { ...finished, timeline };
-    }
-    case "turn_completed": {
-      if (update.stopReason === "unknown") {
-        return {
-          ...finishThought(message, now),
-          metrics: update.metrics ?? message.metrics,
-        };
-      }
-      const state = stateFromStopReason(update.stopReason);
-      return {
-        ...finishRun(message, now, terminalToolStatus(state)),
-        state,
-        stopReason: update.stopReason,
-        metrics: update.metrics ?? message.metrics,
-        error: state === "error" ? "Grok Build ended the turn for an unknown reason." : message.error,
-      };
-    }
-    case "permission_requested": {
-      const finished = finishThought(message, now);
-      if (finished.timeline?.some((item) => item.kind === "permission" && item.requestId === update.requestId)) {
-        return finished;
-      }
-      return {
-        ...finished,
-        timeline: [
-          ...(finished.timeline ?? []),
-          {
-            id: makeMessageId("permission"),
-            kind: "permission",
-            requestId: update.requestId,
-            toolCallId: update.toolCallId,
-            title: update.title,
-            ...(message.state === "streaming" ? startTiming(now) : {}),
-          },
-        ],
-      };
-    }
-    case "permission_decision": {
-      const finished = finishThought(message, now);
-      const timeline = [...(finished.timeline ?? [])];
-      const decision: PermissionDecision = {
-        requestId: update.requestId,
-        toolCallId: update.toolCallId,
-        title: update.title,
-        label: update.label,
-        outcome: update.outcome,
-      };
-      const index = timeline.findIndex((item) => item.kind === "permission" && item.requestId === update.requestId);
-      if (index >= 0) {
-        const permission = timeline[index];
-        if (permission.kind === "permission") {
-          timeline[index] = { ...permission, ...finishTiming(permission, now), decision };
-        }
-      } else {
-        timeline.push({
-          id: makeMessageId("permission"),
-          kind: "permission",
-          requestId: update.requestId,
-          toolCallId: update.toolCallId,
-          title: update.title,
-          decision,
-        });
-      }
-      return { ...finished, timeline };
-    }
-    default:
-      return message;
-  }
-}
-
-interface SessionReplayProjection {
-  messages: ConversationMessage[];
-  availableCommands: AvailableCommand[] | null;
-  currentModeId: string | null;
-  configOptions: SessionConfigOption[];
-  usage: SessionUsage | null;
-  title: string | null;
-  updatedAt: number | null;
-  permissions: PermissionRequest[];
-  plan: PlanEntry[];
-}
-
-function sessionReplayProjection(sessionId: string, updates: SessionUpdate[]): SessionReplayProjection {
-  const messages: ConversationMessage[] = [];
-  let availableCommands: AvailableCommand[] | null = null;
-  let currentModeId: string | null = null;
-  let configOptions: SessionConfigOption[] = [];
-  let usage: SessionUsage | null = null;
-  let title: string | null = null;
-  let updatedAt: number | null = null;
-  let permissions: PermissionRequest[] = [];
-  let plan: PlanEntry[] = [];
-  const currentAssistant = () => {
-    const last = messages[messages.length - 1];
-    if (last?.role === "assistant") return last;
-    const assistant: ConversationMessage = {
-      id: makeMessageId("replayed-assistant"),
-      role: "assistant",
-      text: "",
-      state: "historical",
-    };
-    messages.push(assistant);
-    return assistant;
-  };
-
-  updates.filter((update) => update.sessionId === sessionId).forEach((update) => {
-    if (update.kind === "user_message_chunk") {
-      const last = messages[messages.length - 1];
-      if (last?.role === "user") {
-        last.text += update.text ?? "";
-        last.attachments = [...(last.attachments ?? []), ...(update.attachments ?? [])];
-      }
-      else messages.push({
-        id: makeMessageId("replayed-user"),
-        role: "user",
-        text: update.text ?? "",
-        attachments: update.attachments ?? [],
-      });
-      return;
-    }
-
-    if (update.kind === "available_commands_update") {
-      availableCommands = update.availableCommands;
-      return;
-    }
-    if (update.kind === "current_mode_update") {
-      currentModeId = update.currentModeId;
-      return;
-    }
-    if (update.kind === "config_option_update") {
-      configOptions = update.configOptions;
-      return;
-    }
-    if (update.kind === "usage_update") {
-      usage = { used: update.used, size: update.size, cost: update.cost };
-      return;
-    }
-    if (update.kind === "plan") {
-      plan = update.entries;
-      return;
-    }
-    if (update.kind === "session_info_update") {
-      if (update.title) title = update.title;
-      if (update.updatedAt) {
-        const parsed = Date.parse(update.updatedAt);
-        if (Number.isFinite(parsed)) updatedAt = parsed;
-      }
-      return;
-    }
-    if (update.kind === "permission_requested") {
-      const permission = {
-        requestId: update.requestId,
-        sessionId: update.sessionId,
-        toolCallId: update.toolCallId,
-        title: update.title,
-        toolKind: update.toolKind,
-        options: update.options,
-      };
-      permissions = [
-        ...permissions.filter((entry) => entry.requestId !== permission.requestId),
-        permission,
-      ];
-      const assistant = currentAssistant();
-      Object.assign(assistant, applySessionUpdateToMessage(assistant, update, Date.now()));
-      return;
-    }
-    if (update.kind === "permission_decision") {
-      permissions = permissions.filter((entry) => entry.requestId !== update.requestId);
-      const assistant = currentAssistant();
-      Object.assign(assistant, applySessionUpdateToMessage(assistant, update, Date.now()));
-      return;
-    }
-
-    const assistant = currentAssistant();
-    Object.assign(assistant, applySessionUpdateToMessage(assistant, update, Date.now()));
-  });
-
-  return { messages, availableCommands, currentModeId, configOptions, usage, title, updatedAt, permissions, plan };
 }
 
 function previewText(text: string, limit: number) {
