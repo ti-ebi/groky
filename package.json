@@ -14,10 +14,11 @@
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test:session": "node --test tests/sessionProjection.test.ts tests/sidebar.test.ts tests/timeline.test.ts",
     "test:timing": "node --test tests/timing.test.ts",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "check": "pnpm build && pnpm test:timing && pnpm test:rust && pnpm check:rust"
+    "check": "pnpm build && pnpm test:timing && pnpm test:session && pnpm test:rust && pnpm check:rust"
   },
   "dependencies": {
     "@fontsource-variable/sora": "^5.2.8",

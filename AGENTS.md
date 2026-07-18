@@ -8,15 +8,19 @@
 ## Repository map
 
 - `src/App.tsx` owns renderer-side session orchestration, history, composer state, ACP event projection, and the main layout.
-- `src/TerminalPanel.tsx` owns tools-panel tabs and the xterm.js terminal surface.
-- `src/FileExplorer.tsx` owns the workspace tree, previews, live refresh, and attach actions in the renderer.
+- `src/host/index.ts` owns typed renderer access to Tauri commands and host events; keep raw command and event names there.
+- `src/session/projection.ts` owns pure ACP-to-conversation state projection; keep its unit tests in `tests/sessionProjection.test.ts`.
+- `src/TerminalPanel.tsx` owns tools-panel tabs; `src/terminal/TerminalSurface.tsx` owns the xterm.js lifecycle.
+- `src/FileExplorer.tsx` owns the workspace tree, live refresh, and attach actions; `src/files/FilePreview.tsx` owns preview rendering.
 - `src/timing.ts` contains execution-timing helpers; keep their unit tests in `tests/timing.test.ts`.
 - `src-tauri/src/lib.rs` owns Tauri command registration, authentication, session history, and application lifecycle.
+- `src-tauri/src/models.rs` owns Grok Build model metadata parsing, validation, and selection state.
 - `src-tauri/src/acp.rs` owns the Grok Build ACP transport and safe renderer-facing event types.
 - `src-tauri/src/file_manager.rs` owns workspace-scoped listing, preview, attachment inspection, folder opening, and watching.
 - `src-tauri/src/terminal.rs` owns local PTY creation, I/O, resizing, and cleanup.
 - Keep process, filesystem, and Grok Build access inside the Tauri host.
 - Expose host functionality to the renderer through typed Tauri commands and ACP types.
+- Route renderer command calls and host event subscriptions through `src/host/index.ts` instead of scattering raw Tauri names across components.
 
 ## Workflow
 

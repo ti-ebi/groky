@@ -8,6 +8,7 @@ import {
   type PointerEvent,
   type ReactNode,
 } from "react";
+import { workspaceName } from "./shared/path";
 
 export interface SearchableSession {
   sessionId: string;
@@ -83,12 +84,6 @@ function PaletteIcon({ name, size = 17 }: { name: PaletteIconName; size?: number
   );
 }
 
-function workspaceName(path: string | null) {
-  if (!path) return "Standalone";
-  const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? path;
-}
-
 function normalizeSearchText(value: string) {
   return value.normalize("NFKC").toLocaleLowerCase();
 }
@@ -99,7 +94,7 @@ function queryTokens(value: string) {
 
 function rankSession(session: SearchableSession, normalizedQuery: string, tokens: string[]) {
   const title = normalizeSearchText(session.title);
-  const workspace = normalizeSearchText(workspaceName(session.workspace));
+  const workspace = normalizeSearchText(workspaceName(session.workspace, "Standalone"));
   const path = normalizeSearchText(session.workspace ?? "standalone");
   const searchable = `${title} ${workspace} ${path}`;
   if (!tokens.every((token) => searchable.includes(token))) return null;
@@ -138,7 +133,7 @@ function sessionAriaLabel(session: SearchableSession, active: boolean) {
       : active
         ? "currently open"
         : "available";
-  return `${session.title}, ${workspaceName(session.workspace)}, ${formatRelativeTime(session.updatedAt)}, ${status}`;
+  return `${session.title}, ${workspaceName(session.workspace, "Standalone")}, ${formatRelativeTime(session.updatedAt)}, ${status}`;
 }
 
 export function GlobalSearchDialog({
@@ -448,7 +443,7 @@ export function GlobalSearchDialog({
                           </span>
                           <span className="global-search-option-copy">
                             <strong>{session.title}</strong>
-                            <small>{workspaceName(session.workspace)}</small>
+                            <small>{workspaceName(session.workspace, "Standalone")}</small>
                           </span>
                           <span className="global-search-option-meta">
                             <time dateTime={new Date(session.updatedAt).toISOString()}>{formatRelativeTime(session.updatedAt)}</time>

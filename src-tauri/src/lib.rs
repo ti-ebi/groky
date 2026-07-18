@@ -1,5 +1,6 @@
 mod acp;
 mod file_manager;
+mod models;
 mod terminal;
 
 use acp::{
@@ -11,6 +12,7 @@ use file_manager::{
     workspace_inspect_attachment, workspace_list_directory, workspace_open_folder,
     workspace_preview_file, workspace_unwatch, workspace_watch, WorkspaceWatcherRuntime,
 };
+use models::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -214,51 +216,6 @@ struct AgentCapabilities {
 struct InitializedAgent {
     capabilities: AgentCapabilities,
     response: Value,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionModelState {
-    current_model_id: String,
-    available_models: Vec<ModelInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelInfo {
-    model_id: String,
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(rename(serialize = "metadata", deserialize = "_meta"), default)]
-    metadata: Option<ModelMetadata>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelMetadata {
-    #[serde(default)]
-    total_context_tokens: Option<u64>,
-    #[serde(default)]
-    agent_type: Option<String>,
-    #[serde(default)]
-    supports_reasoning_effort: Option<bool>,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    #[serde(default)]
-    reasoning_efforts: Vec<ReasoningEffortInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReasoningEffortInfo {
-    id: String,
-    value: String,
-    label: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(rename = "default", default)]
-    is_default: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1681,120 +1638,6 @@ fn agent_capabilities(initialize_result: &Value) -> AgentCapabilities {
             .pointer("/agentCapabilities/loadSession")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-    }
-}
-
-fn parse_model_state(value: &Value) -> Result<SessionModelState, String> {
-    let models = serde_json::from_value::<SessionModelState>(value.clone())
-        .map_err(|_| "Grok Build returned invalid model information.".to_string())?;
-    let current_model_is_available = models
-        .available_models
-        .iter()
-        .any(|model| model.model_id == models.current_model_id);
-    if models.available_models.is_empty() || !current_model_is_available {
-        return Err("Grok Build returned invalid model information.".to_string());
-    }
-
-    Ok(models)
-}
-
-fn parse_session_models(result: &Value) -> Result<Option<SessionModelState>, String> {
-    result.get("models").map(parse_model_state).transpose()
-}
-
-fn parse_initialize_models(result: &Value) -> Result<Option<SessionModelState>, String> {
-    result
-        .pointer("/_meta/modelState")
-        .map(parse_model_state)
-        .transpose()
-}
-
-fn reasoning_effort_value(
-    models: &SessionModelState,
-    requested_effort: &str,
-) -> Result<String, String> {
-    let metadata = models
-        .available_models
-        .iter()
-        .find(|model| model.model_id == models.current_model_id)
-        .and_then(|model| model.metadata.as_ref())
-        .ok_or_else(|| {
-            "Grok Build did not advertise reasoning controls for the current model.".to_string()
-        })?;
-
-    if metadata.supports_reasoning_effort == Some(false) || metadata.reasoning_efforts.is_empty() {
-        return Err(
-            "Grok Build did not advertise reasoning controls for the current model.".to_string(),
-        );
-    }
-
-    metadata
-        .reasoning_efforts
-        .iter()
-        .find(|effort| effort.id == requested_effort || effort.value == requested_effort)
-        .map(|effort| effort.value.clone())
-        .ok_or_else(|| "Choose a reasoning effort advertised by Grok Build.".to_string())
-}
-
-fn resolve_initial_model_selection(
-    models: Option<&SessionModelState>,
-    requested_model_id: Option<&str>,
-    requested_reasoning_effort: Option<&str>,
-) -> Result<Option<(String, Option<String>)>, String> {
-    if requested_model_id.is_none() && requested_reasoning_effort.is_none() {
-        return Ok(None);
-    }
-
-    let models = models.ok_or_else(|| {
-        "Grok Build did not advertise model selection for this session.".to_string()
-    })?;
-    let selected_model_id = requested_model_id
-        .unwrap_or(&models.current_model_id)
-        .to_string();
-    if !models
-        .available_models
-        .iter()
-        .any(|model| model.model_id == selected_model_id)
-    {
-        return Err("The selected model is no longer available in Grok Build.".to_string());
-    }
-
-    let selected_reasoning_effort = if let Some(requested_effort) = requested_reasoning_effort {
-        let mut selected_models = models.clone();
-        selected_models.current_model_id = selected_model_id.clone();
-        Some(reasoning_effort_value(&selected_models, requested_effort)?)
-    } else {
-        None
-    };
-
-    Ok(Some((selected_model_id, selected_reasoning_effort)))
-}
-
-fn model_reasoning_effort<'a>(models: &'a SessionModelState, model_id: &str) -> Option<&'a str> {
-    models
-        .available_models
-        .iter()
-        .find(|model| model.model_id == model_id)
-        .and_then(|model| model.metadata.as_ref())
-        .and_then(|metadata| metadata.reasoning_effort.as_deref())
-}
-
-fn record_model_selection(
-    models: &mut SessionModelState,
-    model_id: String,
-    reasoning_effort: Option<String>,
-) {
-    models.current_model_id = model_id;
-    let Some(reasoning_effort) = reasoning_effort else {
-        return;
-    };
-    if let Some(metadata) = models
-        .available_models
-        .iter_mut()
-        .find(|model| model.model_id == models.current_model_id)
-        .and_then(|model| model.metadata.as_mut())
-    {
-        metadata.reasoning_effort = Some(reasoning_effort);
     }
 }
 
