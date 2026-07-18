@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -24,6 +25,7 @@ import {
   parentPath,
 } from "./files/fileVisuals";
 import { workspaceName } from "./shared/path";
+import type { ToolPanelAttachmentResult } from "./session/toolPanel";
 
 type DirectoryStatus = "loading" | "ready" | "error";
 
@@ -94,12 +96,14 @@ export function FileExplorer({
   workspace: string | null;
   workingDirectory: string | null;
   attachmentDisabled: boolean;
-  onAttach: (attachment: WorkspaceFileAttachment) => boolean;
+  onAttach: (attachment: WorkspaceFileAttachment) => ToolPanelAttachmentResult;
 }) {
   const directoryRef = useRef<Record<string, DirectoryState>>({});
   const loadingPaths = useRef<Set<string>>(new Set());
   const requestGeneration = useRef(0);
   const previewGeneration = useRef(0);
+  const activeRef = useRef(active);
+  const targetKeyRef = useRef<string | null>(null);
   const previewStateRef = useRef<FilePreviewState | null>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const splitPaneRef = useRef<HTMLDivElement>(null);
@@ -121,6 +125,10 @@ export function FileExplorer({
   const targetKey = target
     ? sessionId ? `session:${sessionId}` : `workspace:${workspace}`
     : null;
+  useLayoutEffect(() => {
+    activeRef.current = active;
+    targetKeyRef.current = targetKey;
+  }, [active, targetKey]);
 
   useEffect(() => {
     const splitPane = splitPaneRef.current;
@@ -225,6 +233,14 @@ export function FileExplorer({
     setPreviewState(null);
     setNotice(null);
   }, [targetKey]);
+
+  useEffect(() => {
+    if (active) return;
+    requestGeneration.current += 1;
+    previewGeneration.current += 1;
+    loadingPaths.current.clear();
+    setAttachingPath(null);
+  }, [active]);
 
   useEffect(() => {
     if (active && target) void loadDirectory("");
@@ -403,17 +419,32 @@ export function FileExplorer({
   async function attachFile(entry: WorkspaceFileEntry) {
     if (!target || entry.kind !== "file" || attachmentDisabled || attachingPath) return;
     const generation = requestGeneration.current;
+    const requestTargetKey = targetKey;
     setAttachingPath(entry.path);
     setNotice(null);
     try {
       const attachment = await host.workspaceFiles.inspectAttachment(target, entry.path);
-      if (generation !== requestGeneration.current) return;
-      const added = onAttach(attachment);
-      setNotice(added ? `${entry.name} attached to the next message.` : `${entry.name} is already attached.`);
+      if (
+        !activeRef.current
+        || requestTargetKey !== targetKeyRef.current
+        || generation !== requestGeneration.current
+      ) return;
+      const result = onAttach(attachment);
+      if (result === "added") setNotice(`${entry.name} attached to the next message.`);
+      else if (result === "duplicate") setNotice(`${entry.name} is already attached.`);
+      else if (result === "limit") setNotice("The attachment limit has been reached.");
     } catch (error) {
-      if (generation === requestGeneration.current) setNotice(String(error));
+      if (
+        activeRef.current
+        && requestTargetKey === targetKeyRef.current
+        && generation === requestGeneration.current
+      ) setNotice(String(error));
     } finally {
-      if (generation === requestGeneration.current) setAttachingPath(null);
+      if (
+        activeRef.current
+        && requestTargetKey === targetKeyRef.current
+        && generation === requestGeneration.current
+      ) setAttachingPath(null);
     }
   }
 

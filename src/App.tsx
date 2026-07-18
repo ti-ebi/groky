@@ -73,6 +73,7 @@ import {
   MAX_SIDE_PANEL_WIDTH,
   MIN_SIDEBAR_WIDTH,
   MIN_SIDE_PANEL_WIDTH,
+  initialSidePanelWidth,
   usePanelLayout,
 } from "./layout/usePanelLayout";
 import { cleanVersion } from "./shared/format";
@@ -85,6 +86,16 @@ import {
   type SidebarWorkspaceGroup,
 } from "./sidebar/sessionList";
 import type { SidebarMenu, SidebarSessionSummary } from "./sidebar/types";
+import {
+  appendToolPanelAttachment,
+  createToolPanelState,
+  mergeToolPanelAttachments,
+  removeToolPanelStateKeys,
+  transferToolPanelState,
+  type ToolPanelStateMap,
+  type ToolPanelStateUpdate,
+  updateToolPanelStateMap,
+} from "./session/toolPanel";
 import type { AppUpdatePhase } from "./update/types";
 import { DurationText } from "./ui/DurationText";
 import { Icon } from "./ui/Icon";
@@ -180,12 +191,53 @@ function App() {
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [activeHistoryMessageId, setActiveHistoryMessageId] = useState<string | null>(null);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
+  const [toolPanelStates, setToolPanelStates] = useState<ToolPanelStateMap>({});
+  const [pendingToolPanelKey, setPendingToolPanelKey] = useState(() => `pending:${crypto.randomUUID()}`);
+  const [defaultToolPanelWidth] = useState(initialSidePanelWidth);
+  const activeSession = activeSessionId ? sessionViews[activeSessionId] : undefined;
+  const panelWorkspace = activeSession ? activeSession.connection.workspace : workspace;
+  const panelWorkingDirectory = activeSession?.connection.workingDirectory ?? workspace;
+  const activeToolPanelKey = activeSessionId ?? pendingToolPanelKey;
+  const activeToolPanelState = toolPanelStates[activeToolPanelKey];
+  const sidePanelOpen = activeToolPanelState?.open ?? false;
+  const sidePanelWidth = activeToolPanelState?.width ?? defaultToolPanelWidth;
+  const createActiveToolPanelState = useCallback(() => createToolPanelState({
+    workspace: panelWorkspace,
+    workingDirectory: panelWorkingDirectory,
+    width: defaultToolPanelWidth,
+  }), [defaultToolPanelWidth, panelWorkingDirectory, panelWorkspace]);
+  const updateActiveToolPanelState = useCallback((
+    update: ToolPanelStateUpdate,
+  ) => {
+    setToolPanelStates((current) => updateToolPanelStateMap(
+      current,
+      activeToolPanelKey,
+      createActiveToolPanelState,
+      update,
+    ));
+  }, [activeToolPanelKey, createActiveToolPanelState]);
+  const updateToolPanelState = useCallback((
+    key: string,
+    update: ToolPanelStateUpdate,
+  ) => {
+    setToolPanelStates((current) => {
+      const state = current[key];
+      if (!state) return current;
+      const next = update(state);
+      return next === state ? current : { ...current, [key]: next };
+    });
+  }, []);
+  const toggleActiveToolPanel = useCallback(() => {
+    updateActiveToolPanelState((current) => ({ ...current, open: !current.open }));
+  }, [updateActiveToolPanelState]);
+  const changeActiveToolPanelWidth = useCallback((width: number) => {
+    updateActiveToolPanelState((current) => current.width === width
+      ? current
+      : { ...current, width });
+  }, [updateActiveToolPanelState]);
   const {
     sidebarWidth,
     sidebarCollapsed,
-    sidePanelWidth,
-    sidePanelOpen,
-    sidePanelMounted,
     toggleSidebar,
     toggleSidePanel,
     resetSidebarWidth,
@@ -198,7 +250,13 @@ function App() {
     resizeSidePanel,
     finishSidePanelResize,
     resizeSidePanelWithKeyboard,
-  } = usePanelLayout({ onSidebarToggle: () => setShowConnection(false) });
+  } = usePanelLayout({
+    onSidebarToggle: () => setShowConnection(false),
+    sidePanelOpen,
+    sidePanelWidth,
+    onSidePanelToggle: toggleActiveToolPanel,
+    onSidePanelWidthChange: changeActiveToolPanelWidth,
+  });
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [sidebarMenu, setSidebarMenu] = useState<SidebarMenu>(null);
@@ -213,6 +271,10 @@ function App() {
   const activeSessionIdRef = useRef<string | null>(null);
   const activeAssistantIds = useRef<Map<string, string>>(new Map());
   const sessionViewsRef = useRef(sessionViews);
+  const pendingAttachmentsRef = useRef(pendingAttachments);
+  const pendingToolPanelKeyRef = useRef(pendingToolPanelKey);
+  const attachmentDisabledRef = useRef(false);
+  const attachmentRequestCount = useRef(0);
   const autoScrollEnabled = useRef(true);
   const conversation = useRef<HTMLElement | null>(null);
   const conversationContent = useRef<HTMLDivElement | null>(null);
@@ -224,7 +286,6 @@ function App() {
   const updateInstallationInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
 
-  const activeSession = activeSessionId ? sessionViews[activeSessionId] : undefined;
   const connection = activeSession && !activeSession.disconnected ? activeSession.connection : null;
   const messages = activeSession?.messages ?? [];
   const draft = activeSession?.draft ?? pendingDraft;
@@ -344,6 +405,27 @@ function App() {
     }
   }
 
+  function resetPendingToolPanel() {
+    const previousKey = pendingToolPanelKey;
+    const nextKey = `pending:${crypto.randomUUID()}`;
+    pendingToolPanelKeyRef.current = nextKey;
+    setToolPanelStates((current) => removeToolPanelStateKeys(current, [previousKey]));
+    setPendingToolPanelKey(nextKey);
+  }
+
+  function transferPendingToolPanel(sessionId: string) {
+    setToolPanelStates((current) => transferToolPanelState(
+      current,
+      pendingToolPanelKey,
+      sessionId,
+    ));
+  }
+
+  function removeToolPanelStates(sessionIds: string[]) {
+    if (sessionIds.length === 0) return;
+    setToolPanelStates((current) => removeToolPanelStateKeys(current, sessionIds));
+  }
+
   function activateSession(sessionId: string | null) {
     activeSessionIdRef.current = sessionId;
     if (sessionId) {
@@ -392,7 +474,9 @@ function App() {
   }
 
   function clearAllSessionViews() {
+    const nextPendingToolPanelKey = `pending:${crypto.randomUUID()}`;
     activeSessionIdRef.current = null;
+    pendingToolPanelKeyRef.current = nextPendingToolPanelKey;
     activeAssistantIds.current.clear();
     sessionViewsRef.current = {};
     setActiveSessionId(null);
@@ -403,6 +487,8 @@ function App() {
     setCommandCatalogs({});
     commandCatalogRequests.current.clear();
     setPendingAttachments([]);
+    setToolPanelStates({});
+    setPendingToolPanelKey(nextPendingToolPanelKey);
   }
 
   const sessionWorkspace = connection?.workspace ?? workspace;
@@ -447,52 +533,117 @@ function App() {
   const sidebarActionsDisabled = appUpdating || stage === "connecting" || historyMutating || renamingSessionId !== null;
   const sessionLocationEditable = !activeSessionLoading && connection === null && messages.length === 0 && !running;
   const attachmentDisabled = activeSessionLoading || running || appUpdating || stage === "connecting";
+  useLayoutEffect(() => {
+    pendingAttachmentsRef.current = pendingAttachments;
+    pendingToolPanelKeyRef.current = pendingToolPanelKey;
+    attachmentDisabledRef.current = attachmentDisabled;
+  }, [attachmentDisabled, pendingAttachments, pendingToolPanelKey]);
+
+  const beginAttachmentRequest = useCallback(() => {
+    attachmentRequestCount.current += 1;
+    setAttachmentBusy(true);
+  }, []);
+
+  const finishAttachmentRequest = useCallback(() => {
+    attachmentRequestCount.current = Math.max(0, attachmentRequestCount.current - 1);
+    if (attachmentRequestCount.current === 0) setAttachmentBusy(false);
+  }, []);
 
   const addAttachmentPaths = useCallback(async (paths: string[]) => {
     if (paths.length === 0 || attachmentDisabled) return;
-    const targetSessionId = activeSessionIdRef.current;
-    setAttachmentBusy(true);
+    const requestSessionId = activeSessionIdRef.current;
+    const requestKey = requestSessionId ?? pendingToolPanelKeyRef.current;
+    beginAttachmentRequest();
     try {
-      const inspected = await host.attachments.inspect([
-        ...attachments.map((attachment) => attachment.path),
-        ...paths,
-      ]);
-      if (targetSessionId) {
-        updateSessionView(targetSessionId, (session) => ({ ...session, attachments: inspected }));
+      const inspected = await host.attachments.inspect(paths);
+      if (attachmentDisabledRef.current) return;
+      const activeSessionId = activeSessionIdRef.current;
+      const activeKey = activeSessionId ?? pendingToolPanelKeyRef.current;
+      const currentAttachments = activeSessionId
+        ? sessionViewsRef.current[activeSessionId]?.attachments
+        : pendingAttachmentsRef.current;
+      if (!currentAttachments) return;
+      const next = mergeToolPanelAttachments(
+        requestKey,
+        activeKey,
+        currentAttachments,
+        inspected,
+        MAX_MESSAGE_ATTACHMENTS,
+      );
+      if (next.result === "stale") return;
+      if (next.result === "limit") {
+        setConnectionNotice(`Attach up to ${MAX_MESSAGE_ATTACHMENTS} files at a time.`);
+        return;
+      }
+      if (next.result !== "added") return;
+      if (activeSessionId) {
+        updateSessionView(activeSessionId, (session) => ({
+          ...session,
+          attachments: next.attachments,
+        }));
       } else {
-        setPendingAttachments(inspected);
+        pendingAttachmentsRef.current = next.attachments;
+        setPendingAttachments(next.attachments);
       }
     } catch (error) {
-      setConnectionNotice(String(error));
+      const activeKey = activeSessionIdRef.current ?? pendingToolPanelKeyRef.current;
+      if (requestKey === activeKey) setConnectionNotice(String(error));
     } finally {
-      setAttachmentBusy(false);
+      finishAttachmentRequest();
     }
-  }, [attachmentDisabled, attachments]);
+  }, [attachmentDisabled, beginAttachmentRequest, finishAttachmentRequest]);
 
-  function addWorkspaceAttachment(attachment: FileAttachment) {
-    if (attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
-      if (attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
-        setConnectionNotice(`Attach up to ${MAX_MESSAGE_ATTACHMENTS} files at a time.`);
-      }
-      return false;
+  const addWorkspaceAttachment = useCallback((
+    requestKey: string,
+    attachment: FileAttachment,
+  ) => {
+    if (attachmentDisabledRef.current) return "disabled";
+
+    const sessionId = activeSessionIdRef.current;
+    const activeKey = sessionId ?? pendingToolPanelKeyRef.current;
+    const currentAttachments = sessionId
+      ? sessionViewsRef.current[sessionId]?.attachments
+      : pendingAttachmentsRef.current;
+    if (!currentAttachments) return "stale";
+
+    const next = appendToolPanelAttachment(
+      requestKey,
+      activeKey,
+      currentAttachments,
+      attachment,
+      MAX_MESSAGE_ATTACHMENTS,
+    );
+    if (next.result === "limit") {
+      setConnectionNotice(`Attach up to ${MAX_MESSAGE_ATTACHMENTS} files at a time.`);
+      return next.result;
     }
-    if (attachments.some((current) => current.path === attachment.path)) return false;
-    setAttachments([...attachments, attachment]);
-    return true;
-  }
+    if (next.result !== "added") return next.result;
+
+    if (sessionId) {
+      updateSessionView(sessionId, (session) => ({ ...session, attachments: next.attachments }));
+    } else {
+      pendingAttachmentsRef.current = next.attachments;
+      setPendingAttachments(next.attachments);
+    }
+    return next.result;
+  }, []);
 
   async function chooseAttachmentFiles() {
-    if (attachmentDisabled || attachmentBusy) return;
-    setAttachmentBusy(true);
+    if (attachmentDisabled || attachmentRequestCount.current > 0) return;
+    const requestKey = activeSessionIdRef.current ?? pendingToolPanelKeyRef.current;
+    beginAttachmentRequest();
     try {
       const selected = await host.attachments.choose();
+      const activeKey = activeSessionIdRef.current ?? pendingToolPanelKeyRef.current;
+      if (requestKey !== activeKey) return;
       if (selected.length > 0) {
         await addAttachmentPaths(selected.map((attachment) => attachment.path));
       }
     } catch (error) {
-      setConnectionNotice(String(error));
+      const activeKey = activeSessionIdRef.current ?? pendingToolPanelKeyRef.current;
+      if (requestKey === activeKey) setConnectionNotice(String(error));
     } finally {
-      setAttachmentBusy(false);
+      finishAttachmentRequest();
     }
   }
 
@@ -1130,6 +1281,7 @@ function App() {
         modelId: pendingModels?.currentModelId,
         reasoningEffort: requestedModel?.metadata?.reasoningEffort,
       });
+      transferPendingToolPanel(next.sessionId);
       upsertSessionView(next);
       activateSession(next.sessionId);
       setWorkspace(next.workspace);
@@ -1263,6 +1415,7 @@ function App() {
       const workspaces = await host.grok.workspaces.remove(path);
       if (disconnectsActiveSession) {
         await host.grok.sessions.deactivate(connection.sessionId).catch(() => undefined);
+        resetPendingToolPanel();
         activateSession(null);
         setPendingDraft("");
         setPendingAttachments([]);
@@ -1317,8 +1470,10 @@ function App() {
         sessionViewsRef.current = nextViews;
         setSessionViews(nextViews);
         affectedSessionIds.forEach((sessionId) => activeAssistantIds.current.delete(sessionId));
+        removeToolPanelStates(affectedSessionIds);
       }
       if (affectsActive && action !== "restore") {
+        resetPendingToolPanel();
         activateSession(null);
         setPendingDraft("");
         setPendingAttachments([]);
@@ -1428,6 +1583,7 @@ function App() {
     const nextMode: ApprovalMode = "ask";
     setSidebarMenu(null);
     setActiveView("session");
+    resetPendingToolPanel();
     activateSession(null);
     setPendingDraft("");
     setPendingAttachments([]);
@@ -2148,17 +2304,30 @@ function App() {
             onPointerCancel={finishSidePanelResize}
           />
       )}
-      {activeView === "session" && sidePanelMounted && (
-        <TerminalPanel
-          open={sidePanelOpen}
-          appearance={resolvedAppearance}
-          sessionId={activeSession?.connection.sessionId ?? null}
-          workspace={activeSession ? activeSession.connection.workspace : workspace}
-          workingDirectory={activeSession?.connection.workingDirectory ?? workspace}
-          attachmentDisabled={attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS}
-          onAttach={addWorkspaceAttachment}
-        />
-      )}
+      {Object.entries(toolPanelStates).map(([toolPanelKey, toolPanelState]) => {
+        const toolSessionId = toolPanelKey === pendingToolPanelKey ? null : toolPanelKey;
+        const toolSession = toolSessionId ? sessionViews[toolSessionId] : undefined;
+        const toolSessionSummary = toolSessionId
+          ? sessionHistory.find((session) => session.sessionId === toolSessionId)
+          : undefined;
+        const toolWorkspace = toolSession?.connection.workspace
+          ?? (toolSessionId ? toolSessionSummary?.workspace ?? null : workspace);
+        return (
+          <TerminalPanel
+            active={activeView === "session" && toolPanelKey === activeToolPanelKey}
+            appearance={resolvedAppearance}
+            key={toolPanelState.mountKey}
+            panelKey={toolPanelKey}
+            state={toolPanelState}
+            sessionId={toolSessionId}
+            workspace={toolWorkspace}
+            workingDirectory={toolSession?.connection.workingDirectory ?? toolWorkspace}
+            attachmentDisabled={attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS}
+            onAttach={(attachment) => addWorkspaceAttachment(toolPanelKey, attachment)}
+            onStateChange={updateToolPanelState}
+          />
+        );
+      })}
       {activeView === "session" && (
         <button
           className="icon-button tools-panel-toggle"
