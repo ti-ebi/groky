@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
@@ -10,7 +11,6 @@ import {
 const SIDEBAR_WIDTH_KEY = "groky.sidebar.width";
 const SIDEBAR_COLLAPSED_KEY = "groky.sidebar.collapsed";
 const SIDE_PANEL_WIDTH_KEY = "groky.side-panel.width";
-const SIDE_PANEL_OPEN_KEY = "groky.side-panel.open";
 
 export const DEFAULT_SIDEBAR_WIDTH = 258;
 export const MIN_SIDEBAR_WIDTH = 220;
@@ -40,6 +40,10 @@ export function defaultSidePanelWidth() {
       ? Math.round(viewportWidth * DEFAULT_SIDE_PANEL_WIDTH_RATIO)
       : FALLBACK_SIDE_PANEL_WIDTH,
   );
+}
+
+export function initialSidePanelWidth() {
+  return storedNumber(SIDE_PANEL_WIDTH_KEY, defaultSidePanelWidth, clampSidePanelWidth);
 }
 
 function storedNumber(key: string, fallback: () => number, normalize: (value: number) => number) {
@@ -91,27 +95,36 @@ function keyboardResizeWidth(
 
 interface PanelLayoutOptions {
   onSidebarToggle?: () => void;
+  sidePanelOpen: boolean;
+  sidePanelWidth: number;
+  onSidePanelToggle: () => void;
+  onSidePanelWidthChange: (width: number) => void;
 }
 
-export function usePanelLayout({ onSidebarToggle }: PanelLayoutOptions = {}) {
+export function usePanelLayout({
+  onSidebarToggle,
+  sidePanelOpen,
+  sidePanelWidth,
+  onSidePanelToggle,
+  onSidePanelWidthChange,
+}: PanelLayoutOptions) {
   const [sidebarWidth, setSidebarWidth] = useState(() =>
     storedNumber(SIDEBAR_WIDTH_KEY, () => DEFAULT_SIDEBAR_WIDTH, clampSidebarWidth)
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     storedBoolean(SIDEBAR_COLLAPSED_KEY)
   );
-  const [sidePanelWidth, setSidePanelWidth] = useState(() =>
-    storedNumber(SIDE_PANEL_WIDTH_KEY, defaultSidePanelWidth, clampSidePanelWidth)
-  );
-  const [sidePanelOpen, setSidePanelOpen] = useState(() => storedBoolean(SIDE_PANEL_OPEN_KEY));
-  const [sidePanelMounted, setSidePanelMounted] = useState(sidePanelOpen);
   const sidebarResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
   const sidePanelResizeStart = useRef<{ pointerX: number; width: number } | null>(null);
   const sidebarToggleCallback = useRef(onSidebarToggle);
+  const sidePanelToggleCallback = useRef(onSidePanelToggle);
+  const sidePanelWidthChangeCallback = useRef(onSidePanelWidthChange);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     sidebarToggleCallback.current = onSidebarToggle;
-  }, [onSidebarToggle]);
+    sidePanelToggleCallback.current = onSidePanelToggle;
+    sidePanelWidthChangeCallback.current = onSidePanelWidthChange;
+  }, [onSidebarToggle, onSidePanelToggle, onSidePanelWidthChange]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((current) => !current);
@@ -119,14 +132,12 @@ export function usePanelLayout({ onSidebarToggle }: PanelLayoutOptions = {}) {
   }, []);
 
   const toggleSidePanel = useCallback(() => {
-    setSidePanelMounted(true);
-    setSidePanelOpen((current) => !current);
+    sidePanelToggleCallback.current();
   }, []);
 
   useEffect(() => persist(SIDEBAR_WIDTH_KEY, String(sidebarWidth)), [sidebarWidth]);
   useEffect(() => persist(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed)), [sidebarCollapsed]);
   useEffect(() => persist(SIDE_PANEL_WIDTH_KEY, String(sidePanelWidth)), [sidePanelWidth]);
-  useEffect(() => persist(SIDE_PANEL_OPEN_KEY, String(sidePanelOpen)), [sidePanelOpen]);
 
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
@@ -204,7 +215,9 @@ export function usePanelLayout({ onSidebarToggle }: PanelLayoutOptions = {}) {
   function resizeSidePanel(event: ReactPointerEvent<HTMLDivElement>) {
     const start = sidePanelResizeStart.current;
     if (!start) return;
-    setSidePanelWidth(clampSidePanelWidth(start.width - event.clientX + start.pointerX));
+    sidePanelWidthChangeCallback.current(
+      clampSidePanelWidth(start.width - event.clientX + start.pointerX),
+    );
   }
 
   function finishSidePanelResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -226,19 +239,16 @@ export function usePanelLayout({ onSidebarToggle }: PanelLayoutOptions = {}) {
     );
     if (nextWidth === null) return;
     event.preventDefault();
-    setSidePanelWidth(clampSidePanelWidth(nextWidth));
+    sidePanelWidthChangeCallback.current(clampSidePanelWidth(nextWidth));
   }
 
   return {
     sidebarWidth,
     sidebarCollapsed,
-    sidePanelWidth,
-    sidePanelOpen,
-    sidePanelMounted,
     toggleSidebar,
     toggleSidePanel,
     resetSidebarWidth: () => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH),
-    resetSidePanelWidth: () => setSidePanelWidth(defaultSidePanelWidth()),
+    resetSidePanelWidth: () => sidePanelWidthChangeCallback.current(defaultSidePanelWidth()),
     startSidebarResize,
     resizeSidebar,
     finishSidebarResize,

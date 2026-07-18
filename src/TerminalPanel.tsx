@@ -12,6 +12,14 @@ import "./TerminalPanel.css";
 import type { ResolvedAppearance } from "./appearance";
 import { FileExplorer } from "./FileExplorer";
 import type { TerminalInfo, WorkspaceFileAttachment } from "./host/types";
+import {
+  removeUnavailableFileTabs,
+  type TerminalToolTabState as TerminalToolTab,
+  type ToolPanelAttachmentResult,
+  type ToolPanelState,
+  type ToolPanelStateUpdate,
+  type ToolPanelTabState as ToolTab,
+} from "./session/toolPanel";
 import { compactPath } from "./shared/path";
 import { TerminalSurface, type TerminalStatus } from "./terminal/TerminalSurface";
 
@@ -35,19 +43,6 @@ function PanelIcon({ name, size = 15 }: { name: "files" | "plus" | "terminal" | 
     </svg>
   );
 }
-
-interface TerminalToolTab {
-  id: string;
-  type: "terminal";
-  workingDirectory: string | null;
-}
-
-interface FileToolTab {
-  id: string;
-  type: "files";
-}
-
-type ToolTab = FileToolTab | TerminalToolTab;
 
 interface TabPointerDrag {
   tabId: string;
@@ -190,26 +185,30 @@ function TerminalToolView({
 }
 
 export function TerminalPanel({
-  open,
+  active,
   appearance,
+  panelKey,
+  state,
   sessionId,
   workspace,
   workingDirectory,
   attachmentDisabled,
   onAttach,
+  onStateChange,
 }: {
-  open: boolean;
+  active: boolean;
   appearance: ResolvedAppearance;
+  panelKey: string;
+  state: ToolPanelState;
   sessionId: string | null;
   workspace: string | null;
   workingDirectory: string | null;
   attachmentDisabled: boolean;
-  onAttach: (attachment: WorkspaceFileAttachment) => boolean;
+  onAttach: (attachment: WorkspaceFileAttachment) => ToolPanelAttachmentResult;
+  onStateChange: (key: string, update: ToolPanelStateUpdate) => void;
 }) {
-  const [initialTabs] = useState<ToolTab[]>(() => [
-    ...(workspace ? [{ id: crypto.randomUUID(), type: "files" } as const] : []),
-    { id: crypto.randomUUID(), type: "terminal", workingDirectory },
-  ]);
+  const { tabs, activeTabId } = state;
+  const open = active && state.open;
   const tabHeader = useRef<HTMLDivElement | null>(null);
   const tabList = useRef<HTMLDivElement | null>(null);
   const addMenuRoot = useRef<HTMLDivElement | null>(null);
@@ -221,15 +220,16 @@ export function TerminalPanel({
   const tabDragFrame = useRef<number | null>(null);
   const suppressTabClick = useRef(false);
   const suppressTabClickTimer = useRef<number | null>(null);
-  const [tabs, setTabs] = useState<ToolTab[]>(initialTabs);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const [tabMeta, setTabMeta] = useState<Record<string, TerminalTabMeta>>({});
-  const [activeTabId, setActiveTabId] = useState<string | null>(initialTabs[0]?.id ?? null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [addMenuLeft, setAddMenuLeft] = useState(8);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [tabOrderAnnouncement, setTabOrderAnnouncement] = useState("");
+  const changeState = useCallback((update: ToolPanelStateUpdate) => {
+    onStateChange(panelKey, update);
+  }, [onStateChange, panelKey]);
 
   const clearTabDrag = useCallback(() => {
     if (tabDragFrame.current !== null) {
@@ -253,6 +253,12 @@ export function TerminalPanel({
     if (suppressTabClickTimer.current !== null) window.clearTimeout(suppressTabClickTimer.current);
     document.body.classList.remove("is-dragging-tool-tab");
   }, []);
+
+  useEffect(() => {
+    if (active) return;
+    clearTabDrag();
+    setAddMenuOpen(false);
+  }, [active, clearTabDrag]);
 
   useLayoutEffect(() => {
     if (!addMenuOpen) return;
@@ -318,19 +324,10 @@ export function TerminalPanel({
   }, [addMenuOpen, workspace]);
 
   useEffect(() => {
-    if (workspace) return;
-    const fileTabIds = new Set(
-      tabsRef.current.filter((tab) => tab.type === "files").map((tab) => tab.id),
-    );
-    if (fileTabIds.size === 0) return;
-    const nextTabs = tabsRef.current.filter((tab) => tab.type !== "files");
-    tabsRef.current = nextTabs;
-    setTabs(nextTabs);
-    setActiveTabId((current) => current && fileTabIds.has(current)
-      ? nextTabs[0]?.id ?? null
-      : current);
+    if (workspace || !tabsRef.current.some((tab) => tab.type === "files")) return;
+    changeState((current) => removeUnavailableFileTabs(current, workspace));
     setAddMenuOpen(false);
-  }, [workspace]);
+  }, [changeState, workspace]);
 
   const updateTabMeta = useCallback((tabId: string, meta: TerminalTabMeta) => {
     setTabMeta((current) => {
@@ -349,8 +346,11 @@ export function TerminalPanel({
 
   function openTerminal() {
     const id = crypto.randomUUID();
-    setTabs((current) => [...current, { id, type: "terminal", workingDirectory }]);
-    setActiveTabId(id);
+    changeState((current) => ({
+      ...current,
+      tabs: [...current.tabs, { id, type: "terminal", workingDirectory }],
+      activeTabId: id,
+    }));
     setAddMenuOpen(false);
   }
 
@@ -358,13 +358,16 @@ export function TerminalPanel({
     if (!workspace) return;
     const existing = tabs.find((tab) => tab.type === "files");
     if (existing) {
-      setActiveTabId(existing.id);
+      changeState((current) => ({ ...current, activeTabId: existing.id }));
       setAddMenuOpen(false);
       return;
     }
     const id = crypto.randomUUID();
-    setTabs((current) => [{ id, type: "files" }, ...current]);
-    setActiveTabId(id);
+    changeState((current) => ({
+      ...current,
+      tabs: [{ id, type: "files" }, ...current.tabs],
+      activeTabId: id,
+    }));
     setAddMenuOpen(false);
   }
 
@@ -373,7 +376,9 @@ export function TerminalPanel({
       suppressTabClick.current = false;
       return;
     }
-    setActiveTabId(tabId);
+    changeState((current) => current.activeTabId === tabId
+      ? current
+      : { ...current, activeTabId: tabId });
     setAddMenuOpen(false);
   }
 
@@ -386,8 +391,11 @@ export function TerminalPanel({
       ? remainingTabs[Math.min(closingIndex, remainingTabs.length - 1)]?.id ?? null
       : activeTabId;
 
-    setTabs(remainingTabs);
-    setActiveTabId(nextActiveId);
+    changeState((current) => ({
+      ...current,
+      tabs: remainingTabs,
+      activeTabId: nextActiveId,
+    }));
     setAddMenuOpen(false);
     setTabMeta((current) => {
       const next = { ...current };
@@ -546,7 +554,7 @@ export function TerminalPanel({
           drag.element.style.removeProperty("--tool-tab-drag-x");
           const nextTabs = reorderTab(currentTabs, drag.tabId, finalIndex);
           tabsRef.current = nextTabs;
-          flushSync(() => setTabs(nextTabs));
+          flushSync(() => changeState((current) => ({ ...current, tabs: nextTabs })));
           window.requestAnimationFrame(() => list?.removeAttribute("data-reorder-committing"));
           setTabOrderAnnouncement(`Moved tab to position ${finalIndex + 1} of ${nextTabs.length}.`);
         }
@@ -575,7 +583,7 @@ export function TerminalPanel({
     if (!tab) return;
     nextTabs.splice(nextIndex, 0, tab);
     tabsRef.current = nextTabs;
-    setTabs(nextTabs);
+    changeState((current) => ({ ...current, tabs: nextTabs }));
     setTabOrderAnnouncement(`Moved tab to position ${nextIndex + 1} of ${nextTabs.length}.`);
   }
 
@@ -595,7 +603,12 @@ export function TerminalPanel({
   }
 
   return (
-    <aside id="tools-panel" className="right-side-panel" aria-label="Tools">
+    <aside
+      id={active ? "tools-panel" : undefined}
+      className="right-side-panel"
+      aria-label="Tools"
+      hidden={!active}
+    >
       <div className="side-panel-tabs" ref={tabHeader} data-tauri-drag-region="deep">
         <div className="side-panel-tab-rail">
           <div
@@ -738,7 +751,7 @@ export function TerminalPanel({
           <TerminalToolView
             key={tab.id}
             tab={tab}
-            active={activeTabId === tab.id}
+            active={active && activeTabId === tab.id}
             appearance={appearance}
             panelOpen={open}
             onMetaChange={updateTabMeta}

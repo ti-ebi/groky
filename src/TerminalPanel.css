@@ -36,7 +36,11 @@
     visibility 0s linear 180ms;
 }
 
-.app-shell.right-panel-open .right-side-panel {
+.right-side-panel[hidden] {
+  display: none;
+}
+
+.app-shell.right-panel-open .right-side-panel:not([hidden]) {
   visibility: visible;
   opacity: 1;
   pointer-events: auto;
