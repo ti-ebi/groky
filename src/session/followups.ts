@@ -78,8 +78,7 @@ export function modelsWithPendingSettings(
 
 export function hasPendingSettings(pending: PendingSessionSettings | null) {
   return Boolean(
-    pending?.approvalMode
-    || pending?.modelId
+    pending?.modelId
     || pending?.reasoningEffort,
   );
 }

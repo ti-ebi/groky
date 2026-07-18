@@ -1,34 +1,55 @@
 import type { ApprovalMode, PermissionOption } from "./types";
+import type { IconName } from "../ui/Icon";
 
 export interface ApprovalModeOption {
   id: ApprovalMode;
   label: string;
   shortDescription: string;
   description: string;
-  glyph: string;
+  icon: IconName;
   tag?: string;
 }
 
+export const APPROVAL_MODE_STORAGE_KEY = "groky.approvalMode";
+
 export const APPROVAL_MODES: ApprovalModeOption[] = [
   {
-    id: "ask",
-    label: "Ask",
+    id: "normal",
+    label: "Normal",
     shortDescription: "Review actions",
     description: "Ask before actions that are not already allowed.",
-    glyph: "?",
-    tag: "Recommended",
+    icon: "shield",
+  },
+  {
+    id: "plan",
+    label: "Plan",
+    shortDescription: "Plan before editing",
+    description: "Explore the workspace and propose a plan before writing files.",
+    icon: "file-plan",
+  },
+  {
+    id: "auto",
+    label: "Auto",
+    shortDescription: "Approve safe actions",
+    description: "Use Grok's classifier to approve safe actions and ask for risky ones.",
+    icon: "gauge",
   },
   {
     id: "alwaysApprove",
-    label: "Always approve",
+    label: "Always-Approve",
     shortDescription: "Approval prompts skipped",
     description: "Skip prompts unless a policy rule still requires approval.",
-    glyph: "!",
+    icon: "triangle-alert",
   },
 ];
 
 export function approvalModeOption(mode: ApprovalMode) {
   return APPROVAL_MODES.find((option) => option.id === mode) ?? APPROVAL_MODES[0];
+}
+
+export function normalizeApprovalMode(value: unknown): ApprovalMode {
+  if (value === "plan" || value === "auto" || value === "alwaysApprove") return value;
+  return "normal";
 }
 
 export function enablesAlwaysApprove(option: PermissionOption | undefined) {

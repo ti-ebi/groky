@@ -1,6 +1,6 @@
 import type { EventTiming } from "../timing.ts";
 
-export type ApprovalMode = "ask" | "alwaysApprove";
+export type ApprovalMode = "normal" | "plan" | "auto" | "alwaysApprove";
 export type FollowUpBehavior = "queue" | "steer";
 
 export interface Connection {
@@ -213,7 +213,6 @@ export interface QueuedPrompt {
 }
 
 export interface PendingSessionSettings {
-  approvalMode?: ApprovalMode;
   modelId?: string;
   reasoningEffort?: string;
 }

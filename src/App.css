@@ -2320,13 +2320,9 @@ body.is-resizing-side-panel .app-shell {
 .shield-mark {
   position: relative;
   display: grid;
-  width: 15px;
-  height: 17px;
+  width: 18px;
+  height: 18px;
   place-items: center;
-  border: 1.5px solid currentColor;
-  border-radius: 7px 7px 9px 9px;
-  font-size: 9px;
-  font-weight: 700;
 }
 
 .approval-control,
@@ -2344,12 +2340,22 @@ body.is-resizing-side-panel .app-shell {
   letter-spacing: 0.07em;
 }
 
-.approval-control .approval-button .icon {
+.approval-control .approval-button > .icon {
   margin-left: -2px;
   color: color-mix(in srgb, currentColor 68%, transparent);
 }
 
-.approval-control.mode-ask .approval-button {
+.approval-control.mode-normal .approval-button {
+  color: var(--signal-strong);
+}
+
+.approval-control.mode-plan .approval-button {
+  background: var(--surface-raised);
+  color: var(--text-soft);
+}
+
+.approval-control.mode-auto .approval-button {
+  background: var(--signal-soft);
   color: var(--signal-strong);
 }
 
@@ -2479,7 +2485,6 @@ body.is-resizing-side-panel .app-shell {
   border-radius: 9px 9px 11px 11px;
   background: var(--surface-raised);
   color: var(--text-soft);
-  font: 700 10px var(--mono);
 }
 
 .approval-option[aria-selected="true"] .approval-option-glyph {

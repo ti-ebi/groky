@@ -30,6 +30,7 @@ const MAX_ACP_ERROR_MESSAGE_CHARS: usize = 800;
 const COMMANDS_LIST_METHOD: &str = "_x.ai/commands/list";
 const SESSION_INFO_METHOD: &str = "_x.ai/session/info";
 const INTERJECT_METHOD: &str = "_x.ai/interject";
+const PERMISSION_MODE_CHANGED_METHOD: &str = "x.ai/yolo_mode_changed";
 
 type PendingResponse = oneshot::Sender<Result<Value, String>>;
 type PendingResponses = HashMap<u64, PendingResponse>;
@@ -40,7 +41,10 @@ type SessionUpdates = HashMap<String, Vec<SessionUpdateEvent>>;
 #[serde(rename_all = "camelCase")]
 pub enum ApprovalMode {
     #[default]
-    Ask,
+    #[serde(alias = "ask")]
+    Normal,
+    Plan,
+    Auto,
     AlwaysApprove,
 }
 
@@ -49,11 +53,27 @@ impl ApprovalMode {
         let mut args = vec!["--no-auto-update", "--no-memory", "--permission-mode"];
 
         match self {
-            Self::Ask => args.extend(["default", "agent", "stdio"]),
+            Self::Normal | Self::Plan => args.extend(["default", "agent", "stdio"]),
+            Self::Auto => args.extend(["auto", "agent", "stdio"]),
             Self::AlwaysApprove => args.extend(["bypassPermissions", "agent", "stdio"]),
         }
 
         args
+    }
+
+    fn session_mode_id(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Normal | Self::Auto | Self::AlwaysApprove => "default",
+        }
+    }
+
+    fn permission_mode_id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AlwaysApprove => "always-approve",
+            Self::Normal | Self::Plan => "ask",
+        }
     }
 }
 
@@ -406,9 +426,13 @@ impl AcpTransport {
         Arc::ptr_eq(&self.writer, &other.writer)
     }
 
-    pub async fn new_session(&self, cwd: &str) -> Result<Value, String> {
+    pub async fn new_session(
+        &self,
+        cwd: &str,
+        approval_mode: ApprovalMode,
+    ) -> Result<Value, String> {
         let response = self
-            .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
+            .request("session/new", new_session_params(cwd, approval_mode))
             .await?;
         let session_id = response
             .get("sessionId")
@@ -511,6 +535,7 @@ impl AcpTransport {
         &self,
         session_id: &str,
         cwd: &str,
+        approval_mode: ApprovalMode,
     ) -> Result<(Value, Vec<SessionUpdateEvent>), String> {
         self.owned_sessions
             .lock()
@@ -521,7 +546,10 @@ impl AcpTransport {
             .await
             .insert(session_id.to_string(), Vec::new());
         let response = self
-            .request("session/load", load_session_params(session_id, cwd))
+            .request(
+                "session/load",
+                load_session_params(session_id, cwd, approval_mode),
+            )
             .await;
         match response {
             Ok(response) => {
@@ -675,14 +703,18 @@ impl AcpTransport {
         Ok(())
     }
 
-    pub async fn set_approval_mode(
+    pub async fn set_approval_mode(&self, approval_mode: ApprovalMode) -> Result<(), String> {
+        write_message(&self.writer, &approval_mode_notification(approval_mode)).await
+    }
+
+    pub async fn set_session_mode(
         &self,
         session_id: &str,
         approval_mode: ApprovalMode,
     ) -> Result<(), String> {
         self.request(
-            "session/prompt",
-            approval_mode_prompt_params(session_id, approval_mode),
+            "session/set_mode",
+            session_mode_params(session_id, approval_mode),
         )
         .await?;
         Ok(())
@@ -1242,16 +1274,51 @@ fn permission_decision_update(
     )
 }
 
-fn load_session_params(session_id: &str, cwd: &str) -> Value {
-    json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] })
+fn approval_mode_metadata(approval_mode: ApprovalMode) -> Value {
+    let mut metadata = json!({
+        "yoloMode": approval_mode == ApprovalMode::AlwaysApprove,
+        "autoMode": approval_mode == ApprovalMode::Auto,
+    });
+    if approval_mode == ApprovalMode::Plan {
+        metadata["agentProfile"] = json!("grok-build-plan");
+    }
+    metadata
 }
 
-fn approval_mode_prompt_params(session_id: &str, approval_mode: ApprovalMode) -> Value {
-    let command = match approval_mode {
-        ApprovalMode::Ask => "/always-approve off",
-        ApprovalMode::AlwaysApprove => "/always-approve on",
-    };
-    prompt_params(session_id, command, &[])
+fn new_session_params(cwd: &str, approval_mode: ApprovalMode) -> Value {
+    json!({
+        "cwd": cwd,
+        "mcpServers": [],
+        "_meta": approval_mode_metadata(approval_mode),
+    })
+}
+
+fn load_session_params(session_id: &str, cwd: &str, approval_mode: ApprovalMode) -> Value {
+    json!({
+        "sessionId": session_id,
+        "cwd": cwd,
+        "mcpServers": [],
+        "_meta": approval_mode_metadata(approval_mode),
+    })
+}
+
+fn session_mode_params(session_id: &str, approval_mode: ApprovalMode) -> Value {
+    json!({
+        "sessionId": session_id,
+        "modeId": approval_mode.session_mode_id(),
+    })
+}
+
+fn approval_mode_notification(approval_mode: ApprovalMode) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": PERMISSION_MODE_CHANGED_METHOD,
+        "params": {
+            "yolo_mode": approval_mode == ApprovalMode::AlwaysApprove,
+            "auto_mode": approval_mode == ApprovalMode::Auto,
+            "permission_mode": approval_mode.permission_mode_id(),
+        }
+    })
 }
 
 fn interject_params(session_id: &str, text: &str, interjection_id: &str) -> Value {
@@ -1879,6 +1946,7 @@ mod tests {
         assert_eq!(COMMANDS_LIST_METHOD, "_x.ai/commands/list");
         assert_eq!(SESSION_INFO_METHOD, "_x.ai/session/info");
         assert_eq!(INTERJECT_METHOD, "_x.ai/interject");
+        assert_eq!(PERMISSION_MODE_CHANGED_METHOD, "x.ai/yolo_mode_changed");
     }
 
     #[test]
@@ -1929,7 +1997,7 @@ while IFS= read -r ignored; do :; done
         permissions.set_mode(0o700);
         std::fs::set_permissions(&agent, permissions).expect("fake ACP agent should be executable");
 
-        let transport = AcpTransport::spawn(&agent, &test_dir, ApprovalMode::Ask, None)
+        let transport = AcpTransport::spawn(&agent, &test_dir, ApprovalMode::Normal, None)
             .await
             .expect("fake ACP transport should start");
         let accepted = transport
@@ -2073,12 +2141,34 @@ while IFS= read -r ignored; do :; done
     #[test]
     fn approval_modes_build_explicit_session_arguments() {
         assert_eq!(
-            ApprovalMode::Ask.agent_args(),
+            ApprovalMode::Normal.agent_args(),
             [
                 "--no-auto-update",
                 "--no-memory",
                 "--permission-mode",
                 "default",
+                "agent",
+                "stdio"
+            ]
+        );
+        assert_eq!(
+            ApprovalMode::Plan.agent_args(),
+            [
+                "--no-auto-update",
+                "--no-memory",
+                "--permission-mode",
+                "default",
+                "agent",
+                "stdio"
+            ]
+        );
+        assert_eq!(
+            ApprovalMode::Auto.agent_args(),
+            [
+                "--no-auto-update",
+                "--no-memory",
+                "--permission-mode",
+                "auto",
                 "agent",
                 "stdio"
             ]
@@ -2097,6 +2187,10 @@ while IFS= read -r ignored; do :; done
         assert_eq!(
             serde_json::to_value(ApprovalMode::AlwaysApprove).unwrap(),
             json!("alwaysApprove")
+        );
+        assert_eq!(
+            serde_json::from_value::<ApprovalMode>(json!("ask")).unwrap(),
+            ApprovalMode::Normal
         );
     }
 
@@ -2309,19 +2403,43 @@ while IFS= read -r ignored; do :; done
     }
 
     #[test]
-    fn approval_mode_control_prompts_are_scoped_to_the_requested_session() {
+    fn approval_modes_build_grok_permission_and_session_mode_messages() {
         assert_eq!(
-            approval_mode_prompt_params("session-ask", ApprovalMode::Ask),
+            session_mode_params("session-normal", ApprovalMode::Normal),
             json!({
-                "sessionId": "session-ask",
-                "prompt": [{ "type": "text", "text": "/always-approve off" }]
+                "sessionId": "session-normal",
+                "modeId": "default"
             })
         );
         assert_eq!(
-            approval_mode_prompt_params("session-approve", ApprovalMode::AlwaysApprove),
+            session_mode_params("session-plan", ApprovalMode::Plan),
             json!({
-                "sessionId": "session-approve",
-                "prompt": [{ "type": "text", "text": "/always-approve on" }]
+                "sessionId": "session-plan",
+                "modeId": "plan"
+            })
+        );
+        assert_eq!(
+            approval_mode_notification(ApprovalMode::Auto),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "x.ai/yolo_mode_changed",
+                "params": {
+                    "yolo_mode": false,
+                    "auto_mode": true,
+                    "permission_mode": "auto"
+                }
+            })
+        );
+        assert_eq!(
+            approval_mode_notification(ApprovalMode::AlwaysApprove),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "x.ai/yolo_mode_changed",
+                "params": {
+                    "yolo_mode": true,
+                    "auto_mode": false,
+                    "permission_mode": "always-approve"
+                }
             })
         );
     }
@@ -2418,13 +2536,38 @@ while IFS= read -r ignored; do :; done
     }
 
     #[test]
-    fn loading_a_session_includes_its_workspace_and_empty_mcp_servers() {
+    fn session_requests_include_workspace_and_global_approval_mode() {
         assert_eq!(
-            load_session_params("session-42", "/workspace/project"),
+            new_session_params("/workspace/project", ApprovalMode::Auto),
+            json!({
+                "cwd": "/workspace/project",
+                "mcpServers": [],
+                "_meta": { "yoloMode": false, "autoMode": true }
+            })
+        );
+        assert_eq!(
+            new_session_params("/workspace/project", ApprovalMode::Plan),
+            json!({
+                "cwd": "/workspace/project",
+                "mcpServers": [],
+                "_meta": {
+                    "yoloMode": false,
+                    "autoMode": false,
+                    "agentProfile": "grok-build-plan"
+                }
+            })
+        );
+        assert_eq!(
+            load_session_params(
+                "session-42",
+                "/workspace/project",
+                ApprovalMode::AlwaysApprove,
+            ),
             json!({
                 "sessionId": "session-42",
                 "cwd": "/workspace/project",
-                "mcpServers": []
+                "mcpServers": [],
+                "_meta": { "yoloMode": true, "autoMode": false }
             })
         );
     }
