@@ -47,10 +47,10 @@
 
 - Do not access processes or the filesystem directly from the React renderer.
 - Run Grok Build only through the Tauri Rust host and its typed ACP boundary.
-- Resolve workspace file operations from the active session ID in the Rust host; accept normalized relative paths and reject canonical targets outside the session working directory.
+- Resolve workspace file operations in the Rust host from either an active non-standalone session ID or the registered working directory selected before session creation; require exactly one source, accept normalized relative paths, and reject canonical targets outside its workspace root.
 - Keep file preview size limits, MIME handling, attachment inspection, filesystem watching, and system file-manager launching in `src-tauri/src/file_manager.rs`.
 - Run interactive shells through the Rust-hosted PTY commands; validate terminal identifiers, dimensions, and input sizes before touching a terminal session.
-- Stop PTYs when their terminal tab closes, stop workspace watchers when the Files tab leaves a session, and stop all host runtimes when the application exits.
+- Stop PTYs when their terminal tab closes, stop workspace watchers when the Files tab stops targeting a workspace, and stop all host runtimes when the application exits.
 - Keep Rust command payloads, emitted event names, and their TypeScript counterparts synchronized, including serde casing and optional fields.
 - Do not persist prompts, source code, credentials, session data, or raw ACP traffic in application logs.
 - Write all user-facing UI text and host-provided error or status messages in English.
@@ -70,7 +70,7 @@
 
 - Flag direct process or filesystem access from `src/`.
 - Flag Grok Build integration that bypasses the typed Tauri ACP boundary.
-- Flag workspace file commands that trust renderer-supplied absolute paths or permit traversal or symlink escape outside the active working directory.
+- Flag workspace file commands that trust renderer-supplied absolute paths without matching a registered pre-session working directory, or permit traversal or symlink escape outside the resolved workspace root.
 - Flag PTYs that survive terminal-tab or application teardown, and flag filesystem watchers that survive Files-tab, session, or application teardown.
 - Flag mismatches between Rust command or event payloads and their renderer-side TypeScript types.
 - Flag logs that may contain prompts, source code, credentials, session data, or raw ACP traffic.

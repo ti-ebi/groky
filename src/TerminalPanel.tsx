@@ -188,18 +188,20 @@ function TerminalToolView({
 export function TerminalPanel({
   open,
   sessionId,
+  workspace,
   workingDirectory,
   attachmentDisabled,
   onAttach,
 }: {
   open: boolean;
   sessionId: string | null;
+  workspace: string | null;
   workingDirectory: string | null;
   attachmentDisabled: boolean;
   onAttach: (attachment: WorkspaceFileAttachment) => boolean;
 }) {
   const [initialTabs] = useState<ToolTab[]>(() => [
-    { id: crypto.randomUUID(), type: "files" },
+    ...(workspace ? [{ id: crypto.randomUUID(), type: "files" } as const] : []),
     { id: crypto.randomUUID(), type: "terminal", workingDirectory },
   ]);
   const tabHeader = useRef<HTMLDivElement | null>(null);
@@ -278,7 +280,10 @@ export function TerminalPanel({
   useEffect(() => {
     if (!addMenuOpen) return;
 
-    const focusFrame = window.requestAnimationFrame(() => addFilesItem.current?.focus());
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (workspace) addFilesItem.current?.focus();
+      else addTerminalItem.current?.focus();
+    });
     const handlePointerDown = (event: PointerEvent) => {
       if (
         !(event.target instanceof Node)
@@ -304,7 +309,22 @@ export function TerminalPanel({
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [addMenuOpen]);
+  }, [addMenuOpen, workspace]);
+
+  useEffect(() => {
+    if (workspace) return;
+    const fileTabIds = new Set(
+      tabsRef.current.filter((tab) => tab.type === "files").map((tab) => tab.id),
+    );
+    if (fileTabIds.size === 0) return;
+    const nextTabs = tabsRef.current.filter((tab) => tab.type !== "files");
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+    setActiveTabId((current) => current && fileTabIds.has(current)
+      ? nextTabs[0]?.id ?? null
+      : current);
+    setAddMenuOpen(false);
+  }, [workspace]);
 
   const updateTabMeta = useCallback((tabId: string, meta: TerminalTabMeta) => {
     setTabMeta((current) => {
@@ -329,6 +349,7 @@ export function TerminalPanel({
   }
 
   function openFiles() {
+    if (!workspace) return;
     const existing = tabs.find((tab) => tab.type === "files");
     if (existing) {
       setActiveTabId(existing.id);
@@ -662,7 +683,14 @@ export function TerminalPanel({
             aria-label="Add tool tab"
             style={{ left: addMenuLeft }}
           >
-            <button ref={addFilesItem} type="button" role="menuitem" onClick={openFiles}>
+            <button
+              ref={addFilesItem}
+              type="button"
+              role="menuitem"
+              disabled={!workspace}
+              title={workspace ? undefined : "Choose a working directory to browse files"}
+              onClick={openFiles}
+            >
               <PanelIcon name="files" size={14} />
               <span>Files</span>
             </button>
@@ -694,6 +722,7 @@ export function TerminalPanel({
             <FileExplorer
               active={open && activeTabId === tab.id}
               sessionId={sessionId}
+              workspace={workspace}
               workingDirectory={workingDirectory}
               attachmentDisabled={attachmentDisabled}
               onAttach={onAttach}

@@ -2132,6 +2132,7 @@ function App() {
         <TerminalPanel
           open={sidePanelOpen}
           sessionId={activeSession?.connection.sessionId ?? null}
+          workspace={activeSession ? activeSession.connection.workspace : workspace}
           workingDirectory={activeSession?.connection.workingDirectory ?? workspace}
           attachmentDisabled={attachmentDisabled || attachments.length >= MAX_MESSAGE_ATTACHMENTS}
           onAttach={addWorkspaceAttachment}

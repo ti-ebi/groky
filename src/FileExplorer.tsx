@@ -14,6 +14,7 @@ import type {
   WorkspaceDirectoryListing,
   WorkspaceFileAttachment,
   WorkspaceFileEntry,
+  WorkspaceFileTarget,
 } from "./host/types";
 import {
   ExplorerIcon,
@@ -83,12 +84,14 @@ function directoryMatchesListing(
 export function FileExplorer({
   active,
   sessionId,
+  workspace,
   workingDirectory,
   attachmentDisabled,
   onAttach,
 }: {
   active: boolean;
   sessionId: string | null;
+  workspace: string | null;
   workingDirectory: string | null;
   attachmentDisabled: boolean;
   onAttach: (attachment: WorkspaceFileAttachment) => boolean;
@@ -111,6 +114,13 @@ export function FileExplorer({
   const [openingFolder, setOpeningFolder] = useState(false);
   const [splitPaneWidth, setSplitPaneWidth] = useState(0);
   const [previewPaneWidth, setPreviewPaneWidth] = useState<number | null>(null);
+  const target = useMemo<WorkspaceFileTarget | null>(() => {
+    if (!workspace) return null;
+    return sessionId ? { sessionId } : { workingDirectory: workspace };
+  }, [sessionId, workspace]);
+  const targetKey = target
+    ? sessionId ? `session:${sessionId}` : `workspace:${workspace}`
+    : null;
 
   useEffect(() => {
     const splitPane = splitPaneRef.current;
@@ -131,7 +141,7 @@ export function FileExplorer({
     resizeObserver.observe(splitPane);
     updateWidth();
     return () => resizeObserver.disconnect();
-  }, [sessionId]);
+  }, [targetKey]);
 
   useEffect(() => () => {
     document.body.classList.remove("is-resizing-file-preview");
@@ -152,7 +162,7 @@ export function FileExplorer({
   }, []);
 
   const loadDirectory = useCallback(async (path: string, force = false, background = false) => {
-    if (!sessionId || loadingPaths.current.has(path)) return;
+    if (!target || loadingPaths.current.has(path)) return;
     if (!force && directoryRef.current[path]?.status === "ready") return;
 
     const generation = requestGeneration.current;
@@ -169,7 +179,7 @@ export function FileExplorer({
     }
 
     try {
-      const listing = await host.workspaceFiles.list(sessionId, path);
+      const listing = await host.workspaceFiles.list(target, path);
       if (generation !== requestGeneration.current) return;
       commitDirectories((current) => {
         const previous = current[path];
@@ -200,7 +210,7 @@ export function FileExplorer({
     } finally {
       loadingPaths.current.delete(path);
     }
-  }, [commitDirectories, sessionId]);
+  }, [commitDirectories, target]);
 
   useEffect(() => {
     requestGeneration.current += 1;
@@ -214,11 +224,11 @@ export function FileExplorer({
     setOpeningFolder(false);
     setPreviewState(null);
     setNotice(null);
-  }, [sessionId]);
+  }, [targetKey]);
 
   useEffect(() => {
-    if (active && sessionId) void loadDirectory("");
-  }, [active, loadDirectory, sessionId]);
+    if (active && target) void loadDirectory("");
+  }, [active, loadDirectory, target]);
 
   const rows = useMemo(() => {
     const visibleRows: VisibleFileRow[] = [];
@@ -279,12 +289,12 @@ export function FileExplorer({
   }
 
   const previewFile = useCallback(async (entry: WorkspaceFileEntry, background = false) => {
-    if (!sessionId || entry.kind === "directory") return;
+    if (!target || entry.kind === "directory") return;
     const generation = ++previewGeneration.current;
     setSelectedPath(entry.path);
     if (!background) setPreviewState({ status: "loading", entry });
     try {
-      const preview = await host.workspaceFiles.preview(sessionId, entry.path);
+      const preview = await host.workspaceFiles.preview(target, entry.path);
       if (generation === previewGeneration.current) {
         setPreviewState({ status: "ready", entry, preview });
       }
@@ -293,10 +303,10 @@ export function FileExplorer({
         setPreviewState({ status: "error", entry, error: String(error) });
       }
     }
-  }, [sessionId]);
+  }, [target]);
 
   useEffect(() => {
-    if (!active || !sessionId) return;
+    if (!active || !target) return;
 
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -345,12 +355,13 @@ export function FileExplorer({
     };
 
     void host.workspaceFiles.onChanged((payload) => {
-      if (payload.sessionId === sessionId) scheduleRefresh(payload.paths);
+      if (payload.watchId === watchId) scheduleRefresh(payload.paths);
     }).then((stopListening) => {
       if (disposed) stopListening();
       else unlisten = stopListening;
     });
-    void host.workspaceFiles.watch(sessionId, watchId).catch(() => undefined);
+    const watchStarted = host.workspaceFiles.watch(target, watchId);
+    void watchStarted.catch(() => undefined);
 
     const reconciliationTimer = window.setInterval(() => scheduleRefresh([]), 15_000);
     return () => {
@@ -358,9 +369,11 @@ export function FileExplorer({
       window.clearTimeout(refreshTimer);
       window.clearInterval(reconciliationTimer);
       unlisten?.();
-      void host.workspaceFiles.unwatch(sessionId, watchId).catch(() => undefined);
+      void watchStarted
+        .then(() => host.workspaceFiles.unwatch(watchId))
+        .catch(() => undefined);
     };
-  }, [active, loadDirectory, previewFile, sessionId]);
+  }, [active, loadDirectory, previewFile, target]);
 
   function activateEntry(entry: WorkspaceFileEntry) {
     setSelectedPath(entry.path);
@@ -372,11 +385,11 @@ export function FileExplorer({
   }
 
   async function openSelectedFolder() {
-    if (!sessionId || openingFolder) return;
+    if (!target || openingFolder) return;
     setOpeningFolder(true);
     setNotice(null);
     try {
-      await host.workspaceFiles.openFolder(sessionId, folderToOpen);
+      await host.workspaceFiles.openFolder(target, folderToOpen);
       setNotice(selectedEntry && selectedEntry.kind !== "directory"
         ? `Opened the folder containing ${selectedEntry.name}.`
         : "Opened the selected folder in the system file manager.");
@@ -388,12 +401,12 @@ export function FileExplorer({
   }
 
   async function attachFile(entry: WorkspaceFileEntry) {
-    if (!sessionId || entry.kind !== "file" || attachmentDisabled || attachingPath) return;
+    if (!target || entry.kind !== "file" || attachmentDisabled || attachingPath) return;
     const generation = requestGeneration.current;
     setAttachingPath(entry.path);
     setNotice(null);
     try {
-      const attachment = await host.workspaceFiles.inspectAttachment(sessionId, entry.path);
+      const attachment = await host.workspaceFiles.inspectAttachment(target, entry.path);
       if (generation !== requestGeneration.current) return;
       const added = onAttach(attachment);
       setNotice(added ? `${entry.name} attached to the next message.` : `${entry.name} is already attached.`);
@@ -513,12 +526,12 @@ export function FileExplorer({
     if (containerWidth > 0) setPreviewPaneWidth(defaultPreviewPaneWidth(containerWidth));
   }
 
-  if (!sessionId) {
+  if (!target) {
     return (
       <div className="file-explorer-unavailable" role="status">
         <span className="file-explorer-unavailable-icon"><ExplorerIcon name="folder" size={18} /></span>
-        <strong>Files become available with a session</strong>
-        <p>Start or reopen a Grok session to browse its working directory.</p>
+        <strong>Files are unavailable in standalone mode</strong>
+        <p>Choose a working directory before starting a session to browse its files.</p>
       </div>
     );
   }
@@ -686,7 +699,7 @@ export function FileExplorer({
         />
         <FilePreviewPane
           state={previewState}
-          sessionId={sessionId}
+          target={target}
           attachmentDisabled={attachmentDisabled}
           attaching={attachingPath === previewState?.entry.path}
           onAttach={(entry) => void attachFile(entry)}

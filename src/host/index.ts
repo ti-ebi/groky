@@ -27,6 +27,7 @@ import type {
   WorkspaceDirectoryListing,
   WorkspaceFileAttachment,
   WorkspaceFilePreview,
+  WorkspaceFileTarget,
 } from "./types";
 
 type EventHandler<T> = (payload: T) => void;
@@ -37,6 +38,12 @@ function command<T>(name: string, payload?: Record<string, unknown>) {
 
 function subscribe<T>(event: string, handler: EventHandler<T>) {
   return listen<T>(event, ({ payload }) => handler(payload));
+}
+
+function workspaceFilePayload(target: WorkspaceFileTarget) {
+  return "sessionId" in target
+    ? { sessionId: target.sessionId, workingDirectory: null }
+    : { sessionId: null, workingDirectory: target.workingDirectory };
 }
 
 export const host = {
@@ -78,23 +85,32 @@ export const host = {
   },
 
   workspaceFiles: {
-    list: (sessionId: string, path: string) => (
-      command<WorkspaceDirectoryListing>("workspace_list_directory", { sessionId, path })
+    list: (target: WorkspaceFileTarget, path: string) => (
+      command<WorkspaceDirectoryListing>("workspace_list_directory", {
+        ...workspaceFilePayload(target),
+        path,
+      })
     ),
-    preview: (sessionId: string, path: string) => (
-      command<WorkspaceFilePreview>("workspace_preview_file", { sessionId, path })
+    preview: (target: WorkspaceFileTarget, path: string) => (
+      command<WorkspaceFilePreview>("workspace_preview_file", {
+        ...workspaceFilePayload(target),
+        path,
+      })
     ),
-    watch: (sessionId: string, watchId: string) => (
-      command<void>("workspace_watch", { sessionId, watchId })
+    watch: (target: WorkspaceFileTarget, watchId: string) => (
+      command<void>("workspace_watch", { ...workspaceFilePayload(target), watchId })
     ),
-    unwatch: (sessionId: string, watchId: string) => (
-      command<void>("workspace_unwatch", { sessionId, watchId })
+    unwatch: (watchId: string) => (
+      command<void>("workspace_unwatch", { watchId })
     ),
-    openFolder: (sessionId: string, path: string) => (
-      command<void>("workspace_open_folder", { sessionId, path })
+    openFolder: (target: WorkspaceFileTarget, path: string) => (
+      command<void>("workspace_open_folder", { ...workspaceFilePayload(target), path })
     ),
-    inspectAttachment: (sessionId: string, path: string) => (
-      command<WorkspaceFileAttachment>("workspace_inspect_attachment", { sessionId, path })
+    inspectAttachment: (target: WorkspaceFileTarget, path: string) => (
+      command<WorkspaceFileAttachment>("workspace_inspect_attachment", {
+        ...workspaceFilePayload(target),
+        path,
+      })
     ),
     onChanged: (handler: EventHandler<WorkspaceChangedEvent>) => (
       subscribe("groky://workspace-changed", handler)

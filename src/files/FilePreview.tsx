@@ -2,7 +2,11 @@ import { useEffect, useState, type ComponentProps } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { host } from "../host";
-import type { WorkspaceFileEntry, WorkspaceFilePreview } from "../host/types";
+import type {
+  WorkspaceFileEntry,
+  WorkspaceFilePreview,
+  WorkspaceFileTarget,
+} from "../host/types";
 import {
   ExplorerIcon,
   fileIconName,
@@ -258,13 +262,13 @@ function resolveMarkdownAssetPath(markdownPath: string, source: string) {
 function WorkspaceMarkdownImage({
   alt,
   markdownPath,
-  sessionId,
+  target,
   source,
   title,
 }: {
   alt: string;
   markdownPath: string;
-  sessionId: string;
+  target: WorkspaceFileTarget;
   source: string;
   title?: string;
 }) {
@@ -286,7 +290,7 @@ function WorkspaceMarkdownImage({
     let active = true;
     setDataUrl(null);
     setUnavailable(false);
-    void host.workspaceFiles.preview(sessionId, path)
+    void host.workspaceFiles.preview(target, path)
       .then((preview) => {
         if (!active) return;
         if (preview.kind === "image" && preview.dataUrl) setDataUrl(preview.dataUrl);
@@ -298,7 +302,7 @@ function WorkspaceMarkdownImage({
     return () => {
       active = false;
     };
-  }, [markdownPath, sessionId, source]);
+  }, [markdownPath, source, target]);
 
   if (dataUrl) return <img alt={alt} src={dataUrl} title={title} loading="lazy" />;
   return (
@@ -311,11 +315,11 @@ function WorkspaceMarkdownImage({
 function WorkspaceMarkdown({
   children,
   path,
-  sessionId,
+  target,
 }: {
   children: string;
   path: string;
-  sessionId: string;
+  target: WorkspaceFileTarget;
 }) {
   return (
     <ReactMarkdown
@@ -330,7 +334,7 @@ function WorkspaceMarkdown({
           <WorkspaceMarkdownImage
             alt={alt ?? ""}
             markdownPath={path}
-            sessionId={sessionId}
+            target={target}
             source={src}
             title={title}
           />
@@ -376,13 +380,13 @@ function FontPreview({ dataUrl, name }: { dataUrl: string; name: string }) {
 
 export function FilePreviewPane({
   state,
-  sessionId,
+  target,
   attachmentDisabled,
   attaching,
   onAttach,
 }: {
   state: FilePreviewState | null;
-  sessionId: string;
+  target: WorkspaceFileTarget;
   attachmentDisabled: boolean;
   attaching: boolean;
   onAttach: (entry: WorkspaceFileEntry) => void;
@@ -449,7 +453,7 @@ export function FilePreviewPane({
         )}
         {preview?.kind === "text" && preview.content !== null && isMarkdownFile(preview.name) && (
           <article className="file-preview-markdown">
-            <WorkspaceMarkdown path={preview.path} sessionId={sessionId}>{preview.content}</WorkspaceMarkdown>
+            <WorkspaceMarkdown path={preview.path} target={target}>{preview.content}</WorkspaceMarkdown>
           </article>
         )}
         {preview?.kind === "text" && preview.content !== null && !isMarkdownFile(preview.name) && (

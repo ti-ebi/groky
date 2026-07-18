@@ -95,9 +95,13 @@ export interface WorkspaceDirectoryListing {
 }
 
 export interface WorkspaceChangedEvent {
-  sessionId: string;
+  watchId: string;
   paths: string[];
 }
+
+export type WorkspaceFileTarget =
+  | { sessionId: string; workingDirectory?: never }
+  | { sessionId?: never; workingDirectory: string };
 
 export interface WorkspaceFilePreview {
   path: string;
