@@ -1557,6 +1557,84 @@
   scrollbar-width: thin;
 }
 
+.response-copy .markdown-code-block {
+  max-width: 100%;
+  margin: 0 0 1em;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-raised) 76%, var(--app-bg));
+}
+
+.markdown-code-toolbar {
+  display: flex;
+  min-height: 31px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 7px 0 13px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  background: color-mix(in srgb, var(--surface-raised) 64%, transparent);
+}
+
+.markdown-code-language {
+  overflow: hidden;
+  color: var(--faint);
+  font: 8px var(--mono);
+  letter-spacing: 0.09em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.markdown-code-copy {
+  display: inline-grid;
+  width: 26px;
+  height: 24px;
+  align-items: center;
+  justify-items: center;
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  transition: background 120ms ease, color 120ms ease, transform 90ms ease;
+}
+
+.markdown-code-copy-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.markdown-code-copy:hover {
+  background: var(--surface-hover);
+  color: var(--text-soft);
+}
+
+.markdown-code-copy:active {
+  transform: scale(0.97);
+}
+
+.markdown-code-copy.copied {
+  color: var(--signal-strong);
+}
+
+.markdown-code-copy.error {
+  color: var(--accent);
+}
+
+.response-copy .markdown-code-block pre {
+  margin: 0;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
 .response-copy pre code {
   display: block;
   min-width: max-content;

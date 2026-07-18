@@ -1358,10 +1358,14 @@ body.is-resizing-side-panel .app-shell {
   transform: translateY(0);
 }
 
-.user-message {
+.user-message-turn {
   width: fit-content;
   max-width: 78%;
-  margin: 0 0 22px auto;
+  margin: 0 0 16px auto;
+}
+
+.user-message {
+  width: 100%;
   padding: 10px 15px 11px;
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -1388,8 +1392,11 @@ body.is-resizing-side-panel .app-shell {
   margin-bottom: 0;
 }
 
-.user-message-heading .message-copy-button {
-  margin: -4px -7px -4px 0;
+.user-message-actions {
+  display: flex;
+  min-height: 26px;
+  justify-content: flex-end;
+  margin-top: 2px;
 }
 
 .message-copy-button {
