@@ -5,7 +5,7 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  color-scheme: light dark;
+  color-scheme: light;
   --app-bg: #f6f9f8;
   --sidebar-bg: #edf2f0;
   --sidebar-hover: rgba(0, 0, 0, 0.045);
@@ -2531,42 +2531,41 @@ body.is-resizing-side-panel .app-shell {
   opacity: 0.25;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #eff5f2;
-    background: #090b0a;
-    --app-bg: #090b0a;
-    --sidebar-bg: #101312;
-    --sidebar-hover: rgba(232, 255, 248, 0.05);
-    --sidebar-selected: rgba(143, 227, 193, 0.075);
-    --surface: #121514;
-    --surface-raised: #171b19;
-    --surface-hover: #1b211f;
-    --line: #222926;
-    --line-strong: #34403b;
-    --text: #eff5f2;
-    --text-soft: #bcc7c2;
-    --muted: #7f8c87;
-    --faint: #53605b;
-    --accent: #ff7138;
-    --accent-soft: rgba(255, 113, 56, 0.12);
-    --signal: #8fe3c1;
-    --signal-strong: #c2f7df;
-    --signal-soft: rgba(111, 211, 174, 0.065);
-    --signal-glow: rgba(111, 211, 174, 0.22);
-    --shadow: 0 24px 64px rgba(0, 0, 0, 0.5), 0 1px 4px rgba(0, 0, 0, 0.42);
-  }
+:root[data-theme="dark"] {
+  color: #eff5f2;
+  background: #090b0a;
+  color-scheme: dark;
+  --app-bg: #090b0a;
+  --sidebar-bg: #101312;
+  --sidebar-hover: rgba(232, 255, 248, 0.05);
+  --sidebar-selected: rgba(143, 227, 193, 0.075);
+  --surface: #121514;
+  --surface-raised: #171b19;
+  --surface-hover: #1b211f;
+  --line: #222926;
+  --line-strong: #34403b;
+  --text: #eff5f2;
+  --text-soft: #bcc7c2;
+  --muted: #7f8c87;
+  --faint: #53605b;
+  --accent: #ff7138;
+  --accent-soft: rgba(255, 113, 56, 0.12);
+  --signal: #8fe3c1;
+  --signal-strong: #c2f7df;
+  --signal-soft: rgba(111, 211, 174, 0.065);
+  --signal-glow: rgba(111, 211, 174, 0.22);
+  --shadow: 0 24px 64px rgba(0, 0, 0, 0.5), 0 1px 4px rgba(0, 0, 0, 0.42);
+}
 
-  .avatar {
-    background: #151a18;
-    color: var(--signal);
-  }
+:root[data-theme="dark"] .avatar {
+  background: #151a18;
+  color: var(--signal);
+}
 
-  .composer {
-    background:
-      linear-gradient(110deg, color-mix(in srgb, var(--signal) 3.5%, transparent), transparent 34%),
-      #151918;
-  }
+:root[data-theme="dark"] .composer {
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--signal) 3.5%, transparent), transparent 34%),
+    #151918;
 }
 
 @media (max-width: 940px) {

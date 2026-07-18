@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import type { AppearancePreference } from "../appearance";
 import type { AppUpdateInfo } from "../host/types";
 import type { SessionConfigOption, SessionUsage } from "../session/types";
 import { formatTokenCount } from "../shared/format";
@@ -7,7 +8,7 @@ import type { SidebarSessionSummary } from "../sidebar/types";
 import type { AppUpdatePhase } from "../update/types";
 import { Icon } from "../ui/Icon";
 
-export type SettingsSection = "application" | "grok" | "account" | "archived";
+export type SettingsSection = "application" | "appearance" | "grok" | "account" | "archived";
 type ArchivedSessionSort = "updated-desc" | "updated-asc" | "title-asc" | "workspace-asc";
 
 const SETTINGS_SECTIONS: Array<{
@@ -16,9 +17,21 @@ const SETTINGS_SECTIONS: Array<{
   description: string;
 }> = [
   { id: "application", label: "Application", description: "Version and signed desktop updates" },
+  { id: "appearance", label: "Appearance", description: "Choose how Groky looks on this device" },
   { id: "grok", label: "Grok Build", description: "CLI and active session details" },
   { id: "account", label: "Account", description: "Authentication and sign out" },
   { id: "archived", label: "Archived chats", description: "Restore or delete archived chats" },
+];
+
+const APPEARANCE_OPTIONS: Array<{
+  id: AppearancePreference;
+  label: string;
+  description: string;
+  icon: "monitor" | "sun" | "moon";
+}> = [
+  { id: "system", label: "System", description: "Follow your device appearance", icon: "monitor" },
+  { id: "light", label: "Light", description: "Use the light appearance", icon: "sun" },
+  { id: "dark", label: "Dark", description: "Use the dark appearance", icon: "moon" },
 ];
 
 const ARCHIVED_SESSION_COLLATOR = new Intl.Collator(undefined, {
@@ -98,6 +111,7 @@ export function SettingsSidebar({
 export function SettingsScreen({
   overlayTitlebar,
   section,
+  appearance,
   appVersion,
   cliVersion,
   connected,
@@ -111,6 +125,7 @@ export function SettingsScreen({
   archivedSessions,
   archivedActionsDisabled,
   onCheckForUpdates,
+  onAppearanceChange,
   onInstallUpdate,
   onSignOut,
   onRestoreArchived,
@@ -119,6 +134,7 @@ export function SettingsScreen({
 }: {
   overlayTitlebar: boolean;
   section: SettingsSection;
+  appearance: AppearancePreference;
   appVersion: string | null;
   cliVersion: string | null;
   connected: boolean;
@@ -132,6 +148,7 @@ export function SettingsScreen({
   archivedSessions: SidebarSessionSummary[];
   archivedActionsDisabled: boolean;
   onCheckForUpdates: () => void;
+  onAppearanceChange: (appearance: AppearancePreference) => void;
   onInstallUpdate: () => void;
   onSignOut: () => void;
   onRestoreArchived: (sessionId: string) => void;
@@ -227,6 +244,47 @@ export function SettingsScreen({
               </div>
               {updateNotice && <p className="settings-inline-notice" role="status">{updateNotice}</p>}
             </div>
+          </section>}
+
+          {section === "appearance" && <section className="settings-card appearance-settings-card" aria-labelledby="appearance-settings-title">
+            <header>
+              <div>
+                <h2 id="appearance-settings-title">Theme</h2>
+                <p>Choose a theme or keep Groky in sync with your device.</p>
+              </div>
+            </header>
+            <fieldset className="appearance-options">
+              <legend>Application theme</legend>
+              <div className="appearance-option-grid">
+                {APPEARANCE_OPTIONS.map((option) => (
+                  <label
+                    className={`appearance-option ${appearance === option.id ? "selected" : ""}`}
+                    key={option.id}
+                  >
+                    <input
+                      type="radio"
+                      name="appearance"
+                      value={option.id}
+                      checked={appearance === option.id}
+                      onChange={() => onAppearanceChange(option.id)}
+                    />
+                    <span className="appearance-preview" data-appearance={option.id} aria-hidden="true">
+                      <span className="appearance-preview-sidebar" />
+                      <span className="appearance-preview-content">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                    </span>
+                    <span className="appearance-option-label">
+                      <span><Icon name={option.icon} size={14} /><strong>{option.label}</strong></span>
+                      <small>{option.description}</small>
+                    </span>
+                    <span className="appearance-option-check" aria-hidden="true"><Icon name="check" size={11} /></span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
           </section>}
 
           {section === "grok" && <section className="settings-card" aria-labelledby="grok-settings-title">

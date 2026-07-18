@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import type { ResolvedAppearance } from "../appearance";
 import { host } from "../host";
 import type { TerminalInfo } from "../host/types";
 import { isDesktopHost } from "../shared/platform";
@@ -56,8 +57,13 @@ const DARK_TERMINAL_THEME = {
   brightWhite: "#f4f8f6",
 };
 
+function terminalTheme(appearance: ResolvedAppearance) {
+  return appearance === "dark" ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME;
+}
+
 export function TerminalSurface({
   active,
+  appearance,
   panelOpen,
   workingDirectory,
   restartToken,
@@ -65,6 +71,7 @@ export function TerminalSurface({
   onStatusChange,
 }: {
   active: boolean;
+  appearance: ResolvedAppearance;
   panelOpen: boolean;
   workingDirectory: string | null;
   restartToken: number;
@@ -95,6 +102,10 @@ export function TerminalSurface({
   }, [active, panelOpen, renderReady]);
 
   useEffect(() => {
+    if (terminalInstance.current) terminalInstance.current.options.theme = terminalTheme(appearance);
+  }, [appearance]);
+
+  useEffect(() => {
     const target = container.current;
     if (!target) return;
 
@@ -109,7 +120,6 @@ export function TerminalSurface({
     const unlisteners: Array<() => void> = [];
     const encoder = new TextEncoder();
     let writeQueue = Promise.resolve();
-    const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
     const terminal = new Terminal({
       allowProposedApi: false,
       cursorBlink: true,
@@ -124,12 +134,8 @@ export function TerminalSurface({
       lineHeight: 1.22,
       minimumContrastRatio: 4.5,
       scrollback: 5000,
-      theme: colorScheme.matches ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME,
+      theme: terminalTheme(appearance),
     });
-    const updateTerminalTheme = (event: MediaQueryListEvent) => {
-      terminal.options.theme = event.matches ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME;
-    };
-    colorScheme.addEventListener("change", updateTerminalTheme);
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(target);
@@ -245,7 +251,6 @@ export function TerminalSurface({
       dataSubscription.dispose();
       binarySubscription.dispose();
       resizeSubscription.dispose();
-      colorScheme.removeEventListener("change", updateTerminalTheme);
       unlisteners.forEach((unlisten) => unlisten());
       if (started) void host.terminal.stop(terminalId).catch(() => undefined);
       if (terminalInstance.current === terminal) terminalInstance.current = null;

@@ -17,6 +17,7 @@ import "@fontsource-variable/sora/index.css";
 import "./App.css";
 import "./styles/onboarding.css";
 import "./styles/workspace.css";
+import { useAppearance } from "./appearance";
 import { GlobalSearchDialog } from "./GlobalSearchDialog";
 import { TerminalPanel } from "./TerminalPanel";
 import { Onboarding } from "./onboarding/Onboarding";
@@ -136,6 +137,11 @@ function titleFromPrompt(prompt: string) {
 }
 
 function App() {
+  const {
+    preference: appearance,
+    resolved: resolvedAppearance,
+    setPreference: setAppearance,
+  } = useAppearance();
   const overlayTitlebar = usesOverlayTitlebar();
   const dragRegionProps = overlayTitlebar ? { "data-tauri-drag-region": "deep" } : {};
   const sidebarShortcutLabel = isMacOS() ? "⌘B" : "Ctrl+B";
@@ -1956,6 +1962,7 @@ function App() {
           <SettingsScreen
             overlayTitlebar={overlayTitlebar}
             section={activeSettingsSection}
+            appearance={appearance}
             appVersion={appVersion}
             cliVersion={connection?.cliVersion ?? status?.cliVersion ?? null}
             connected={connection !== null}
@@ -1969,6 +1976,7 @@ function App() {
             archivedSessions={archivedSidebarSessions}
             archivedActionsDisabled={sidebarActionsDisabled}
             onCheckForUpdates={() => void checkForAppUpdate(true)}
+            onAppearanceChange={setAppearance}
             onInstallUpdate={() => void installAppUpdate()}
             onSignOut={() => void signOut()}
             onRestoreArchived={(sessionId) => void mutateSessionHistory("restore", { sessionId })}
@@ -2143,6 +2151,7 @@ function App() {
       {activeView === "session" && sidePanelMounted && (
         <TerminalPanel
           open={sidePanelOpen}
+          appearance={resolvedAppearance}
           sessionId={activeSession?.connection.sessionId ?? null}
           workspace={activeSession ? activeSession.connection.workspace : workspace}
           workingDirectory={activeSession?.connection.workingDirectory ?? workspace}

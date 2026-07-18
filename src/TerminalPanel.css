@@ -450,8 +450,7 @@ body.is-dragging-tool-tab * {
   display: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  .right-side-panel {
+:root[data-theme="dark"] .right-side-panel {
     --tool-bg: #0b0f0e;
     --tool-header: #101513;
     --tool-surface: #111614;
@@ -470,106 +469,105 @@ body.is-dragging-tool-tab * {
     --tool-menu: rgba(24, 29, 27, 0.97);
     --tool-shadow: 0 16px 42px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.24);
     --tool-terminal-bg: #0b0f0e;
-  }
+}
 
-  .file-tree-row[data-file-kind="folder"] {
+:root[data-theme="dark"] .file-tree-row[data-file-kind="folder"] {
     --file-kind-color: #d9ad58;
-  }
+}
 
-  .file-tree-row[data-file-kind="code"] {
+:root[data-theme="dark"] .file-tree-row[data-file-kind="code"] {
     --file-kind-color: #83b8ff;
-  }
+}
 
-  .file-tree-row[data-file-kind="image"] {
+:root[data-theme="dark"] .file-tree-row[data-file-kind="image"] {
     --file-kind-color: #c9a0ff;
-  }
+}
 
-  .file-tree-row[data-file-kind="settings"] {
+:root[data-theme="dark"] .file-tree-row[data-file-kind="settings"] {
     --file-kind-color: #8fa49b;
-  }
+}
 
-  .file-tree-row[data-file-kind="link"] {
+:root[data-theme="dark"] .file-tree-row[data-file-kind="link"] {
     --file-kind-color: #72d7dc;
-  }
+}
 
-  .file-preview-kind[data-file-kind="code"] {
+:root[data-theme="dark"] .file-preview-kind[data-file-kind="code"] {
     color: #83b8ff;
-  }
+}
 
-  .file-preview-kind[data-file-kind="image"] {
+:root[data-theme="dark"] .file-preview-kind[data-file-kind="image"] {
     color: #c9a0ff;
-  }
+}
 
-  .file-preview-text-stage .hljs-comment,
-  .file-preview-text-stage .hljs-quote,
-  .file-preview-markdown .hljs-comment,
-  .file-preview-markdown .hljs-quote {
+:root[data-theme="dark"] .file-preview-text-stage .hljs-comment,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-quote,
+:root[data-theme="dark"] .file-preview-markdown .hljs-comment,
+:root[data-theme="dark"] .file-preview-markdown .hljs-quote {
     color: #73827c;
-  }
+}
 
-  .file-preview-text-stage .hljs-keyword,
-  .file-preview-text-stage .hljs-selector-tag,
-  .file-preview-text-stage .hljs-literal,
-  .file-preview-text-stage .hljs-section,
-  .file-preview-text-stage .hljs-link,
-  .file-preview-markdown .hljs-keyword,
-  .file-preview-markdown .hljs-selector-tag,
-  .file-preview-markdown .hljs-literal,
-  .file-preview-markdown .hljs-section,
-  .file-preview-markdown .hljs-link {
+:root[data-theme="dark"] .file-preview-text-stage .hljs-keyword,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-selector-tag,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-literal,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-section,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-link,
+:root[data-theme="dark"] .file-preview-markdown .hljs-keyword,
+:root[data-theme="dark"] .file-preview-markdown .hljs-selector-tag,
+:root[data-theme="dark"] .file-preview-markdown .hljs-literal,
+:root[data-theme="dark"] .file-preview-markdown .hljs-section,
+:root[data-theme="dark"] .file-preview-markdown .hljs-link {
     color: #c9a0ff;
-  }
+}
 
-  .file-preview-text-stage .hljs-string,
-  .file-preview-text-stage .hljs-title,
-  .file-preview-text-stage .hljs-name,
-  .file-preview-text-stage .hljs-type,
-  .file-preview-text-stage .hljs-attribute,
-  .file-preview-text-stage .hljs-symbol,
-  .file-preview-text-stage .hljs-bullet,
-  .file-preview-text-stage .hljs-addition,
-  .file-preview-text-stage .hljs-variable,
-  .file-preview-text-stage .hljs-template-tag,
-  .file-preview-text-stage .hljs-template-variable,
-  .file-preview-markdown .hljs-string,
-  .file-preview-markdown .hljs-title,
-  .file-preview-markdown .hljs-name,
-  .file-preview-markdown .hljs-type,
-  .file-preview-markdown .hljs-attribute,
-  .file-preview-markdown .hljs-symbol,
-  .file-preview-markdown .hljs-bullet,
-  .file-preview-markdown .hljs-addition,
-  .file-preview-markdown .hljs-variable,
-  .file-preview-markdown .hljs-template-tag,
-  .file-preview-markdown .hljs-template-variable {
+:root[data-theme="dark"] .file-preview-text-stage .hljs-string,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-title,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-name,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-type,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-attribute,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-symbol,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-bullet,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-addition,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-variable,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-template-tag,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-template-variable,
+:root[data-theme="dark"] .file-preview-markdown .hljs-string,
+:root[data-theme="dark"] .file-preview-markdown .hljs-title,
+:root[data-theme="dark"] .file-preview-markdown .hljs-name,
+:root[data-theme="dark"] .file-preview-markdown .hljs-type,
+:root[data-theme="dark"] .file-preview-markdown .hljs-attribute,
+:root[data-theme="dark"] .file-preview-markdown .hljs-symbol,
+:root[data-theme="dark"] .file-preview-markdown .hljs-bullet,
+:root[data-theme="dark"] .file-preview-markdown .hljs-addition,
+:root[data-theme="dark"] .file-preview-markdown .hljs-variable,
+:root[data-theme="dark"] .file-preview-markdown .hljs-template-tag,
+:root[data-theme="dark"] .file-preview-markdown .hljs-template-variable {
     color: #8fe3c1;
-  }
+}
 
-  .file-preview-text-stage .hljs-number,
-  .file-preview-text-stage .hljs-meta,
-  .file-preview-text-stage .hljs-built_in,
-  .file-preview-text-stage .hljs-builtin-name,
-  .file-preview-text-stage .hljs-params,
-  .file-preview-markdown .hljs-number,
-  .file-preview-markdown .hljs-meta,
-  .file-preview-markdown .hljs-built_in,
-  .file-preview-markdown .hljs-builtin-name,
-  .file-preview-markdown .hljs-params {
+:root[data-theme="dark"] .file-preview-text-stage .hljs-number,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-meta,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-built_in,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-builtin-name,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-params,
+:root[data-theme="dark"] .file-preview-markdown .hljs-number,
+:root[data-theme="dark"] .file-preview-markdown .hljs-meta,
+:root[data-theme="dark"] .file-preview-markdown .hljs-built_in,
+:root[data-theme="dark"] .file-preview-markdown .hljs-builtin-name,
+:root[data-theme="dark"] .file-preview-markdown .hljs-params {
     color: #e6c56f;
-  }
+}
 
-  .file-preview-text-stage .hljs-attr,
-  .file-preview-text-stage .hljs-property,
-  .file-preview-text-stage .hljs-selector-id,
-  .file-preview-text-stage .hljs-selector-class,
-  .file-preview-text-stage .hljs-regexp,
-  .file-preview-markdown .hljs-attr,
-  .file-preview-markdown .hljs-property,
-  .file-preview-markdown .hljs-selector-id,
-  .file-preview-markdown .hljs-selector-class,
-  .file-preview-markdown .hljs-regexp {
+:root[data-theme="dark"] .file-preview-text-stage .hljs-attr,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-property,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-selector-id,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-selector-class,
+:root[data-theme="dark"] .file-preview-text-stage .hljs-regexp,
+:root[data-theme="dark"] .file-preview-markdown .hljs-attr,
+:root[data-theme="dark"] .file-preview-markdown .hljs-property,
+:root[data-theme="dark"] .file-preview-markdown .hljs-selector-id,
+:root[data-theme="dark"] .file-preview-markdown .hljs-selector-class,
+:root[data-theme="dark"] .file-preview-markdown .hljs-regexp {
     color: #83b8ff;
-  }
 }
 
 @keyframes file-tree-skeleton {
