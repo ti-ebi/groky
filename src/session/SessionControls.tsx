@@ -9,11 +9,13 @@ export function ApprovalModeSelector({
   mode,
   busy,
   changing,
+  pending,
   onChange,
 }: {
   mode: ApprovalMode;
   busy: boolean;
   changing: boolean;
+  pending: boolean;
   onChange: (mode: ApprovalMode) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -49,13 +51,14 @@ export function ApprovalModeSelector({
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={`Approval mode: ${selected.label}${changing ? ", updating" : ""}`}
+        aria-label={`Approval mode: ${selected.label}${pending ? ", applies next turn" : ""}${changing ? ", updating" : ""}`}
         aria-busy={changing}
         disabled={busy || changing}
         onClick={() => setOpen((current) => !current)}
       >
         <span className="shield-mark" aria-hidden="true">{selected.glyph}</span>
         <span>{selected.label}</span>
+        {pending && <span className="control-pending-mark">NEXT</span>}
         <Icon name="chevron-down" size={13} />
       </button>
 
@@ -96,7 +99,9 @@ export function ApprovalModeSelector({
           </div>
           <div className="approval-menu-note">
             <span>{selected.shortDescription}</span>
-            <small>Changes apply before the next request in this session.</small>
+            <small>{pending
+              ? "This selection is queued for the next turn."
+              : "Changes apply before the next request in this session."}</small>
           </div>
         </div>
       )}
@@ -107,6 +112,7 @@ export function ModelSelector({
   connected,
   models,
   busy,
+  pending,
   onLoad,
   onChange,
   onReasoningChange,
@@ -114,6 +120,7 @@ export function ModelSelector({
   connected: boolean;
   models: SessionModelState | null;
   busy: boolean;
+  pending: boolean;
   onLoad: () => Promise<boolean>;
   onChange: (modelId: string) => Promise<SessionModelState | null>;
   onReasoningChange: (reasoningEffort: string) => Promise<SessionModelState | null>;
@@ -227,12 +234,13 @@ export function ModelSelector({
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Model: ${selected?.name ?? "Grok Build default"}${reasoningLabel ? `, reasoning: ${reasoningLabel}` : ""}`}
+        aria-label={`Model: ${selected?.name ?? "Grok Build default"}${reasoningLabel ? `, reasoning: ${reasoningLabel}` : ""}${pending ? ", applies next turn" : ""}`}
         disabled={busy || loading || changing}
         onClick={() => void toggleMenu()}
       >
         <span>{loading ? "Loading models…" : selected?.name ?? "Grok Build"}</span>
         <span className="reasoning">· {reasoningLabel ?? (connected ? "ACP" : "default")}</span>
+        {pending && <span className="control-pending-mark">NEXT</span>}
         <Icon name="chevron-down" size={12} />
       </button>
 

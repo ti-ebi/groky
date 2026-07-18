@@ -170,6 +170,9 @@ export const host = {
       setReasoningEffort: (sessionId: string, reasoningEffort: string) => (
         command<SessionModelState>("grok_set_reasoning_effort", { sessionId, reasoningEffort })
       ),
+      interject: (sessionId: string, text: string, interjectionId: string) => (
+        command<void>("grok_interject", { sessionId, text, interjectionId })
+      ),
       cancel: (sessionId: string) => command<void>("grok_cancel", { sessionId }),
       respondToPermission: (
         sessionId: string,

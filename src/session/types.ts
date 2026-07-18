@@ -1,6 +1,7 @@
 import type { EventTiming } from "../timing.ts";
 
 export type ApprovalMode = "ask" | "alwaysApprove";
+export type FollowUpBehavior = "queue" | "steer";
 
 export interface Connection {
   sessionId: string;
@@ -184,6 +185,7 @@ export type TurnTimelineItem =
       open: boolean;
     } & EventTiming)
   | { id: string; kind: "response"; text: string }
+  | { id: string; kind: "steer"; text: string }
   | { id: string; kind: "tool"; tool: ToolActivity }
   | ({
       id: string;
@@ -202,6 +204,18 @@ export interface MessageAttachment {
 
 export interface FileAttachment extends MessageAttachment {
   path: string;
+}
+
+export interface QueuedPrompt {
+  id: string;
+  text: string;
+  attachments: FileAttachment[];
+}
+
+export interface PendingSessionSettings {
+  approvalMode?: ApprovalMode;
+  modelId?: string;
+  reasoningEffort?: string;
 }
 
 export interface ConversationMessage {
@@ -225,6 +239,10 @@ export interface SessionViewState {
   draft: string;
   attachments: FileAttachment[];
   running: boolean;
+  queuedPrompts: QueuedPrompt[];
+  queuePaused: boolean;
+  pendingSettings: PendingSessionSettings | null;
+  settingsApplying: boolean;
   permissions: PermissionRequest[];
   availableCommands: AvailableCommand[];
   currentModeId: string | null;

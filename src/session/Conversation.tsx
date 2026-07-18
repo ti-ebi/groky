@@ -25,6 +25,7 @@ import type {
   PermissionRequest,
   PlanEntry,
   ToolActivity,
+  TurnTimelineItem,
 } from "./types";
 
 function MessageCopyButton({
@@ -320,6 +321,18 @@ function ToolBlock({ tool }: { tool: ToolActivity }) {
   );
 }
 
+function SteeringMarker({ item }: { item: Extract<TurnTimelineItem, { kind: "steer" }> }) {
+  return (
+    <div className="steering-marker">
+      <Icon name="arrow-right" size={13} />
+      <span>
+        <small>You steered</small>
+        <strong>{item.text}</strong>
+      </span>
+    </div>
+  );
+}
+
 function TraceItems({
   items,
   messageState,
@@ -528,6 +541,10 @@ export function ConversationItem({ message }: { message: ConversationMessage }) 
               )}
             </div>
           );
+        }
+
+        if (section.kind === "steer") {
+          return <SteeringMarker item={section.item} key={section.id} />;
         }
 
         const items = visibleTraceItems(section.items, message.state);

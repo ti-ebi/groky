@@ -1404,6 +1404,37 @@ async fn grok_cancel(state: State<'_, GrokRuntime>, session_id: String) -> Resul
 }
 
 #[tauri::command]
+async fn grok_interject(
+    state: State<'_, GrokRuntime>,
+    session_id: String,
+    text: String,
+    interjection_id: String,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Enter a message before steering the current turn.".to_string());
+    }
+    if interjection_id.is_empty()
+        || interjection_id.len() > 160
+        || interjection_id
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err("The steering message identifier is invalid.".to_string());
+    }
+
+    let session = runtime_session(&state, &session_id).await?;
+    if !session.prompt_active.load(Ordering::Acquire) {
+        return Err("The current turn finished before the steering message was sent.".to_string());
+    }
+
+    session
+        .transport
+        .interject(&session.session_id, text, &interjection_id)
+        .await
+}
+
+#[tauri::command]
 async fn grok_set_approval_mode(
     app: AppHandle,
     state: State<'_, GrokRuntime>,
@@ -2295,6 +2326,7 @@ pub fn run() {
             grok_deactivate_session,
             grok_prompt,
             grok_cancel,
+            grok_interject,
             grok_set_approval_mode,
             grok_set_model,
             grok_set_reasoning_effort,
