@@ -22,10 +22,15 @@ export type ProjectedTimelineItem = TurnTimelineItem | {
 };
 
 export type ResponseTimelineItem = Extract<ProjectedTimelineItem, { kind: "response" }>;
-export type TraceTimelineItem = Exclude<ProjectedTimelineItem, ResponseTimelineItem>;
+export type SteerTimelineItem = Extract<ProjectedTimelineItem, { kind: "steer" }>;
+export type TraceTimelineItem = Exclude<
+  ProjectedTimelineItem,
+  ResponseTimelineItem | SteerTimelineItem
+>;
 
 export type TimelineSection =
   | { id: string; kind: "response"; item: ResponseTimelineItem }
+  | { id: string; kind: "steer"; item: SteerTimelineItem }
   | { id: string; kind: "trace"; items: TraceTimelineItem[] };
 
 const TOOL_GROUP_WORDS: Record<
@@ -95,6 +100,10 @@ export function sectionTimeline(timeline: ProjectedTimelineItem[]): TimelineSect
   timeline.forEach((item) => {
     if (item.kind === "response") {
       sections.push({ id: item.id, kind: "response", item });
+      return;
+    }
+    if (item.kind === "steer") {
+      sections.push({ id: item.id, kind: "steer", item });
       return;
     }
 

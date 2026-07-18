@@ -5,14 +5,18 @@ import type {
 } from "react";
 import { formatFileSize } from "../shared/format";
 import { SessionLocationSelector } from "../sidebar/SessionLocationSelector";
+import { isMacOS } from "../shared/platform";
 import { Icon } from "../ui/Icon";
 import { PlanBlock } from "./Conversation";
+import { FollowUpQueue } from "./FollowUpQueue";
 import { ApprovalModeSelector, ModelSelector } from "./SessionControls";
 import type {
   ApprovalMode,
   AvailableCommand,
   FileAttachment,
+  FollowUpBehavior,
   PlanEntry,
+  QueuedPrompt,
   SessionModelState,
 } from "./types";
 
@@ -37,6 +41,7 @@ interface ModelControl {
   connected: boolean;
   models: SessionModelState | null;
   busy: boolean;
+  pending: boolean;
   onLoad: () => Promise<boolean>;
   onChange: (modelId: string) => Promise<SessionModelState | null>;
   onReasoningChange: (reasoningEffort: string) => Promise<SessionModelState | null>;
@@ -49,8 +54,21 @@ interface SessionComposerProps {
   onScrollToLatest: () => void;
   location: ComposerLocation | null;
   running: boolean;
+  steering: boolean;
+  followUpBehavior: FollowUpBehavior;
   appUpdating: boolean;
   sessionTransitioning: boolean;
+  queuedPrompts: QueuedPrompt[];
+  queuePaused: boolean;
+  pendingSettingLabels: string[];
+  settingsApplying: boolean;
+  onEditQueuedPrompt: (promptId: string, text: string) => void;
+  onMoveQueuedPrompt: (promptId: string, direction: -1 | 1) => void;
+  onRemoveQueuedPrompt: (promptId: string) => void;
+  onSteerQueuedPrompt: (promptId: string) => void;
+  onRunQueuedPromptNow: (promptId: string) => void;
+  onResumeQueue: () => void;
+  onClearQueue: () => void;
   plan: PlanEntry[];
   attachments: FileAttachment[];
   attachmentBusy: boolean;
@@ -76,8 +94,21 @@ export function SessionComposer({
   onScrollToLatest,
   location,
   running,
+  steering,
+  followUpBehavior,
   appUpdating,
   sessionTransitioning,
+  queuedPrompts,
+  queuePaused,
+  pendingSettingLabels,
+  settingsApplying,
+  onEditQueuedPrompt,
+  onMoveQueuedPrompt,
+  onRemoveQueuedPrompt,
+  onSteerQueuedPrompt,
+  onRunQueuedPromptNow,
+  onResumeQueue,
+  onClearQueue,
   plan,
   attachments,
   attachmentBusy,
@@ -95,13 +126,16 @@ export function SessionComposer({
   onCancel,
   onSubmit,
 }: SessionComposerProps) {
-  const promptDisabled = running || appUpdating || sessionTransitioning;
-  const controlsBusy = promptDisabled || approvalModeChanging;
-  const sendDisabled = (!draft.trim() && attachments.length === 0) || controlsBusy;
+  const promptDisabled = appUpdating || sessionTransitioning;
+  const controlsBusy = promptDisabled || approvalModeChanging || settingsApplying;
+  const sendDisabled = (!draft.trim() && attachments.length === 0) || controlsBusy || steering;
+  const alternateFollowUpShortcut = isMacOS() ? "⌘↵" : "Ctrl+Enter";
   const placeholder = appUpdating
     ? "Groky is installing an update…"
     : running
-      ? "Grok is working…"
+      ? followUpBehavior === "steer"
+        ? "Add direction to the current turn"
+        : "Queue a follow-up while Grok works"
       : "Ask Groky to build, debug, or review";
 
   return (
@@ -125,11 +159,32 @@ export function SessionComposer({
         </section>
       )}
 
+      <FollowUpQueue
+        items={queuedPrompts}
+        paused={queuePaused}
+        running={running && !settingsApplying && !sessionTransitioning && !appUpdating}
+        busy={steering || settingsApplying || sessionTransitioning || appUpdating}
+        onEdit={onEditQueuedPrompt}
+        onMove={onMoveQueuedPrompt}
+        onRemove={onRemoveQueuedPrompt}
+        onSteer={onSteerQueuedPrompt}
+        onRunNow={onRunQueuedPromptNow}
+        onResume={onResumeQueue}
+        onClear={onClearQueue}
+      />
+
       <form
         className={`composer approval-mode-${approvalMode} ${running ? "is-running" : ""}`}
         onSubmit={onSubmit}
       >
         {plan.length > 0 && <PlanBlock entries={plan} active={running} />}
+
+        {(pendingSettingLabels.length > 0 || settingsApplying) && (
+          <div className={`pending-settings-strip ${settingsApplying ? "is-applying" : ""}`} role="status">
+            <span>{settingsApplying ? "APPLYING" : "NEXT TURN"}</span>
+            <p>{pendingSettingLabels.join(" · ") || "Updating session settings"}</p>
+          </div>
+        )}
 
         {attachments.length > 0 && (
           <div className="attachment-tray" aria-label="Files attached to this message">
@@ -225,21 +280,45 @@ export function SessionComposer({
           </button>
           <ApprovalModeSelector
             mode={approvalMode}
-            busy={promptDisabled}
+            busy={promptDisabled || settingsApplying}
             changing={approvalModeChanging}
+            pending={pendingSettingLabels.some((label) => label.startsWith("Approval:"))}
             onChange={onApprovalModeChange}
           />
           <span className="toolbar-spacer" />
+          {running && (
+            <span
+              className="follow-up-mode-hint"
+              title="Cmd/Ctrl+Enter uses the other follow-up behavior"
+              role="status"
+              aria-live="polite"
+              aria-label={steering
+                ? "Sending direction"
+                : `Follow-up mode: ${followUpBehavior}`}
+            >
+              {steering ? "SENDING" : followUpBehavior === "queue" ? "QUEUE" : "STEER"}
+              <small>{alternateFollowUpShortcut} {followUpBehavior === "queue" ? "steer" : "queue"}</small>
+            </span>
+          )}
           <ModelSelector {...model} />
-          {running ? (
+          {running && (
             <button className="send-button stop-button" type="button" aria-label="Stop" onClick={onCancel}>
               <Icon name="stop" size={15} />
             </button>
-          ) : (
-            <button className="send-button" type="submit" aria-label="Send" disabled={sendDisabled}>
-              <Icon name="arrow-up" size={17} />
-            </button>
           )}
+          <button
+            className={`send-button ${running ? "follow-up-send-button" : ""}`}
+            type="submit"
+            aria-label={running
+              ? followUpBehavior === "steer" ? "Steer current turn" : "Queue follow-up"
+              : "Send"}
+            title={running
+              ? followUpBehavior === "steer" ? "Steer current turn" : "Queue for next turn"
+              : "Send"}
+            disabled={sendDisabled}
+          >
+            <Icon name={running && followUpBehavior === "queue" ? "arrow-down" : "arrow-up"} size={17} />
+          </button>
         </div>
       </form>
     </div>

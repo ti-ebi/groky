@@ -1706,6 +1706,209 @@ body.is-resizing-side-panel .app-shell {
   margin: 0 auto 20px;
 }
 
+.follow-up-queue {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--signal) 24%, var(--line-strong));
+  border-radius: 14px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--signal) 5%, transparent), transparent 42%),
+    color-mix(in srgb, var(--surface) 95%, transparent);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.07);
+  animation: content-in 160ms ease-out both;
+}
+
+.follow-up-queue.is-paused {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line-strong));
+}
+
+.follow-up-queue-heading {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.follow-up-queue-title,
+.follow-up-queue-state,
+.follow-up-queue-text-action {
+  font: 700 8px var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.follow-up-queue-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--signal-strong);
+}
+
+.follow-up-queue-title i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 8px var(--signal-glow);
+}
+
+.is-paused .follow-up-queue-title i {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-soft);
+}
+
+.follow-up-queue-title strong {
+  display: grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--signal) 22%, var(--line));
+  border-radius: 6px;
+  background: var(--surface-raised);
+  font-size: 8px;
+}
+
+.follow-up-queue-state {
+  color: var(--muted);
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: none;
+}
+
+.follow-up-queue-spacer {
+  flex: 1;
+}
+
+.follow-up-queue-text-action {
+  padding: 4px;
+  background: transparent;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.follow-up-queue-text-action:hover {
+  color: var(--signal-strong);
+}
+
+.follow-up-queue-list {
+  display: grid;
+  max-height: 190px;
+  overflow-y: auto;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.follow-up-item {
+  display: grid;
+  min-height: 42px;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px 5px 9px;
+}
+
+.follow-up-item + .follow-up-item {
+  border-top: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+}
+
+.follow-up-index {
+  color: var(--faint);
+  font: 8px var(--mono);
+  letter-spacing: 0.06em;
+}
+
+.follow-up-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+}
+
+.follow-up-copy:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.follow-up-copy > span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.follow-up-copy small {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font: 8px var(--mono);
+}
+
+.follow-up-item textarea {
+  width: 100%;
+  min-height: 38px;
+  max-height: 100px;
+  padding: 7px 8px;
+  resize: vertical;
+  border: 1px solid color-mix(in srgb, var(--signal) 34%, var(--line));
+  border-radius: 8px;
+  outline: 0;
+  background: var(--surface-raised);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.follow-up-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0.56;
+  transition: opacity 120ms ease;
+}
+
+.follow-up-item:hover .follow-up-actions,
+.follow-up-item:focus-within .follow-up-actions {
+  opacity: 1;
+}
+
+.follow-up-actions button {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.follow-up-actions button:not(:disabled):hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.follow-up-actions .follow-up-steer:not(:disabled) {
+  color: var(--signal-strong);
+}
+
+.follow-up-actions .follow-up-run-now:not(:disabled) {
+  color: var(--accent);
+}
+
+.follow-up-actions button:disabled {
+  cursor: default;
+  opacity: 0.22;
+}
+
 .composer {
   position: relative;
   width: 100%;
@@ -2036,6 +2239,38 @@ body.is-resizing-side-panel .app-shell {
   color: var(--faint);
 }
 
+.pending-settings-strip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  margin: -3px 0 10px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--signal) 17%, var(--line));
+  border-radius: 9px;
+  background: var(--signal-soft);
+}
+
+.pending-settings-strip > span {
+  color: var(--signal-strong);
+  font: 700 7px var(--mono);
+  letter-spacing: 0.1em;
+}
+
+.pending-settings-strip > p {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-soft);
+  font: 9px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-settings-strip.is-applying > span {
+  animation: attachment-busy 850ms linear infinite;
+}
+
 .composer-toolbar {
   display: flex;
   min-height: 34px;
@@ -2097,6 +2332,16 @@ body.is-resizing-side-panel .app-shell {
 .approval-control,
 .model-control {
   position: relative;
+}
+
+.control-pending-mark {
+  padding: 2px 4px;
+  border: 1px solid color-mix(in srgb, var(--signal) 24%, var(--line));
+  border-radius: 5px;
+  background: var(--signal-soft);
+  color: var(--signal-strong);
+  font: 700 6px var(--mono);
+  letter-spacing: 0.07em;
 }
 
 .approval-control .approval-button .icon {
@@ -2458,6 +2703,26 @@ body.is-resizing-side-panel .app-shell {
   flex: 1;
 }
 
+.follow-up-mode-hint {
+  display: inline-flex;
+  height: 23px;
+  align-items: center;
+  gap: 5px;
+  margin-right: 2px;
+  padding: 0 6px;
+  border-left: 1px solid var(--line);
+  color: var(--signal-strong);
+  font: 700 7px var(--mono);
+  letter-spacing: 0.08em;
+}
+
+.follow-up-mode-hint small {
+  color: var(--muted);
+  font: 7px var(--mono);
+  letter-spacing: 0;
+  text-transform: lowercase;
+}
+
 .local-chip {
   display: flex;
   height: 18px;
@@ -2529,6 +2794,17 @@ body.is-resizing-side-panel .app-shell {
 
 .send-button:disabled {
   opacity: 0.25;
+}
+
+.stop-button {
+  background: var(--surface-raised);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, var(--line));
+}
+
+.follow-up-send-button {
+  background: var(--signal-strong);
+  color: var(--surface);
 }
 
 :root[data-theme="dark"] {

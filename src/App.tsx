@@ -29,7 +29,17 @@ import {
 import { ConversationItem, PermissionCard } from "./session/Conversation";
 import { MessageHistoryNav, conversationTurnPreviews } from "./session/MessageHistoryNav";
 import { SessionComposer } from "./session/SessionComposer";
-import { enablesAlwaysApprove } from "./session/approval";
+import { approvalModeOption, enablesAlwaysApprove } from "./session/approval";
+import {
+  editQueuedPrompt,
+  FOLLOW_UP_BEHAVIOR_STORAGE_KEY,
+  hasPendingSettings,
+  modelsWithPendingSettings,
+  moveQueuedPrompt,
+  normalizeFollowUpBehavior,
+  reserveQueuedPrompt,
+  restoreQueuedPrompt,
+} from "./session/followups";
 import {
   currentModel,
   selectModelInState,
@@ -37,6 +47,7 @@ import {
 } from "./session/models";
 import {
   addFallbackThought,
+  addSteeringMarker,
   applySessionUpdateToMessage,
   finishRun,
   makeMessageId,
@@ -51,7 +62,10 @@ import type {
   Connection,
   ConversationMessage,
   FileAttachment,
+  FollowUpBehavior,
+  PendingSessionSettings,
   PermissionRequest,
+  QueuedPrompt,
   SessionModelState,
   SessionReplayProjection,
   SessionUpdate,
@@ -147,6 +161,29 @@ function titleFromPrompt(prompt: string) {
   return characters.length > 72 ? `${characters.slice(0, 71).join("")}…` : normalized || "New Grok session";
 }
 
+function describePendingSettings(
+  pending: PendingSessionSettings | null,
+  models: SessionModelState | null,
+) {
+  if (!pending) return [];
+  const labels: string[] = [];
+  if (pending.approvalMode) {
+    labels.push(`Approval: ${approvalModeOption(pending.approvalMode).label}`);
+  }
+  if (pending.modelId) {
+    const model = models?.availableModels.find((item) => item.modelId === pending.modelId);
+    labels.push(`Model: ${model?.name ?? pending.modelId}`);
+  }
+  if (pending.reasoningEffort) {
+    const model = currentModel(models);
+    const effort = model?.metadata?.reasoningEfforts?.find((item) => (
+      item.id === pending.reasoningEffort || item.value === pending.reasoningEffort
+    ));
+    labels.push(`Reasoning: ${effort?.label.replace(/\s+Effort$/i, "") ?? pending.reasoningEffort}`);
+  }
+  return labels;
+}
+
 function App() {
   const {
     preference: appearance,
@@ -164,6 +201,7 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(() => new Set());
   const [approvalModeChangingIds, setApprovalModeChangingIds] = useState<Set<string>>(() => new Set());
+  const [steeringSessionIds, setSteeringSessionIds] = useState<Set<string>>(() => new Set());
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [deviceAuthCode, setDeviceAuthCode] = useState<string | null>(null);
@@ -191,6 +229,13 @@ function App() {
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [activeHistoryMessageId, setActiveHistoryMessageId] = useState<string | null>(null);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
+  const [followUpBehavior, setFollowUpBehavior] = useState<FollowUpBehavior>(() => {
+    try {
+      return normalizeFollowUpBehavior(window.localStorage.getItem(FOLLOW_UP_BEHAVIOR_STORAGE_KEY));
+    } catch {
+      return "queue";
+    }
+  });
   const [toolPanelStates, setToolPanelStates] = useState<ToolPanelStateMap>({});
   const [pendingToolPanelKey, setPendingToolPanelKey] = useState(() => `pending:${crypto.randomUUID()}`);
   const [defaultToolPanelWidth] = useState(initialSidePanelWidth);
@@ -285,12 +330,19 @@ function App() {
   const updateCheckInFlight = useRef(false);
   const updateInstallationInFlight = useRef(false);
   const connectionTransitioning = useRef(false);
+  const submissionInFlight = useRef(false);
+  const steeringSessionIdsRef = useRef<Set<string>>(new Set());
 
   const connection = activeSession && !activeSession.disconnected ? activeSession.connection : null;
   const messages = activeSession?.messages ?? [];
   const draft = activeSession?.draft ?? pendingDraft;
   const attachments = activeSession?.attachments ?? pendingAttachments;
   const running = activeSession?.running ?? false;
+  const queuedPrompts = activeSession?.queuedPrompts ?? [];
+  const queuePaused = activeSession?.queuePaused ?? false;
+  const pendingSettings = activeSession?.pendingSettings ?? null;
+  const settingsApplying = activeSession?.settingsApplying ?? false;
+  const steering = activeSessionId !== null && steeringSessionIds.has(activeSessionId);
   const activeRunStartedAt = running
     ? [...messages].reverse().find((message) => message.role === "assistant" && message.state === "streaming")?.startedAt
     : undefined;
@@ -321,6 +373,11 @@ function App() {
       })
       .slice(0, 8);
   }, [availableCommandsForComposer, commandSuggestionsOpen, draft]);
+  const composerModels = modelsWithPendingSettings(
+    connection?.models ?? pendingModels,
+    pendingSettings,
+  );
+  const pendingSettingLabels = describePendingSettings(pendingSettings, composerModels);
 
   useEffect(() => {
     setActiveCommandSuggestion(0);
@@ -369,6 +426,14 @@ function App() {
     updateSessionView(sessionId, (session) => ({ ...session, running }));
   }
 
+  function setSessionSteering(sessionId: string, nextSteering: boolean) {
+    const next = new Set(steeringSessionIdsRef.current);
+    if (nextSteering) next.add(sessionId);
+    else next.delete(sessionId);
+    steeringSessionIdsRef.current = next;
+    setSteeringSessionIds(next);
+  }
+
   function enqueueSessionPermission(sessionId: string, permission: PermissionRequest) {
     updateSessionView(sessionId, (session) => ({
       ...session,
@@ -402,6 +467,15 @@ function App() {
       updateSessionView(sessionId, (session) => ({ ...session, attachments: next }));
     } else {
       setPendingAttachments(next);
+    }
+  }
+
+  function changeFollowUpBehavior(next: FollowUpBehavior) {
+    setFollowUpBehavior(next);
+    try {
+      window.localStorage.setItem(FOLLOW_UP_BEHAVIOR_STORAGE_KEY, next);
+    } catch {
+      // The in-memory preference still applies when storage is unavailable.
     }
   }
 
@@ -459,6 +533,10 @@ function App() {
         draft: existing?.draft ?? "",
         attachments: existing?.attachments ?? [],
         running: existing?.running ?? false,
+        queuedPrompts: existing?.queuedPrompts ?? [],
+        queuePaused: existing?.queuePaused ?? false,
+        pendingSettings: existing?.pendingSettings ?? null,
+        settingsApplying: existing?.settingsApplying ?? false,
         permissions: replay ? replay.permissions : existing?.permissions ?? [],
         availableCommands: replay?.availableCommands
           ?? existing?.availableCommands
@@ -483,6 +561,8 @@ function App() {
     setSessionViews({});
     setLoadingSessionIds(new Set());
     setApprovalModeChangingIds(new Set());
+    steeringSessionIdsRef.current = new Set();
+    setSteeringSessionIds(new Set());
     setPendingModels(null);
     setCommandCatalogs({});
     commandCatalogRequests.current.clear();
@@ -532,7 +612,7 @@ function App() {
   });
   const sidebarActionsDisabled = appUpdating || stage === "connecting" || historyMutating || renamingSessionId !== null;
   const sessionLocationEditable = !activeSessionLoading && connection === null && messages.length === 0 && !running;
-  const attachmentDisabled = activeSessionLoading || running || appUpdating || stage === "connecting";
+  const attachmentDisabled = activeSessionLoading || appUpdating || stage === "connecting";
   useLayoutEffect(() => {
     pendingAttachmentsRef.current = pendingAttachments;
     pendingToolPanelKeyRef.current = pendingToolPanelKey;
@@ -1018,6 +1098,8 @@ function App() {
             ...session,
             disconnected: true,
             running: false,
+            queuePaused: session.queuedPrompts.length > 0,
+            settingsApplying: false,
             permissions: [],
             messages: session.messages.map((message) => message.id === messageId
               ? {
@@ -1317,7 +1399,9 @@ function App() {
     setSetupError(null);
     setConnectionNotice(null);
     setWorkspace(cached?.connection.workspace ?? session.workspace);
-    if (cached) setApprovalMode(cached.connection.approvalMode);
+    if (cached) {
+      setApprovalMode(cached.pendingSettings?.approvalMode ?? cached.connection.approvalMode);
+    }
     else {
       setPendingDraft("");
       setPendingAttachments([]);
@@ -1349,7 +1433,10 @@ function App() {
       }
       if (activeSessionIdRef.current === session.sessionId) {
         setWorkspace(loaded.connection.workspace);
-        setApprovalMode(loaded.connection.approvalMode);
+        setApprovalMode(
+          sessionViewsRef.current[session.sessionId]?.pendingSettings?.approvalMode
+          ?? loaded.connection.approvalMode,
+        );
       }
       void host.grok.sessions.activate(activeSessionIdRef.current).catch(() => undefined);
       setStatus((current) => current ? {
@@ -1470,6 +1557,10 @@ function App() {
         sessionViewsRef.current = nextViews;
         setSessionViews(nextViews);
         affectedSessionIds.forEach((sessionId) => activeAssistantIds.current.delete(sessionId));
+        const nextSteeringSessionIds = new Set(steeringSessionIdsRef.current);
+        affectedSessionIds.forEach((sessionId) => nextSteeringSessionIds.delete(sessionId));
+        steeringSessionIdsRef.current = nextSteeringSessionIds;
+        setSteeringSessionIds(nextSteeringSessionIds);
         removeToolPanelStates(affectedSessionIds);
       }
       if (affectsActive && action !== "restore") {
@@ -1608,12 +1699,27 @@ function App() {
     if (
       nextMode === approvalMode
       || activeApprovalModeChanging
-      || running
+      || settingsApplying
       || appUpdating
       || stage === "connecting"
     ) return;
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) {
+      setApprovalMode(nextMode);
+      return;
+    }
+
+    const currentSession = sessionViewsRef.current[sessionId];
+    if (currentSession?.running) {
+      updateSessionView(sessionId, (session) => {
+        const nextPending: PendingSessionSettings = { ...(session.pendingSettings ?? {}) };
+        if (nextMode === session.connection.approvalMode) delete nextPending.approvalMode;
+        else nextPending.approvalMode = nextMode;
+        return {
+          ...session,
+          pendingSettings: hasPendingSettings(nextPending) ? nextPending : null,
+        };
+      });
       setApprovalMode(nextMode);
       return;
     }
@@ -1633,6 +1739,14 @@ function App() {
     try {
       const switched = await host.grok.sessions.setApprovalMode(sessionId, nextMode);
       upsertSessionView(switched);
+      updateSessionView(sessionId, (session) => {
+        const nextPending = { ...(session.pendingSettings ?? {}) };
+        delete nextPending.approvalMode;
+        return {
+          ...session,
+          pendingSettings: hasPendingSettings(nextPending) ? nextPending : null,
+        };
+      });
       if (activeSessionIdRef.current === sessionId) {
         setWorkspace(switched.workspace);
         setApprovalMode(switched.approvalMode);
@@ -1654,25 +1768,29 @@ function App() {
     }
   }
 
-  async function reconnectActiveSession() {
-    const currentSession = activeSessionIdRef.current
-      ? sessionViewsRef.current[activeSessionIdRef.current]
-      : undefined;
+  async function reconnectSession(sessionId: string) {
+    const currentSession = sessionViewsRef.current[sessionId];
     if (!currentSession) return null;
     if (!currentSession.disconnected) return currentSession.connection;
 
-    const sessionId = currentSession.connection.sessionId;
     connectionTransitioning.current = true;
     setLoadingSessionIds((current) => new Set(current).add(sessionId));
     try {
       const loaded = await host.grok.sessions.load(sessionId);
       upsertSessionView(loaded.connection);
-      setWorkspace(loaded.connection.workspace);
-      setApprovalMode(loaded.connection.approvalMode);
-      setConnectionNotice(null);
+      if (activeSessionIdRef.current === sessionId) {
+        setWorkspace(loaded.connection.workspace);
+        setApprovalMode(
+          sessionViewsRef.current[sessionId]?.pendingSettings?.approvalMode
+          ?? loaded.connection.approvalMode,
+        );
+        setConnectionNotice(null);
+      }
       return loaded.connection;
     } catch (error) {
-      setConnectionNotice(String(error));
+      if (activeSessionIdRef.current === sessionId) {
+        setConnectionNotice(String(error));
+      }
       return null;
     } finally {
       connectionTransitioning.current = false;
@@ -1682,6 +1800,11 @@ function App() {
         return next;
       });
     }
+  }
+
+  async function reconnectActiveSession() {
+    const sessionId = activeSessionIdRef.current;
+    return sessionId ? reconnectSession(sessionId) : null;
   }
 
   async function ensureSessionForSubmission() {
@@ -1716,12 +1839,37 @@ function App() {
       setPendingModels(models);
       return models;
     }
+    const currentSession = sessionViewsRef.current[sessionId];
+    if (currentSession?.running) {
+      const displayed = modelsWithPendingSettings(
+        currentSession.connection.models,
+        currentSession.pendingSettings,
+      );
+      if (!displayed) return null;
+      const models = selectModelInState(displayed, modelId);
+      updateSessionView(sessionId, (session) => {
+        const nextPending: PendingSessionSettings = { ...(session.pendingSettings ?? {}) };
+        if (modelId === session.connection.models?.currentModelId) delete nextPending.modelId;
+        else nextPending.modelId = modelId;
+        delete nextPending.reasoningEffort;
+        return {
+          ...session,
+          pendingSettings: hasPendingSettings(nextPending) ? nextPending : null,
+        };
+      });
+      return models;
+    }
     setConnectionNotice(null);
     try {
       const models = await host.grok.sessions.setModel(sessionId, modelId);
       updateSessionView(sessionId, (session) => ({
         ...session,
         connection: { ...session.connection, models },
+        pendingSettings: (() => {
+          const nextPending = { ...(session.pendingSettings ?? {}) };
+          delete nextPending.modelId;
+          return hasPendingSettings(nextPending) ? nextPending : null;
+        })(),
       }));
       setPendingModels(models);
       return models;
@@ -1739,12 +1887,41 @@ function App() {
       setPendingModels(models);
       return models;
     }
+    const currentSession = sessionViewsRef.current[sessionId];
+    if (currentSession?.running) {
+      const displayed = modelsWithPendingSettings(
+        currentSession.connection.models,
+        currentSession.pendingSettings,
+      );
+      if (!displayed) return null;
+      const models = selectReasoningInState(displayed, reasoningEffort);
+      const effectiveModel = currentModel(currentSession.connection.models);
+      const currentReasoning = effectiveModel?.metadata?.reasoningEffort;
+      updateSessionView(sessionId, (session) => {
+        const nextPending: PendingSessionSettings = { ...(session.pendingSettings ?? {}) };
+        if (!nextPending.modelId && reasoningEffort === currentReasoning) {
+          delete nextPending.reasoningEffort;
+        } else {
+          nextPending.reasoningEffort = reasoningEffort;
+        }
+        return {
+          ...session,
+          pendingSettings: hasPendingSettings(nextPending) ? nextPending : null,
+        };
+      });
+      return models;
+    }
     setConnectionNotice(null);
     try {
       const models = await host.grok.sessions.setReasoningEffort(sessionId, reasoningEffort);
       updateSessionView(sessionId, (session) => ({
         ...session,
         connection: { ...session.connection, models },
+        pendingSettings: (() => {
+          const nextPending = { ...(session.pendingSettings ?? {}) };
+          delete nextPending.reasoningEffort;
+          return hasPendingSettings(nextPending) ? nextPending : null;
+        })(),
       }));
       setPendingModels(models);
       return models;
@@ -1754,21 +1931,11 @@ function App() {
     }
   }
 
-  async function submitTask(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const prompt = draft.trim();
-    const sentAttachments = attachments;
-    if (
-      (!prompt && sentAttachments.length === 0)
-      || running
-      || appUpdating
-      || sessionTransitioning
-      || activeApprovalModeChanging
-    ) return;
-
-    const activeConnection = await ensureSessionForSubmission();
-    if (!activeConnection) return;
-
+  function updateHistoryForStartedPrompt(
+    activeConnection: Connection,
+    prompt: string,
+    sentAttachments: FileAttachment[],
+  ) {
     setSessionHistory((current) => current
       .map((session) => session.sessionId === activeConnection.sessionId
         ? {
@@ -1781,6 +1948,140 @@ function App() {
           }
         : session)
       .sort((left, right) => right.updatedAt - left.updatedAt));
+  }
+
+  function createQueuedPrompt(prompt: string, sentAttachments: FileAttachment[]): QueuedPrompt {
+    return {
+      id: `queued-${crypto.randomUUID()}`,
+      text: prompt,
+      attachments: sentAttachments,
+    };
+  }
+
+  function queuePrompt(
+    sessionId: string,
+    queued: QueuedPrompt,
+    clearComposer = true,
+  ) {
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      draft: clearComposer ? "" : session.draft,
+      attachments: clearComposer ? [] : session.attachments,
+      queuedPrompts: [...session.queuedPrompts, queued],
+    }));
+  }
+
+  function clearSubmittedComposer(
+    sessionId: string,
+    submittedDraft: string,
+    submittedAttachments: FileAttachment[],
+  ) {
+    updateSessionView(sessionId, (session) => {
+      const attachmentsUnchanged = session.attachments.length === submittedAttachments.length
+        && session.attachments.every((attachment, index) => (
+          attachment.path === submittedAttachments[index]?.path
+        ));
+      return {
+        ...session,
+        draft: session.draft === submittedDraft ? "" : session.draft,
+        attachments: attachmentsUnchanged ? [] : session.attachments,
+      };
+    });
+  }
+
+  function insertSteeringMessage(sessionId: string, text: string) {
+    const activeAssistantId = activeAssistantIds.current.get(sessionId);
+    setSessionMessages(sessionId, (current) => {
+      if (!activeAssistantId) {
+        return [...current, { id: makeMessageId("steer"), role: "user", text }];
+      }
+      return current.map((message) => message.id === activeAssistantId
+        ? addSteeringMarker(message, text, Date.now())
+        : message);
+    });
+  }
+
+  async function sendSteeringMessage(sessionId: string, text: string) {
+    const normalized = text.trim();
+    if (!normalized) return "Enter a message before steering the current turn.";
+    const interjectionId = `steer-${crypto.randomUUID()}`;
+    try {
+      await host.grok.sessions.interject(sessionId, normalized, interjectionId);
+      insertSteeringMessage(sessionId, normalized);
+      return null;
+    } catch (error) {
+      return String(error);
+    }
+  }
+
+  async function applyPendingSessionSettings(sessionId: string) {
+    const initial = sessionViewsRef.current[sessionId];
+    if (!initial || !hasPendingSettings(initial.pendingSettings)) return true;
+
+    const remaining: PendingSessionSettings = { ...(initial.pendingSettings ?? {}) };
+    let nextConnection = initial.connection;
+    let nextModels = initial.connection.models;
+    updateSessionView(sessionId, (session) => ({ ...session, settingsApplying: true }));
+    setConnectionNotice(null);
+
+    try {
+      if (remaining.approvalMode) {
+        nextConnection = await host.grok.sessions.setApprovalMode(
+          sessionId,
+          remaining.approvalMode,
+        );
+        nextModels = nextConnection.models;
+        delete remaining.approvalMode;
+      }
+      if (remaining.modelId) {
+        nextModels = await host.grok.sessions.setModel(sessionId, remaining.modelId);
+        delete remaining.modelId;
+      }
+      if (remaining.reasoningEffort) {
+        nextModels = await host.grok.sessions.setReasoningEffort(
+          sessionId,
+          remaining.reasoningEffort,
+        );
+        delete remaining.reasoningEffort;
+      }
+
+      const resolvedConnection = { ...nextConnection, models: nextModels };
+      updateSessionView(sessionId, (session) => ({
+        ...session,
+        connection: resolvedConnection,
+        pendingSettings: null,
+        settingsApplying: false,
+      }));
+      setPendingModels(nextModels);
+      if (activeSessionIdRef.current === sessionId) {
+        setApprovalMode(resolvedConnection.approvalMode);
+      }
+      return true;
+    } catch (error) {
+      const resolvedConnection = { ...nextConnection, models: nextModels };
+      updateSessionView(sessionId, (session) => ({
+        ...session,
+        connection: resolvedConnection,
+        pendingSettings: hasPendingSettings(remaining) ? remaining : null,
+        settingsApplying: false,
+        queuePaused: true,
+      }));
+      setPendingModels(nextModels);
+      if (activeSessionIdRef.current === sessionId) {
+        setApprovalMode(remaining.approvalMode ?? resolvedConnection.approvalMode);
+      }
+      setConnectionNotice(`Queued settings could not be applied. The follow-up queue is paused. ${String(error)}`);
+      return false;
+    }
+  }
+
+  async function runPrompt(sessionId: string, queued: QueuedPrompt) {
+    const session = sessionViewsRef.current[sessionId];
+    if (!session) return;
+    const activeConnection = session.connection;
+    const prompt = queued.text;
+    const sentAttachments = queued.attachments;
+    updateHistoryForStartedPrompt(activeConnection, prompt, sentAttachments);
 
     const userMessage: ConversationMessage = {
       id: makeMessageId("user"),
@@ -1803,16 +2104,16 @@ function App() {
       }],
       state: "streaming",
     };
-    const sessionId = activeConnection.sessionId;
     activeAssistantIds.current.set(sessionId, assistantMessage.id);
     setSessionMessages(sessionId, (current) => [...current, userMessage, assistantMessage]);
     updateSessionView(sessionId, (session) => ({
       ...session,
-      draft: "",
-      attachments: [],
       running: true,
+      queuePaused: false,
+      queuedPrompts: session.queuedPrompts.filter((item) => item.id !== queued.id),
     }));
 
+    let shouldContinueQueue = true;
     try {
       const result = await host.grok.prompt({
         sessionId,
@@ -1823,6 +2124,7 @@ function App() {
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === assistantMessage.id ? (() => {
           const state = stateFromStopReason(result.stopReason);
+          if (state === "error") shouldContinueQueue = false;
           const finished = reconcileFallbackResponse(
             addFallbackThought(finishRun(message, endedAt, terminalToolStatus(state)), result.thought),
             result.text,
@@ -1836,6 +2138,7 @@ function App() {
         })() : message
       ));
     } catch (error) {
+      shouldContinueQueue = false;
       const endedAt = Date.now();
       setSessionMessages(sessionId, (current) => current.map((message) =>
         message.id === assistantMessage.id
@@ -1843,14 +2146,118 @@ function App() {
           : message
       ));
     } finally {
-      setSessionRunning(sessionId, false);
       activeAssistantIds.current.delete(sessionId);
       const unread = activeSessionIdRef.current !== sessionId;
       setSessionHistory((current) => current.map((session) => session.sessionId === sessionId
         ? { ...session, unread }
         : session));
       void refreshSessionHistory();
+
+      if (!shouldContinueQueue) {
+        updateSessionView(sessionId, (session) => ({
+          ...session,
+          running: false,
+          queuePaused: session.queuedPrompts.length > 0,
+        }));
+        return;
+      }
+
+      const settingsApplied = await applyPendingSessionSettings(sessionId);
+      const latest = sessionViewsRef.current[sessionId];
+      if (
+        !settingsApplied
+        || !latest
+        || latest.queuePaused
+        || steeringSessionIdsRef.current.has(sessionId)
+      ) {
+        setSessionRunning(sessionId, false);
+        return;
+      }
+      const nextPrompt = latest.queuedPrompts[0];
+      if (!nextPrompt) {
+        setSessionRunning(sessionId, false);
+        return;
+      }
+      void runPrompt(sessionId, nextPrompt);
     }
+  }
+
+  async function submitDraft(behavior: FollowUpBehavior = followUpBehavior) {
+    const currentSessionId = activeSessionIdRef.current;
+    const currentSession = currentSessionId
+      ? sessionViewsRef.current[currentSessionId]
+      : undefined;
+    const submittedDraft = currentSession?.draft ?? draft;
+    const prompt = submittedDraft.trim();
+    const sentAttachments = [...(currentSession?.attachments ?? attachments)];
+    if (
+      (!prompt && sentAttachments.length === 0)
+      || appUpdating
+      || sessionTransitioning
+      || activeApprovalModeChanging
+      || settingsApplying
+      || submissionInFlight.current
+      || (currentSessionId !== null && steeringSessionIdsRef.current.has(currentSessionId))
+    ) return;
+
+    if (currentSessionId && currentSession?.running) {
+      const queued = createQueuedPrompt(prompt, sentAttachments);
+      if (behavior === "steer" && sentAttachments.length === 0) {
+        setSessionSteering(currentSessionId, true);
+        updateSessionView(currentSessionId, (session) => ({
+          ...session,
+          draft: "",
+          attachments: [],
+        }));
+        setConnectionNotice(null);
+        let steeringError: string | null = null;
+        try {
+          steeringError = await sendSteeringMessage(currentSessionId, prompt);
+        } finally {
+          setSessionSteering(currentSessionId, false);
+        }
+        if (steeringError) {
+          queuePrompt(currentSessionId, queued, false);
+          setConnectionNotice(`The current turn could not be steered, so the message was queued. ${steeringError}`);
+        }
+        await continueSessionQueueIfIdle(currentSessionId);
+        return;
+      }
+      queuePrompt(currentSessionId, queued);
+      if (behavior === "steer" && sentAttachments.length > 0) {
+        setConnectionNotice("Follow-ups with attachments are queued for the next turn.");
+      }
+      return;
+    }
+    if (
+      currentSessionId
+      && currentSession?.queuePaused
+      && currentSession.queuedPrompts.length > 0
+    ) {
+      queuePrompt(currentSessionId, createQueuedPrompt(prompt, sentAttachments));
+      return;
+    }
+
+    submissionInFlight.current = true;
+    try {
+      const activeConnection = await ensureSessionForSubmission();
+      if (!activeConnection) return;
+      if (activeSessionIdRef.current !== activeConnection.sessionId) return;
+      const queued = createQueuedPrompt(prompt, sentAttachments);
+      clearSubmittedComposer(
+        activeConnection.sessionId,
+        submittedDraft,
+        sentAttachments,
+      );
+      void runPrompt(activeConnection.sessionId, queued);
+    } finally {
+      submissionInFlight.current = false;
+    }
+  }
+
+  function submitTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void submitDraft();
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -1870,7 +2277,10 @@ function App() {
         setActiveCommandSuggestion(event.key === "Home" ? 0 : commandSuggestions.length - 1);
         return;
       }
-      if ((event.key === "Enter" && !event.shiftKey) || (event.key === "Tab" && !event.shiftKey)) {
+      if (
+        (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey)
+        || (event.key === "Tab" && !event.shiftKey)
+      ) {
         event.preventDefault();
         selectAvailableCommand(commandSuggestions[activeCommandSuggestion] ?? commandSuggestions[0]);
         return;
@@ -1884,6 +2294,10 @@ function App() {
 
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      if (running && (event.metaKey || event.ctrlKey)) {
+        void submitDraft(followUpBehavior === "queue" ? "steer" : "queue");
+        return;
+      }
       event.currentTarget.form?.requestSubmit();
     }
   }
@@ -1930,9 +2344,173 @@ function App() {
     });
   }
 
-  async function cancelRun() {
+  function editSessionQueuedPrompt(promptId: string, text: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || steeringSessionIdsRef.current.has(sessionId)) return;
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      queuedPrompts: editQueuedPrompt(session.queuedPrompts, promptId, text),
+    }));
+  }
+
+  function moveSessionQueuedPrompt(promptId: string, direction: -1 | 1) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || steeringSessionIdsRef.current.has(sessionId)) return;
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      queuedPrompts: moveQueuedPrompt(session.queuedPrompts, promptId, direction),
+    }));
+  }
+
+  function removeSessionQueuedPrompt(promptId: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || steeringSessionIdsRef.current.has(sessionId)) return;
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      queuedPrompts: session.queuedPrompts.filter((prompt) => prompt.id !== promptId),
+    }));
+  }
+
+  function clearSessionQueue() {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || steeringSessionIdsRef.current.has(sessionId)) return;
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      queuedPrompts: [],
+      queuePaused: false,
+    }));
+  }
+
+  async function steerSessionQueuedPrompt(promptId: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || steeringSessionIdsRef.current.has(sessionId)) return;
+    const session = sessionViewsRef.current[sessionId];
+    const reserved = session ? reserveQueuedPrompt(session.queuedPrompts, promptId) : null;
+    if (!session?.running || !reserved || reserved.prompt.attachments.length > 0) return;
+
+    setSessionSteering(sessionId, true);
+    updateSessionView(sessionId, (current) => ({
+      ...current,
+      queuedPrompts: reserved.remaining,
+    }));
+    setConnectionNotice(null);
+    let steeringError: string | null = null;
+    try {
+      steeringError = await sendSteeringMessage(sessionId, reserved.prompt.text);
+    } finally {
+      setSessionSteering(sessionId, false);
+    }
+    if (steeringError) {
+      updateSessionView(sessionId, (current) => ({
+        ...current,
+        queuedPrompts: restoreQueuedPrompt(
+          current.queuedPrompts,
+          reserved.prompt,
+          reserved.index,
+        ),
+      }));
+      setConnectionNotice(`The queued message could not steer the current turn, so it stayed queued. ${steeringError}`);
+    }
+    await continueSessionQueueIfIdle(sessionId);
+  }
+
+  async function runSessionQueuedPromptNow(promptId: string) {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || steeringSessionIdsRef.current.has(sessionId)) return;
+    const current = sessionViewsRef.current[sessionId];
+    const selected = current?.queuedPrompts.find((prompt) => prompt.id === promptId);
+    if (!current?.running || !selected) return;
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      queuePaused: false,
+      queuedPrompts: [
+        selected,
+        ...session.queuedPrompts.filter((prompt) => prompt.id !== promptId),
+      ],
+    }));
+    await cancelCurrentTurn(false);
+  }
+
+  async function resumeSessionQueueById(sessionId: string) {
+    const current = sessionViewsRef.current[sessionId];
+    if (!current || steeringSessionIdsRef.current.has(sessionId)) return;
+    if (current.running) {
+      updateSessionView(sessionId, (session) => ({ ...session, queuePaused: false }));
+      return;
+    }
+    if (current.queuedPrompts.length === 0) {
+      updateSessionView(sessionId, (session) => ({ ...session, queuePaused: false }));
+      return;
+    }
+
+    updateSessionView(sessionId, (session) => ({
+      ...session,
+      running: true,
+      queuePaused: false,
+    }));
+
+    if (current.disconnected) {
+      if (activeSessionIdRef.current !== sessionId) {
+        updateSessionView(sessionId, (session) => ({
+          ...session,
+          running: false,
+          queuePaused: true,
+        }));
+        return;
+      }
+      const reconnected = await reconnectSession(sessionId);
+      if (
+        !reconnected
+        || reconnected.sessionId !== sessionId
+        || activeSessionIdRef.current !== sessionId
+      ) {
+        updateSessionView(sessionId, (session) => ({
+          ...session,
+          running: false,
+          queuePaused: true,
+        }));
+        return;
+      }
+    }
+
+    const settingsApplied = await applyPendingSessionSettings(sessionId);
+    const latest = sessionViewsRef.current[sessionId];
+    if (
+      !settingsApplied
+      || !latest
+      || latest.queuePaused
+      || steeringSessionIdsRef.current.has(sessionId)
+    ) {
+      setSessionRunning(sessionId, false);
+      return;
+    }
+    const nextPrompt = latest.queuedPrompts[0];
+    if (nextPrompt) void runPrompt(sessionId, nextPrompt);
+    else setSessionRunning(sessionId, false);
+  }
+
+  async function continueSessionQueueIfIdle(sessionId: string) {
+    const current = sessionViewsRef.current[sessionId];
+    if (
+      !current
+      || current.running
+      || current.queuePaused
+      || current.queuedPrompts.length === 0
+      || steeringSessionIdsRef.current.has(sessionId)
+    ) return;
+    await resumeSessionQueueById(sessionId);
+  }
+
+  async function resumeSessionQueue() {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    await resumeSessionQueueById(sessionId);
+  }
+
+  async function cancelCurrentTurn(pauseQueue: boolean) {
     const sessionId = connection?.sessionId;
     if (!sessionId) return;
+    updateSessionView(sessionId, (session) => ({ ...session, queuePaused: pauseQueue }));
     try {
       await host.grok.sessions.cancel(sessionId);
       const messageId = activeAssistantIds.current.get(sessionId);
@@ -1951,6 +2529,10 @@ function App() {
     }
   }
 
+  async function cancelRun() {
+    await cancelCurrentTurn(true);
+  }
+
   async function respondToPermission(optionId: string | null) {
     if (!permission) return;
     const current = permission;
@@ -1964,11 +2546,16 @@ function App() {
       );
       resolveSessionPermission(current.sessionId, current.requestId);
       if (enablesAlwaysApprove(selectedOption)) {
-        setApprovalMode("alwaysApprove");
         updateSessionView(current.sessionId, (session) => ({
           ...session,
           connection: { ...session.connection, approvalMode: "alwaysApprove" },
         }));
+        if (activeSessionIdRef.current === current.sessionId) {
+          setApprovalMode(
+            sessionViewsRef.current[current.sessionId]?.pendingSettings?.approvalMode
+            ?? "alwaysApprove",
+          );
+        }
       }
     } catch (error) {
       setConnectionNotice(String(error));
@@ -2119,6 +2706,7 @@ function App() {
             overlayTitlebar={overlayTitlebar}
             section={activeSettingsSection}
             appearance={appearance}
+            followUpBehavior={followUpBehavior}
             appVersion={appVersion}
             cliVersion={connection?.cliVersion ?? status?.cliVersion ?? null}
             connected={connection !== null}
@@ -2133,6 +2721,7 @@ function App() {
             archivedActionsDisabled={sidebarActionsDisabled}
             onCheckForUpdates={() => void checkForAppUpdate(true)}
             onAppearanceChange={setAppearance}
+            onFollowUpBehaviorChange={changeFollowUpBehavior}
             onInstallUpdate={() => void installAppUpdate()}
             onSignOut={() => void signOut()}
             onRestoreArchived={(sessionId) => void mutateSessionHistory("restore", { sessionId })}
@@ -2248,8 +2837,21 @@ function App() {
             onAddWorkspace: chooseAndAddWorkspace,
           } : null}
           running={running}
+          steering={steering}
+          followUpBehavior={followUpBehavior}
           appUpdating={appUpdating}
           sessionTransitioning={sessionTransitioning}
+          queuedPrompts={queuedPrompts}
+          queuePaused={queuePaused}
+          pendingSettingLabels={pendingSettingLabels}
+          settingsApplying={settingsApplying}
+          onEditQueuedPrompt={editSessionQueuedPrompt}
+          onMoveQueuedPrompt={moveSessionQueuedPrompt}
+          onRemoveQueuedPrompt={removeSessionQueuedPrompt}
+          onSteerQueuedPrompt={(promptId) => void steerSessionQueuedPrompt(promptId)}
+          onRunQueuedPromptNow={(promptId) => void runSessionQueuedPromptNow(promptId)}
+          onResumeQueue={() => void resumeSessionQueue()}
+          onClearQueue={clearSessionQueue}
           plan={plan}
           attachments={attachments}
           attachmentBusy={attachmentBusy}
@@ -2274,8 +2876,9 @@ function App() {
           onApprovalModeChange={(nextMode) => void changeApprovalMode(nextMode)}
           model={{
             connected: connection !== null,
-            models: connection?.models ?? pendingModels,
-            busy: running || appUpdating || sessionTransitioning || activeApprovalModeChanging,
+            models: composerModels,
+            busy: appUpdating || sessionTransitioning || activeApprovalModeChanging || settingsApplying,
+            pending: Boolean(pendingSettings?.modelId || pendingSettings?.reasoningEffort),
             onLoad: loadModels,
             onChange: changeModel,
             onReasoningChange: changeReasoningEffort,

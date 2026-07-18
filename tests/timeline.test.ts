@@ -37,6 +37,20 @@ test("groups adjacent read and search tools while preserving response boundaries
   ]);
 });
 
+test("keeps steering direction visible between response sections", () => {
+  const sections = sectionTimeline(projectTimeline([
+    { id: "response-1", kind: "response", text: "First response" },
+    { id: "steer-1", kind: "steer", text: "Use the existing API." },
+    { id: "response-2", kind: "response", text: "Revised response" },
+  ]));
+
+  assert.deepEqual(sections.map((section) => section.kind), [
+    "response",
+    "steer",
+    "response",
+  ]);
+});
+
 test("summarizes grouped tools with active and interrupted states", () => {
   const tools = [
     { ...tool("one", "read", "in_progress"), title: "src/App.tsx" },

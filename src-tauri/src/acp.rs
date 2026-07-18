@@ -29,6 +29,7 @@ const MAX_PERMISSION_OPTION_ID_CHARS: usize = 160;
 const MAX_ACP_ERROR_MESSAGE_CHARS: usize = 800;
 const COMMANDS_LIST_METHOD: &str = "_x.ai/commands/list";
 const SESSION_INFO_METHOD: &str = "_x.ai/session/info";
+const INTERJECT_METHOD: &str = "_x.ai/interject";
 
 type PendingResponse = oneshot::Sender<Result<Value, String>>;
 type PendingResponses = HashMap<u64, PendingResponse>;
@@ -660,6 +661,20 @@ impl AcpTransport {
         validate_set_model_response(&response, model_id)
     }
 
+    pub async fn interject(
+        &self,
+        session_id: &str,
+        text: &str,
+        interjection_id: &str,
+    ) -> Result<(), String> {
+        self.request(
+            INTERJECT_METHOD,
+            interject_params(session_id, text, interjection_id),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_approval_mode(
         &self,
         session_id: &str,
@@ -1237,6 +1252,14 @@ fn approval_mode_prompt_params(session_id: &str, approval_mode: ApprovalMode) ->
         ApprovalMode::AlwaysApprove => "/always-approve on",
     };
     prompt_params(session_id, command, &[])
+}
+
+fn interject_params(session_id: &str, text: &str, interjection_id: &str) -> Value {
+    json!({
+        "sessionId": session_id,
+        "text": text,
+        "interjectionId": interjection_id,
+    })
 }
 
 fn set_model_params(session_id: &str, model_id: &str, reasoning_effort: Option<&str>) -> Value {
@@ -1855,6 +1878,93 @@ mod tests {
     fn grok_extension_methods_use_the_acp_wire_prefix() {
         assert_eq!(COMMANDS_LIST_METHOD, "_x.ai/commands/list");
         assert_eq!(SESSION_INFO_METHOD, "_x.ai/session/info");
+        assert_eq!(INTERJECT_METHOD, "_x.ai/interject");
+    }
+
+    #[test]
+    fn builds_interjection_params_for_the_requested_session() {
+        assert_eq!(
+            interject_params("session-1", "Use the existing parser.", "steer-1"),
+            json!({
+                "sessionId": "session-1",
+                "text": "Use the existing parser.",
+                "interjectionId": "steer-1",
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sends_and_correlates_interjection_requests() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "groky-interject-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after the epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&test_dir).expect("test directory should be created");
+        let marker = test_dir.join("requests.jsonl");
+        let agent = test_dir.join("fake-agent.sh");
+        let script = format!(
+            r#"#!/bin/sh
+IFS= read -r first
+printf '%s\n' "$first" > '{}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"accepted":true}}}}'
+IFS= read -r second
+printf '%s\n' "$second" >> '{}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"error":{{"code":-32000,"message":"interjection rejected"}}}}'
+while IFS= read -r ignored; do :; done
+"#,
+            marker.display(),
+            marker.display(),
+        );
+        std::fs::write(&agent, script).expect("fake ACP agent should be written");
+        let mut permissions = std::fs::metadata(&agent)
+            .expect("fake ACP agent metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&agent, permissions).expect("fake ACP agent should be executable");
+
+        let transport = AcpTransport::spawn(&agent, &test_dir, ApprovalMode::Ask, None)
+            .await
+            .expect("fake ACP transport should start");
+        let accepted = transport
+            .interject("session-1", "Use the parser.", "steer-1")
+            .await;
+        let rejected = transport
+            .interject("session-2", "Keep the API.", "steer-2")
+            .await;
+        transport.shutdown().await;
+
+        let requests = std::fs::read_to_string(&marker)
+            .expect("fake ACP agent should capture both requests")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("request should be JSON"))
+            .collect::<Vec<_>>();
+        let _ = std::fs::remove_dir_all(&test_dir);
+
+        assert!(accepted.is_ok());
+        assert_eq!(
+            rejected.expect_err("the second response should reject its matching request"),
+            "interjection rejected"
+        );
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["id"], 1);
+        assert_eq!(requests[0]["method"], INTERJECT_METHOD);
+        assert_eq!(
+            requests[0]["params"],
+            interject_params("session-1", "Use the parser.", "steer-1")
+        );
+        assert_eq!(requests[1]["id"], 2);
+        assert_eq!(requests[1]["method"], INTERJECT_METHOD);
+        assert_eq!(
+            requests[1]["params"],
+            interject_params("session-2", "Keep the API.", "steer-2")
+        );
     }
 
     #[test]

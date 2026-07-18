@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   addFallbackThought,
+  addSteeringMarker,
   applySessionUpdateToMessage,
   reconcileFallbackResponse,
   sessionReplayProjection,
@@ -15,6 +16,69 @@ function sequentialIds() {
   let nextId = 0;
   return (prefix: string) => `${prefix}-${++nextId}`;
 }
+
+test("places steering direction at the point it was sent", () => {
+  const createMessageId = sequentialIds();
+  const withThought = applySessionUpdateToMessage(
+    streamingMessage(),
+    { sessionId: "session-1", kind: "agent_thought_chunk", text: "Initial approach" },
+    1_100,
+    createMessageId,
+  );
+  const steered = addSteeringMarker(
+    withThought,
+    "Keep the existing API.",
+    1_250,
+    createMessageId,
+  );
+  const continued = applySessionUpdateToMessage(
+    steered,
+    { sessionId: "session-1", kind: "agent_message_chunk", text: "Updated plan" },
+    1_300,
+    createMessageId,
+  );
+
+  assert.deepEqual(continued.timeline, [
+    {
+      id: "thought-1",
+      kind: "thought",
+      text: "Initial approach",
+      open: false,
+      startedAt: 1_100,
+      endedAt: 1_250,
+      elapsedMs: 150,
+    },
+    { id: "steer-2", kind: "steer", text: "Keep the existing API." },
+    { id: "response-3", kind: "response", text: "Updated plan" },
+  ]);
+});
+
+test("places fallback-only output after the latest steering direction", () => {
+  const createMessageId = sequentialIds();
+  const beforeSteer = applySessionUpdateToMessage(
+    streamingMessage(),
+    { sessionId: "session-1", kind: "agent_message_chunk", text: "Before." },
+    1_100,
+    createMessageId,
+  );
+  const steered = addSteeringMarker(
+    beforeSteer,
+    "Change course.",
+    1_200,
+    createMessageId,
+  );
+  const reconciled = reconcileFallbackResponse(
+    steered,
+    "Before. After.",
+    createMessageId,
+  );
+
+  assert.deepEqual(reconciled.timeline, [
+    { id: "response-1", kind: "response", text: "Before." },
+    { id: "steer-2", kind: "steer", text: "Change course." },
+    { id: "response-3", kind: "response", text: " After." },
+  ]);
+});
 
 function streamingMessage(): ConversationMessage {
   return {

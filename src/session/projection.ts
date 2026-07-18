@@ -54,6 +54,22 @@ export function addFallbackThought(
   };
 }
 
+export function addSteeringMarker(
+  message: ConversationMessage,
+  text: string,
+  now: number,
+  createMessageId: MessageIdFactory = makeMessageId,
+) {
+  const finished = finishThought(message, now);
+  return {
+    ...finished,
+    timeline: [
+      ...(finished.timeline ?? []),
+      { id: createMessageId("steer"), kind: "steer" as const, text },
+    ],
+  };
+}
+
 export function reconcileFallbackResponse(
   message: ConversationMessage,
   text: string,
@@ -66,17 +82,23 @@ export function reconcileFallbackResponse(
   const responseIndexes = timeline.flatMap((item, index) => (
     item.kind === "response" ? [index] : []
   ));
+  const lastSteeringIndex = timeline.reduce((latest, item, index) => (
+    item.kind === "steer" ? index : latest
+  ), -1);
 
   if (responseIndexes.length === 0) {
     timeline.push({ id: createMessageId("response"), kind: "response", text: resolvedText });
   } else if (resolvedText.startsWith(message.text) && resolvedText.length > message.text.length) {
     const lastResponseIndex = responseIndexes[responseIndexes.length - 1];
     const lastResponse = timeline[lastResponseIndex];
+    const remainingText = resolvedText.slice(message.text.length);
 
-    if (lastResponse.kind === "response") {
+    if (lastResponseIndex < lastSteeringIndex) {
+      timeline.push({ id: createMessageId("response"), kind: "response", text: remainingText });
+    } else if (lastResponse.kind === "response") {
       timeline[lastResponseIndex] = {
         ...lastResponse,
-        text: lastResponse.text + resolvedText.slice(message.text.length),
+        text: lastResponse.text + remainingText,
       };
     }
   }

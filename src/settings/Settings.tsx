@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { AppearancePreference } from "../appearance";
 import type { AppUpdateInfo } from "../host/types";
-import type { SessionConfigOption, SessionUsage } from "../session/types";
+import type { FollowUpBehavior, SessionConfigOption, SessionUsage } from "../session/types";
 import { formatTokenCount } from "../shared/format";
 import { workspaceName } from "../shared/path";
 import type { SidebarSessionSummary } from "../sidebar/types";
@@ -33,6 +33,8 @@ const APPEARANCE_OPTIONS: Array<{
   { id: "light", label: "Light", description: "Use the light appearance", icon: "sun" },
   { id: "dark", label: "Dark", description: "Use the dark appearance", icon: "moon" },
 ];
+
+const FOLLOW_UP_BEHAVIORS = ["queue", "steer"] as const;
 
 const ARCHIVED_SESSION_COLLATOR = new Intl.Collator(undefined, {
   numeric: true,
@@ -112,6 +114,7 @@ export function SettingsScreen({
   overlayTitlebar,
   section,
   appearance,
+  followUpBehavior,
   appVersion,
   cliVersion,
   connected,
@@ -126,6 +129,7 @@ export function SettingsScreen({
   archivedActionsDisabled,
   onCheckForUpdates,
   onAppearanceChange,
+  onFollowUpBehaviorChange,
   onInstallUpdate,
   onSignOut,
   onRestoreArchived,
@@ -135,6 +139,7 @@ export function SettingsScreen({
   overlayTitlebar: boolean;
   section: SettingsSection;
   appearance: AppearancePreference;
+  followUpBehavior: FollowUpBehavior;
   appVersion: string | null;
   cliVersion: string | null;
   connected: boolean;
@@ -149,6 +154,7 @@ export function SettingsScreen({
   archivedActionsDisabled: boolean;
   onCheckForUpdates: () => void;
   onAppearanceChange: (appearance: AppearancePreference) => void;
+  onFollowUpBehaviorChange: (behavior: FollowUpBehavior) => void;
   onInstallUpdate: () => void;
   onSignOut: () => void;
   onRestoreArchived: (sessionId: string) => void;
@@ -241,6 +247,26 @@ export function SettingsScreen({
                   <Icon name={update ? "download" : "refresh"} size={14} />
                   {updateButtonLabel}
                 </button>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <strong>Messages sent while Grok works</strong>
+                  <small>Choose whether Enter queues a new turn or steers the current one. Cmd/Ctrl+Enter temporarily uses the other behavior.</small>
+                </div>
+                <div className="settings-segmented-control" role="radiogroup" aria-label="Follow-up behavior">
+                  {FOLLOW_UP_BEHAVIORS.map((behavior) => (
+                    <button
+                      className={followUpBehavior === behavior ? "selected" : ""}
+                      type="button"
+                      role="radio"
+                      aria-checked={followUpBehavior === behavior}
+                      key={behavior}
+                      onClick={() => onFollowUpBehaviorChange(behavior)}
+                    >
+                      {behavior === "queue" ? "Queue" : "Steer"}
+                    </button>
+                  ))}
+                </div>
               </div>
               {updateNotice && <p className="settings-inline-notice" role="status">{updateNotice}</p>}
             </div>

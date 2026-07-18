@@ -775,6 +775,37 @@
   white-space: nowrap;
 }
 
+.settings-segmented-control {
+  display: inline-flex !important;
+  min-width: auto !important;
+  grid-template-columns: none !important;
+  gap: 2px !important;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.settings-segmented-control button {
+  min-width: 66px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: 9px var(--mono);
+}
+
+.settings-segmented-control button:hover {
+  color: var(--text);
+}
+
+.settings-segmented-control button.selected {
+  background: var(--surface);
+  color: var(--signal-strong);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.09), inset 0 0 0 1px color-mix(in srgb, var(--signal) 18%, var(--line));
+}
+
 .settings-status {
   display: inline-flex;
   align-items: center;
@@ -1307,6 +1338,44 @@
   margin-bottom: 0;
 }
 
+.steering-marker {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--signal) 32%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--signal) 7%, var(--surface));
+  color: var(--text);
+}
+
+.steering-marker > svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--signal);
+}
+
+.steering-marker > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.steering-marker small {
+  color: var(--muted);
+  font: 650 9px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.steering-marker strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .turn-trace .thought-heading {
   min-height: 22px;
 }
@@ -1321,6 +1390,13 @@
 }
 
 .assistant-response + .turn-trace {
+  margin-top: 8px;
+}
+
+.assistant-response + .steering-marker,
+.steering-marker + .assistant-response,
+.turn-trace + .steering-marker,
+.steering-marker + .turn-trace {
   margin-top: 8px;
 }
 
