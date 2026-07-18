@@ -13,7 +13,7 @@ use std::{
 };
 use tauri::{async_runtime, AppHandle, Emitter, State};
 
-use super::{inspect_attachment_paths, FileAttachment, GrokRuntime};
+use super::{inspect_attachment_paths, read_workspace_history, FileAttachment, GrokRuntime};
 
 const MAX_DIRECTORY_ENTRIES: usize = 5_000;
 const MAX_RELATIVE_PATH_BYTES: usize = 8 * 1024;
@@ -24,7 +24,7 @@ const WORKSPACE_CHANGED_EVENT: &str = "groky://workspace-changed";
 
 #[derive(Default)]
 pub(crate) struct WorkspaceWatcherRuntime {
-    watchers: Mutex<HashMap<String, (String, RecommendedWatcher)>>,
+    watchers: Mutex<HashMap<String, RecommendedWatcher>>,
 }
 
 impl WorkspaceWatcherRuntime {
@@ -38,7 +38,7 @@ impl WorkspaceWatcherRuntime {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceChangedEvent {
-    session_id: String,
+    watch_id: String,
     paths: Vec<String>,
 }
 
@@ -92,18 +92,70 @@ pub(crate) struct WorkspaceFilePreview {
     truncated: bool,
 }
 
-async fn session_working_directory(
-    state: &GrokRuntime,
-    session_id: &str,
-) -> Result<PathBuf, String> {
-    state
-        .inner
-        .lock()
-        .await
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceRootTarget<'a> {
+    Session(&'a str),
+    RegisteredWorkingDirectory(&'a str),
+}
+
+fn workspace_root_target<'a>(
+    session_id: Option<&'a str>,
+    working_directory: Option<&'a str>,
+) -> Result<WorkspaceRootTarget<'a>, String> {
+    match (session_id, working_directory) {
+        (Some(session_id), None) if !session_id.is_empty() => {
+            Ok(WorkspaceRootTarget::Session(session_id))
+        }
+        (None, Some(working_directory)) if !working_directory.is_empty() => Ok(
+            WorkspaceRootTarget::RegisteredWorkingDirectory(working_directory),
+        ),
+        _ => Err("Choose either an active session or a registered working directory.".to_string()),
+    }
+}
+
+async fn session_workspace_root(state: &GrokRuntime, session_id: &str) -> Result<PathBuf, String> {
+    let runtime = state.inner.lock().await;
+    let session = runtime
         .sessions
         .get(session_id)
-        .map(|session| PathBuf::from(&session.working_directory))
-        .ok_or_else(|| "That session is not active in Groky.".to_string())
+        .ok_or_else(|| "That session is not active in Groky.".to_string())?;
+    resolve_session_workspace_root(session.workspace.as_deref(), &session.working_directory)
+}
+
+fn resolve_session_workspace_root(
+    workspace: Option<&str>,
+    working_directory: &str,
+) -> Result<PathBuf, String> {
+    workspace
+        .map(|_| PathBuf::from(working_directory))
+        .ok_or_else(|| "Files are unavailable for standalone sessions.".to_string())
+}
+
+async fn workspace_root(
+    app: &AppHandle,
+    state: &GrokRuntime,
+    session_id: Option<&str>,
+    working_directory: Option<&str>,
+) -> Result<PathBuf, String> {
+    match workspace_root_target(session_id, working_directory)? {
+        WorkspaceRootTarget::Session(session_id) => session_workspace_root(state, session_id).await,
+        WorkspaceRootTarget::RegisteredWorkingDirectory(working_directory) => {
+            let registered_working_directories = read_workspace_history(app)
+                .await?
+                .into_iter()
+                .map(|workspace| PathBuf::from(workspace.path))
+                .collect::<Vec<_>>();
+            let working_directory = working_directory.to_string();
+            async_runtime::spawn_blocking(move || {
+                resolve_registered_working_directory(
+                    &working_directory,
+                    &registered_working_directories,
+                )
+            })
+            .await
+            .map_err(|_| "The selected working directory could not be resolved.".to_string())?
+        }
+    }
 }
 
 fn normalize_relative_path(path: &str) -> Result<PathBuf, String> {
@@ -174,6 +226,28 @@ fn open_folder_in_file_manager(path: &Path) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|_| "The folder could not be opened in the system file manager.".to_string())
+}
+
+fn resolve_registered_working_directory(
+    working_directory: &str,
+    registered_working_directories: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let working_directory = PathBuf::from(working_directory)
+        .canonicalize()
+        .map_err(|_| "The selected working directory is unavailable.".to_string())?;
+    if !working_directory.is_dir() {
+        return Err("The selected working directory is not a folder.".to_string());
+    }
+
+    let registered = registered_working_directories.iter().any(|candidate| {
+        candidate
+            .canonicalize()
+            .is_ok_and(|candidate| candidate == working_directory)
+    });
+    if !registered {
+        return Err("This working directory is not in Groky.".to_string());
+    }
+    Ok(working_directory)
 }
 
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
@@ -474,11 +548,19 @@ fn preview_workspace_file(
 
 #[tauri::command]
 pub(crate) async fn workspace_list_directory(
+    app: AppHandle,
     state: State<'_, GrokRuntime>,
-    session_id: String,
+    session_id: Option<String>,
+    working_directory: Option<String>,
     path: String,
 ) -> Result<WorkspaceDirectoryListing, String> {
-    let root = session_working_directory(&state, &session_id).await?;
+    let root = workspace_root(
+        &app,
+        &state,
+        session_id.as_deref(),
+        working_directory.as_deref(),
+    )
+    .await?;
     async_runtime::spawn_blocking(move || list_workspace_directory(&root, &path))
         .await
         .map_err(|_| "The requested folder could not be read.".to_string())?
@@ -486,11 +568,19 @@ pub(crate) async fn workspace_list_directory(
 
 #[tauri::command]
 pub(crate) async fn workspace_inspect_attachment(
+    app: AppHandle,
     state: State<'_, GrokRuntime>,
-    session_id: String,
+    session_id: Option<String>,
+    working_directory: Option<String>,
     path: String,
 ) -> Result<FileAttachment, String> {
-    let root = session_working_directory(&state, &session_id).await?;
+    let root = workspace_root(
+        &app,
+        &state,
+        session_id.as_deref(),
+        working_directory.as_deref(),
+    )
+    .await?;
     async_runtime::spawn_blocking(move || {
         let (path, _) = resolve_workspace_path(&root, &path)?;
         let mut attachments = inspect_attachment_paths(vec![path])?;
@@ -504,11 +594,19 @@ pub(crate) async fn workspace_inspect_attachment(
 
 #[tauri::command]
 pub(crate) async fn workspace_preview_file(
+    app: AppHandle,
     state: State<'_, GrokRuntime>,
-    session_id: String,
+    session_id: Option<String>,
+    working_directory: Option<String>,
     path: String,
 ) -> Result<WorkspaceFilePreview, String> {
-    let root = session_working_directory(&state, &session_id).await?;
+    let root = workspace_root(
+        &app,
+        &state,
+        session_id.as_deref(),
+        working_directory.as_deref(),
+    )
+    .await?;
     async_runtime::spawn_blocking(move || preview_workspace_file(&root, &path))
         .await
         .map_err(|_| "The requested file could not be previewed.".to_string())?
@@ -516,11 +614,19 @@ pub(crate) async fn workspace_preview_file(
 
 #[tauri::command]
 pub(crate) async fn workspace_open_folder(
+    app: AppHandle,
     state: State<'_, GrokRuntime>,
-    session_id: String,
+    session_id: Option<String>,
+    working_directory: Option<String>,
     path: String,
 ) -> Result<(), String> {
-    let root = session_working_directory(&state, &session_id).await?;
+    let root = workspace_root(
+        &app,
+        &state,
+        session_id.as_deref(),
+        working_directory.as_deref(),
+    )
+    .await?;
     async_runtime::spawn_blocking(move || {
         let (folder, _) = resolve_workspace_path(&root, &path)?;
         if !folder.is_dir() {
@@ -537,12 +643,21 @@ pub(crate) async fn workspace_watch(
     app: AppHandle,
     state: State<'_, GrokRuntime>,
     watcher_state: State<'_, WorkspaceWatcherRuntime>,
-    session_id: String,
+    session_id: Option<String>,
+    working_directory: Option<String>,
     watch_id: String,
 ) -> Result<(), String> {
-    let root = canonical_workspace_root(&session_working_directory(&state, &session_id).await?)?;
+    let root = canonical_workspace_root(
+        &workspace_root(
+            &app,
+            &state,
+            session_id.as_deref(),
+            working_directory.as_deref(),
+        )
+        .await?,
+    )?;
     let event_root = root.clone();
-    let event_session_id = session_id.clone();
+    let event_watch_id = watch_id.clone();
     let event_app = app.clone();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         let Ok(event) = result else { return };
@@ -553,7 +668,7 @@ pub(crate) async fn workspace_watch(
         let _ = event_app.emit(
             WORKSPACE_CHANGED_EVENT,
             WorkspaceChangedEvent {
-                session_id: event_session_id.clone(),
+                watch_id: event_watch_id.clone(),
                 paths,
             },
         );
@@ -567,26 +682,20 @@ pub(crate) async fn workspace_watch(
         .watchers
         .lock()
         .map_err(|_| "Live workspace updates are unavailable.".to_string())?
-        .insert(session_id, (watch_id, watcher));
+        .insert(watch_id, watcher);
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn workspace_unwatch(
     watcher_state: State<'_, WorkspaceWatcherRuntime>,
-    session_id: String,
     watch_id: String,
 ) -> Result<(), String> {
     let mut watchers = watcher_state
         .watchers
         .lock()
         .map_err(|_| "Live workspace updates are unavailable.".to_string())?;
-    if watchers
-        .get(&session_id)
-        .is_some_and(|(active_watch_id, _)| active_watch_id == &watch_id)
-    {
-        watchers.remove(&session_id);
-    }
+    watchers.remove(&watch_id);
     Ok(())
 }
 
@@ -594,8 +703,9 @@ pub(crate) fn workspace_unwatch(
 mod tests {
     use super::{
         list_workspace_directory, normalize_relative_path, preview_workspace_file,
-        resolve_workspace_path, workspace_event_paths, WorkspaceFileKind, WorkspacePreviewKind,
-        MAX_TEXT_PREVIEW_BYTES,
+        resolve_registered_working_directory, resolve_session_workspace_root,
+        resolve_workspace_path, workspace_event_paths, workspace_root_target, WorkspaceFileKind,
+        WorkspacePreviewKind, WorkspaceRootTarget, MAX_TEXT_PREVIEW_BYTES,
     };
     use std::{fs, path::PathBuf};
 
@@ -617,6 +727,56 @@ mod tests {
         assert!(normalize_relative_path("../outside").is_err());
         assert!(normalize_relative_path("folder/../../outside").is_err());
         assert!(normalize_relative_path("/absolute").is_err());
+    }
+
+    #[test]
+    fn resolves_only_registered_working_directories_for_pre_session_file_access() {
+        let registered = temporary_directory("registered-open");
+        let unregistered = temporary_directory("unregistered-open");
+        let registered_paths = vec![registered.clone()];
+
+        assert_eq!(
+            resolve_registered_working_directory(&registered.to_string_lossy(), &registered_paths,)
+                .expect("registered working directory should resolve"),
+            registered
+                .canonicalize()
+                .expect("registered path should exist"),
+        );
+        assert!(resolve_registered_working_directory(
+            &unregistered.to_string_lossy(),
+            &registered_paths,
+        )
+        .is_err());
+
+        fs::remove_dir_all(registered).expect("temporary directory should be removed");
+        fs::remove_dir_all(unregistered).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn rejects_file_access_for_standalone_sessions() {
+        assert!(resolve_session_workspace_root(None, "/standalone").is_err());
+        assert_eq!(
+            resolve_session_workspace_root(Some("/workspace"), "/workspace")
+                .expect("workspace session should allow file access"),
+            PathBuf::from("/workspace"),
+        );
+    }
+
+    #[test]
+    fn requires_exactly_one_workspace_root_target() {
+        assert_eq!(
+            workspace_root_target(Some("session"), None).expect("session target should resolve"),
+            WorkspaceRootTarget::Session("session"),
+        );
+        assert_eq!(
+            workspace_root_target(None, Some("/workspace"))
+                .expect("working directory target should resolve"),
+            WorkspaceRootTarget::RegisteredWorkingDirectory("/workspace"),
+        );
+        assert!(workspace_root_target(None, None).is_err());
+        assert!(workspace_root_target(Some(""), None).is_err());
+        assert!(workspace_root_target(None, Some("")).is_err());
+        assert!(workspace_root_target(Some("session"), Some("/workspace")).is_err());
     }
 
     #[test]

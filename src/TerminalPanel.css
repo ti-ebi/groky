@@ -273,6 +273,15 @@ body.is-dragging-tool-tab * {
   background: var(--tool-hover);
 }
 
+.side-panel-add-menu button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.side-panel-add-menu button:disabled:hover {
+  background: transparent;
+}
+
 .side-panel-content {
   position: relative;
   min-height: 0;
