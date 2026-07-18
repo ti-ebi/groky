@@ -143,6 +143,7 @@ export const host = {
         action: SessionHistoryAction;
         sessionId?: string;
         workspace?: string;
+        allArchived?: boolean;
       }) => command<PersistedSessionSummary[]>("grok_mutate_sessions", options),
       setApprovalMode: (sessionId: string, approvalMode: ApprovalMode) => (
         command<Connection>("grok_set_approval_mode", { sessionId, approvalMode })
