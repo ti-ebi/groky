@@ -664,6 +664,42 @@
   min-width: 0;
 }
 
+.archived-settings-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.archived-delete-all {
+  display: inline-flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line-strong));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent-soft) 52%, var(--surface));
+  color: var(--accent);
+  font-size: 9px;
+  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease, transform 80ms ease;
+}
+
+.archived-delete-all:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line-strong));
+  background: var(--accent-soft);
+}
+
+.archived-delete-all:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+.archived-delete-all:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
 .archived-settings-controls {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(174px, auto);

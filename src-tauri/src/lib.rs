@@ -818,9 +818,19 @@ async fn grok_mutate_sessions(
     action: SessionHistoryAction,
     session_id: Option<String>,
     workspace: Option<String>,
+    all_archived: Option<bool>,
 ) -> Result<Vec<SessionSummary>, String> {
-    if session_id.is_some() == workspace.is_some() {
-        return Err("Choose either one session or one working directory.".to_string());
+    let all_archived = all_archived.unwrap_or(false);
+    let target_count = usize::from(session_id.is_some())
+        + usize::from(workspace.is_some())
+        + usize::from(all_archived);
+    if target_count != 1 {
+        return Err(
+            "Choose one session, one working directory, or all archived chats.".to_string(),
+        );
+    }
+    if all_archived && !matches!(action, SessionHistoryAction::Delete) {
+        return Err("Archived chats can only be deleted together.".to_string());
     }
 
     let _history = state.history.lock().await;
@@ -829,14 +839,16 @@ async fn grok_mutate_sessions(
     let workspace = workspace.as_deref();
     if !sessions
         .iter()
-        .any(|session| session_matches_history_target(session, session_id, workspace))
+        .any(|session| session_matches_history_target(session, session_id, workspace, all_archived))
     {
         return Err("No matching sessions were found.".to_string());
     }
 
     let affected_ids = sessions
         .iter()
-        .filter(|session| session_matches_history_target(session, session_id, workspace))
+        .filter(|session| {
+            session_matches_history_target(session, session_id, workspace, all_archived)
+        })
         .map(|session| session.session_id.clone())
         .collect::<Vec<_>>();
     let forgotten_sessions = {
@@ -873,7 +885,7 @@ async fn grok_mutate_sessions(
         }
     };
 
-    apply_session_history_action(&mut sessions, action, session_id, workspace);
+    apply_session_history_action(&mut sessions, action, session_id, workspace, all_archived);
     write_session_history(&app, &sessions).await?;
     for (session_id, transport) in forgotten_sessions {
         transport.forget_session(&session_id).await;
@@ -2040,9 +2052,11 @@ fn session_matches_history_target(
     session: &PersistedSession,
     session_id: Option<&str>,
     workspace: Option<&str>,
+    all_archived: bool,
 ) -> bool {
     session_id.is_some_and(|id| session.session_id == id)
         || workspace.is_some_and(|path| session.workspace.as_deref() == Some(path))
+        || all_archived && session.archived
 }
 
 fn rename_session_title(
@@ -2062,18 +2076,24 @@ fn apply_session_history_action(
     action: SessionHistoryAction,
     session_id: Option<&str>,
     workspace: Option<&str>,
+    all_archived: bool,
 ) {
     match action {
         SessionHistoryAction::Archive => sessions
             .iter_mut()
-            .filter(|session| session_matches_history_target(session, session_id, workspace))
+            .filter(|session| {
+                session_matches_history_target(session, session_id, workspace, all_archived)
+            })
             .for_each(|session| session.archived = true),
         SessionHistoryAction::Restore => sessions
             .iter_mut()
-            .filter(|session| session_matches_history_target(session, session_id, workspace))
+            .filter(|session| {
+                session_matches_history_target(session, session_id, workspace, all_archived)
+            })
             .for_each(|session| session.archived = false),
-        SessionHistoryAction::Delete => sessions
-            .retain(|session| !session_matches_history_target(session, session_id, workspace)),
+        SessionHistoryAction::Delete => sessions.retain(|session| {
+            !session_matches_history_target(session, session_id, workspace, all_archived)
+        }),
     }
 }
 
@@ -2594,6 +2614,7 @@ mod tests {
             SessionHistoryAction::Archive,
             None,
             Some("/workspace"),
+            false,
         );
         assert!(sessions[0].archived);
         assert!(sessions[1].archived);
@@ -2604,6 +2625,7 @@ mod tests {
             SessionHistoryAction::Restore,
             Some("first"),
             None,
+            false,
         );
         assert!(!sessions[0].archived);
         assert!(sessions[1].archived);
@@ -2613,9 +2635,42 @@ mod tests {
             SessionHistoryAction::Delete,
             None,
             Some("/workspace"),
+            false,
         );
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "standalone");
+    }
+
+    #[test]
+    fn deleting_all_archived_sessions_keeps_active_history() {
+        let session = |session_id: &str, archived: bool| PersistedSession {
+            session_id: session_id.to_string(),
+            title: session_id.to_string(),
+            workspace: Some(format!("/workspace/{session_id}")),
+            working_directory: format!("/workspace/{session_id}"),
+            approval_mode: ApprovalMode::Ask,
+            created_at: 1,
+            updated_at: 1,
+            archived,
+            unread: false,
+        };
+        let mut sessions = vec![
+            session("archived-first", true),
+            session("active", false),
+            session("archived-second", true),
+        ];
+
+        apply_session_history_action(
+            &mut sessions,
+            SessionHistoryAction::Delete,
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "active");
+        assert!(!sessions[0].archived);
     }
 
     #[test]
