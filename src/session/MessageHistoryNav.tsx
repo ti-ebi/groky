@@ -119,4 +119,3 @@ export function MessageHistoryNav({
     </nav>
   );
 }
-

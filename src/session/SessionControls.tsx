@@ -103,7 +103,6 @@ export function ApprovalModeSelector({
     </div>
   );
 }
-
 export function ModelSelector({
   connected,
   models,
@@ -344,4 +343,3 @@ export function ModelSelector({
     </div>
   );
 }
-

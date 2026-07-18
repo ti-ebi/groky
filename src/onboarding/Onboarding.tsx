@@ -189,4 +189,3 @@ function SetupStep({ index, label, detail, state }: { index: string; label: stri
     </li>
   );
 }
-
