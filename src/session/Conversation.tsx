@@ -480,21 +480,27 @@ function TurnStatusBlock({ message }: { message: ConversationMessage }) {
 
 function UserMessage({ message }: { message: ConversationMessage }) {
   return (
-    <div className="user-message" data-history-message-id={message.id}>
-      <div className="user-message-heading">
-        <span className="message-kicker">REQUEST</span>
-        {message.text && <MessageCopyButton text={message.text} subject="request" />}
+    <div className="user-message-turn" data-history-message-id={message.id}>
+      <div className="user-message">
+        <div className="user-message-heading">
+          <span className="message-kicker">REQUEST</span>
+        </div>
+        {message.text && <div className="user-message-copy">{message.text}</div>}
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="message-attachments" aria-label="Attached files">
+            {message.attachments.map((attachment, index) => (
+              <span className="message-attachment" key={`${attachment.name}-${index}`}>
+                <Icon name="paperclip" size={12} />
+                <span>{attachment.name}</span>
+                <small>{formatFileSize(attachment.size)}</small>
+              </span>
+            ))}
+          </div>
+        )}
       </div>
-      {message.text && <div className="user-message-copy">{message.text}</div>}
-      {message.attachments && message.attachments.length > 0 && (
-        <div className="message-attachments" aria-label="Attached files">
-          {message.attachments.map((attachment, index) => (
-            <span className="message-attachment" key={`${attachment.name}-${index}`}>
-              <Icon name="paperclip" size={12} />
-              <span>{attachment.name}</span>
-              <small>{formatFileSize(attachment.size)}</small>
-            </span>
-          ))}
+      {message.text && (
+        <div className="user-message-actions">
+          <MessageCopyButton text={message.text} subject="request" />
         </div>
       )}
     </div>
